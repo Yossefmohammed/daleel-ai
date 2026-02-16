@@ -49,6 +49,19 @@ def load_vectorstore():
         # DEBUG: list collections
         collections = db._client.list_collections()
         st.write(f"📚 Collections in database: {[c.name for c in collections]}")
+
+        # DEBUG: check document count and sample
+        count = db._collection.count()
+        st.write(f"📊 Document count in collection: {count}")
+        if count > 0:
+            # Get first 5 documents to see content
+            all_docs = db._collection.get(limit=5)
+            st.write("📄 Sample document content (first 200 chars each):")
+            for i, doc_text in enumerate(all_docs['documents']):
+                st.write(f"Doc {i+1}: {doc_text[:200]}")
+        else:
+            st.warning("Collection is empty!")
+
         test = db.similarity_search("test", k=1)
         if len(test) == 0:
             raise ValueError("Empty database")
@@ -69,6 +82,14 @@ def load_vectorstore():
                 )
                 test = db.similarity_search("test", k=1)
                 if len(test) > 0:
+                    # Still debug after rebuild success
+                    count = db._collection.count()
+                    st.write(f"📊 Document count after rebuild: {count}")
+                    if count > 0:
+                        all_docs = db._collection.get(limit=5)
+                        st.write("📄 Sample after rebuild:")
+                        for i, doc_text in enumerate(all_docs['documents']):
+                            st.write(f"Doc {i+1}: {doc_text[:200]}")
                     return db
             except Exception:
                 pass
@@ -83,6 +104,14 @@ def load_vectorstore():
             collection_name="company_docs",
             client_settings=CHROMA_SETTINGS
         )
+        # Debug after rebuild
+        count = db._collection.count()
+        st.write(f"📊 Document count after fresh rebuild: {count}")
+        if count > 0:
+            all_docs = db._collection.get(limit=5)
+            st.write("📄 Sample after fresh rebuild:")
+            for i, doc_text in enumerate(all_docs['documents']):
+                st.write(f"Doc {i+1}: {doc_text[:200]}")
         return db
 
 @st.cache_resource
