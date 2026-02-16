@@ -34,21 +34,19 @@ st.title("🤖 Wasla AI Assistant")
 # -------------------- Sidebar Controls --------------------
 with st.sidebar:
     st.header("Controls")
-    if st.button("🗑️ Force Rebuild Database"):
-        try:
-            shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
-            st.success("Database cleared. Please ask a question to rebuild.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Error clearing database: {e}")
-            logging.error(f"Force rebuild failed: {e}")
-
-    if st.button("🧹 Clear chat history"):
-        st.session_state.messages = []
-        st.session_state.feedback_given = {}
-        st.rerun()
-
+    force_rebuild = st.button("🗑️ Force Rebuild Database")
+    clear_chat = st.button("🧹 Clear chat history")
     show_debug = st.checkbox("Show debug info", value=False)
+
+# -------------------- Initialize Session State --------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "feedback_given" not in st.session_state:
+    st.session_state.feedback_given = {}
+if "show_debug" not in st.session_state:
+    st.session_state.show_debug = show_debug
+else:
+    st.session_state.show_debug = show_debug
 
 # -------------------- API Key Check --------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -56,32 +54,38 @@ if not GROQ_API_KEY:
     st.error("❌ GROQ_API_KEY not found in .env file")
     st.stop()
 
-# -------------------- Chroma Client Helper --------------------
+# -------------------- Streamlit Button Handlers --------------------
+if force_rebuild:
+    try:
+        shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
+        st.success("Database cleared. Please ask a question to rebuild.")
+    except Exception as e:
+        st.error(f"Error clearing database: {e}")
+        logging.error(f"Force rebuild failed: {e}")
+
+if clear_chat:
+    st.session_state.messages = []
+    st.session_state.feedback_given = {}
+    st.experimental_rerun()
+
+# -------------------- Chroma Helper Functions --------------------
 def create_chroma_client(persist_dir):
-    """Create a persistent Chroma client with telemetry disabled."""
     return chromadb.PersistentClient(
         path=persist_dir,
         settings=ChromaSettings(anonymized_telemetry=False)
     )
 
-# -------------------- Database Verification (FIXED) --------------------
 def verify_db(persist_dir, embeddings, collection_name="company_docs"):
-    """Verify that the database exists and is non‑empty by checking document count."""
+    """Verify database exists and collection is non-empty."""
     client = create_chroma_client(persist_dir)
-    db = Chroma(
-        client=client,
-        collection_name=collection_name,
-        embedding_function=embeddings
-    )
-    # Simply check that the collection has documents
+    db = Chroma(client=client, collection_name=collection_name, embedding_function=embeddings)
     count = db._collection.count()
     if count == 0:
         raise ValueError("Database exists but collection is empty")
     return db
 
-# -------------------- Load Vector Store (cached) --------------------
-@st.cache_resource(show_spinner="Loading knowledge base...")
-def load_vectorstore():
+def get_or_build_db():
+    """Thread-safe retrieval or rebuild of vectorstore."""
     embeddings = HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
         model_kwargs={"device": "cpu"},
@@ -90,48 +94,24 @@ def load_vectorstore():
     persist_dir = CHROMA_SETTINGS.persist_directory
     os.makedirs(persist_dir, exist_ok=True)
 
-    try:
-        db = verify_db(persist_dir, embeddings)
-        if st.session_state.get("show_debug", False):
-            client = create_chroma_client(persist_dir)
-            collections = client.list_collections()
-            st.write(f"📚 Collections: {[c.name for c in collections]}")
-            count = db._collection.count()
-            st.write(f"📊 Document count: {count}")
-        return db
-    except Exception as e:
-        st.warning(f"Database not usable: {e}. Rebuilding...")
-        logging.warning(f"Database unusable, rebuilding: {e}")
-        gc.collect()
-        time.sleep(1)
-
-        with rebuild_lock:
-            # Double-check after acquiring lock
-            try:
-                db = verify_db(persist_dir, embeddings)
-                return db
-            except Exception:
-                pass
-
-            # Remove corrupted database
+    with rebuild_lock:
+        try:
+            return verify_db(persist_dir, embeddings)
+        except Exception as e:
+            logging.warning(f"DB missing or corrupted: {e}. Rebuilding...")
             if os.path.exists(persist_dir):
                 shutil.rmtree(persist_dir, ignore_errors=True)
                 time.sleep(1)
 
-            # Run ingestion
+            # Run ingestion (temporary build handled in ingest.py)
             from ingest import ingest_documents
             ingest_documents()
-            time.sleep(2)  # Let filesystem settle
+            time.sleep(1)
 
             # Verify newly built database
-            try:
-                db = verify_db(persist_dir, embeddings)
-                return db
-            except Exception as e:
-                logging.error(f"Rebuild verification failed: {e}")
-                raise RuntimeError(f"Database rebuild succeeded but verification failed: {e}")
+            return verify_db(persist_dir, embeddings)
 
-# -------------------- Load LLM (cached) --------------------
+# -------------------- Load LLM --------------------
 @st.cache_resource
 def load_llm():
     return ChatGroq(
@@ -140,19 +120,19 @@ def load_llm():
         temperature=0.4
     )
 
-# -------------------- Build Prompt (Improved) --------------------
+# -------------------- Prompt Builder --------------------
 def build_prompt(context, chat_history, question):
-    system_template = """
+    template = """
 You are Wasla's AI assistant — professional, friendly, and knowledgeable about our company.
 
 Guidelines:
-- Always speak as Wasla, using "we" and "us". Never refer to yourself as a chatbot.
+- Speak as Wasla, using "we" and "us". Never refer to yourself as a chatbot.
 - Answer using ONLY the provided context.
 - If the answer is not in the context, say: "I'm sorry, I couldn't find that information in our documents."
 - Be natural, conversational, and concise.
-- If the user asks a yes/no question, first answer clearly (yes/no), then provide additional relevant information or ask a follow‑up question.
+- If the user asks a yes/no question, first answer clearly (yes/no), then provide relevant info.
 - Do NOT mention internal processes like retrieval, vector databases, or "according to my training".
-- Keep responses helpful and aligned with Wasla's tone: quietly powerful, precise, and focused on long‑term solutions.
+- Keep responses aligned with Wasla's tone: quietly powerful, precise, focused on long-term solutions.
 
 Context:
 {context}
@@ -163,11 +143,11 @@ Chat History:
 User Question:
 {question}
 """
-    return ChatPromptTemplate.from_template(system_template).format(
+    return ChatPromptTemplate.from_template(template).format(
         context=context, chat_history=chat_history, question=question
     )
 
-# -------------------- Retrieve Documents --------------------
+# -------------------- Document Retrieval --------------------
 def retrieve_docs(db, query):
     retriever = db.as_retriever(
         search_type="mmr",
@@ -175,10 +155,10 @@ def retrieve_docs(db, query):
     )
     try:
         return retriever.invoke(query)
-    except sqlite3.OperationalError as e:
-        st.error("⚠️ Database error. Please try the 'Force Rebuild' button in the sidebar.")
-        logging.error(f"Database error on query '{query}': {e}")
-        raise
+    except Exception as e:
+        st.error("⚠️ Database error. Please try 'Force Rebuild' in sidebar.")
+        logging.error(f"Database query error '{query}': {e}")
+        return []
 
 # -------------------- Format Context --------------------
 def format_context(docs):
@@ -194,47 +174,36 @@ def log_unanswered(question, answer):
     if "I couldn't find that information" in answer:
         logging.info(f"UNANSWERED: {question}")
 
-# -------------------- Initialize Session State --------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "feedback_given" not in st.session_state:
-    st.session_state.feedback_given = {}  # maps message index to 'up' or 'down'
-
 # -------------------- Display Chat History --------------------
-for idx, msg in enumerate(st.session_state.messages):
+for idx, msg in enumerate(st.session_state.messages[-50:]):  # limit to last 50 messages
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
-        # If this is an assistant message, show feedback buttons (unless already given)
         if msg["role"] == "assistant" and idx not in st.session_state.feedback_given:
             col1, col2 = st.columns([0.1, 0.1])
             with col1:
                 if st.button("👍", key=f"up_{idx}"):
                     st.session_state.feedback_given[idx] = "up"
                     logging.info(f"Feedback positive for message {idx}")
-                    st.rerun()
             with col2:
                 if st.button("👎", key=f"down_{idx}"):
                     st.session_state.feedback_given[idx] = "down"
                     logging.info(f"Feedback negative for message {idx}")
-                    st.rerun()
 
 # -------------------- User Input --------------------
 user_input = st.chat_input("Ask something about Wasla...")
 
 if user_input:
-    # Add user message
     st.chat_message("user").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
     try:
-        st.session_state["show_debug"] = show_debug
-        db = load_vectorstore()
+        db = get_or_build_db()
         llm = load_llm()
 
         with st.spinner("Searching documents..."):
             docs = retrieve_docs(db, user_input)
 
-        if show_debug:
+        if st.session_state.show_debug:
             st.write(f"**Retrieved {len(docs)} documents**")
             for i, doc in enumerate(docs):
                 with st.expander(f"Chunk {i+1} – Source: {doc.metadata.get('source_file', 'Unknown')}"):
@@ -249,20 +218,18 @@ if user_input:
         final_prompt = build_prompt(context, history_text, user_input)
 
         with st.spinner("Thinking..."):
-            response = llm.invoke(final_prompt)
-            answer = response.content
+            try:
+                response = llm.invoke(final_prompt)
+                answer = response.content
+            except Exception as e:
+                answer = "😓 Sorry, the AI service is unavailable right now."
+                logging.error(f"LLM invocation failed: {e}")
 
-        # Log unanswered questions
         log_unanswered(user_input, answer)
-
-        # Display assistant response
         st.chat_message("assistant").write(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})
-
-        # Rerun to show feedback buttons for the new message
-        st.rerun()
 
     except Exception as e:
         st.error("😓 An unexpected error occurred. Our team has been notified.")
         logging.error(f"Unhandled exception: {e}", exc_info=True)
-        st.exception(e)  # Still show full error in dev; you may remove in production
+        st.exception(e)
