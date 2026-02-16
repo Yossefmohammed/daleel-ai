@@ -43,20 +43,30 @@ CHROMA_DIR = get_writable_chroma_dir()
 # ===============================
 
 def load_documents():
+    print(f"\n🔍 Checking for documents in: {DOCS_DIR}")
     if not DOCS_DIR.exists():
-        raise FileNotFoundError("❌ 'docs' folder not found.")
+        raise FileNotFoundError(f"❌ 'docs' folder not found at {DOCS_DIR}")
+
+    # List all PDF files
+    pdf_files = list(DOCS_DIR.rglob("*.pdf"))
+    print(f"📄 Found {len(pdf_files)} PDF file(s):")
+    for pdf in pdf_files:
+        print(f"   - {pdf.name}")
+
+    if not pdf_files:
+        raise ValueError("❌ No PDF files found in docs/")
 
     documents = []
-    for pdf_file in DOCS_DIR.rglob("*.pdf"):
-        print(f"📄 Loading: {pdf_file.name}")
+    for pdf_file in pdf_files:
+        print(f"\n📂 Loading: {pdf_file.name}")
         loader = PyPDFLoader(str(pdf_file))
         docs = loader.load()
         for doc in docs:
             doc.metadata["source_file"] = pdf_file.name
         documents.extend(docs)
+        print(f"   → {len(docs)} pages loaded")
 
-    if not documents:
-        raise ValueError("❌ No PDF files found in docs/")
+    print(f"\n✅ Total documents loaded: {len(documents)}")
     return documents
 
 # ===============================
