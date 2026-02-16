@@ -17,6 +17,12 @@ load_dotenv()
 st.set_page_config(page_title="Company AI Assistant", page_icon="🤖")
 st.title("🤖 Company AI Assistant")
 
+# ===== FORCE REBUILD BUTTON =====
+if st.sidebar.button("🗑️ Force Rebuild Database"):
+    shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
+    st.rerun()
+# =================================
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("❌ GROQ_API_KEY not found in .env file")
