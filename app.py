@@ -1,7 +1,6 @@
 import os
 import shutil
-import tempfile
-import fcntl
+import threading
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
@@ -10,6 +9,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 from constant import CHROMA_SETTINGS
 
+# Global lock to prevent concurrent rebuilds across threads
+rebuild_lock = threading.Lock()
 
 # ===============================
 # CONFIG
@@ -40,16 +41,13 @@ def load_vectorstore():
     persist_dir = CHROMA_SETTINGS.persist_directory
     os.makedirs(persist_dir, exist_ok=True)
 
-    # Lock file to coordinate rebuilds across processes
-    lock_file_path = os.path.join(tempfile.gettempdir(), "wasla_rebuild.lock")
-
     try:
         db = Chroma(
             persist_directory=persist_dir,
             embedding_function=embeddings,
             collection_name="company_docs"
         )
-        # Simple test to see if collection exists and has documents
+        # Test if collection exists and has documents
         test = db.similarity_search("test", k=1)
         if len(test) == 0:
             raise ValueError("Empty database")
@@ -57,16 +55,9 @@ def load_vectorstore():
     except Exception:
         st.warning("Rebuilding vector database... ⏳")
 
-        # Acquire exclusive lock (block until available)
-        with open(lock_file_path, "w") as lock_file:
-            try:
-                # Try non‑blocking first to show a friendly message
-                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                st.info("Another process is already rebuilding. Waiting...")
-                fcntl.flock(lock_file, fcntl.LOCK_EX)  # wait indefinitely
-
-            # Double‑check if another process already rebuilt while we waited
+        # Acquire threading lock (only one thread rebuilds at a time)
+        with rebuild_lock:
+            # Double-check if another thread already rebuilt while we waited
             try:
                 db = Chroma(
                     persist_directory=persist_dir,
@@ -104,7 +95,7 @@ def load_llm():
     return ChatGroq(
         groq_api_key=GROQ_API_KEY,
         model_name="llama3-8b-8192",
-        temperature=0.4  # balanced natural answers
+        temperature=0.4
     )
 
 
@@ -177,7 +168,6 @@ def format_context(docs):
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display old messages
 for msg in st.session_state.messages:
     if msg["role"] == "user":
         st.chat_message("user").write(msg["content"])
@@ -192,31 +182,23 @@ for msg in st.session_state.messages:
 user_input = st.chat_input("Ask something about our company...")
 
 if user_input:
-    # Show user message
     st.chat_message("user").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # Load components
     db = load_vectorstore()
     llm = load_llm()
 
-    # Retrieve docs
     docs = retrieve_docs(db, user_input)
     context = format_context(docs)
 
-    # Build chat history string
     history_text = ""
     for msg in st.session_state.messages[-6:]:
         role = "User" if msg["role"] == "user" else "Assistant"
         history_text += f"{role}: {msg['content']}\n"
 
-    # Build prompt
     final_prompt = build_prompt(context, history_text, user_input)
-
-    # Get response
     response = llm.invoke(final_prompt)
     answer = response.content
 
-    # Show assistant message
     st.chat_message("assistant").write(answer)
     st.session_state.messages.append({"role": "assistant", "content": answer})

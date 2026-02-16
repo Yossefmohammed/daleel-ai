@@ -1,7 +1,6 @@
 import shutil
 import tempfile
 import sqlite3
-import fcntl
 import time
 from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
@@ -17,13 +16,12 @@ from constant import CHROMA_SETTINGS
 BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
 
-# Determine a writable directory for Chroma DB
 def get_writable_chroma_dir():
     """Return a Path that is writable by both the OS and SQLite."""
     primary_dir = Path(CHROMA_SETTINGS.persist_directory)
     try:
         primary_dir.mkdir(parents=True, exist_ok=True)
-        # Test with a real SQLite file – this catches read-only filesystem issues
+        # Test with a real SQLite file – catches read‑only filesystem issues
         test_db = primary_dir / "test_writable.sqlite"
         conn = sqlite3.connect(str(test_db))
         conn.execute("CREATE TABLE test (id integer)")
@@ -33,7 +31,6 @@ def get_writable_chroma_dir():
         return primary_dir
     except Exception as e:
         print(f"⚠️ Primary directory not fully writable: {e}")
-        # Fallback to a subdirectory of the system temp dir
         fallback = Path(tempfile.gettempdir()) / "wasla_chroma_fallback"
         fallback.mkdir(parents=True, exist_ok=True)
         print(f"ℹ️ Using fallback directory: {fallback}")
@@ -50,22 +47,17 @@ def load_documents():
         raise FileNotFoundError("❌ 'docs' folder not found.")
 
     documents = []
-
     for pdf_file in DOCS_DIR.rglob("*.pdf"):
         print(f"📄 Loading: {pdf_file.name}")
         loader = PyPDFLoader(str(pdf_file))
         docs = loader.load()
-
         for doc in docs:
             doc.metadata["source_file"] = pdf_file.name
-
         documents.extend(docs)
 
     if not documents:
         raise ValueError("❌ No PDF files found in docs/")
-
     return documents
-
 
 # ===============================
 # SPLIT DOCUMENTS
@@ -77,11 +69,9 @@ def split_documents(documents):
         chunk_overlap=200,
         separators=["\n\n", "\n", ".", "!", "?", " ", ""]
     )
-
     chunks = splitter.split_documents(documents)
     print(f"🔹 Created {len(chunks)} chunks.")
     return chunks
-
 
 # ===============================
 # CREATE EMBEDDINGS
@@ -94,62 +84,44 @@ def create_embeddings():
         encode_kwargs={"normalize_embeddings": True}
     )
 
+# ===============================
+# BUILD VECTOR DATABASE (with retry)
+# ===============================
+
+def build_vectorstore(chunks, embeddings, retries=3):
+    for attempt in range(retries):
+        try:
+            if CHROMA_DIR.exists():
+                print("⚠️ Resetting existing Chroma database...")
+                shutil.rmtree(CHROMA_DIR)
+
+            vectordb = Chroma.from_documents(
+                documents=chunks,
+                embedding=embeddings,
+                persist_directory=str(CHROMA_DIR)
+            )
+            vectordb.persist()
+            print("✅ Chroma DB built successfully.")
+            print(f"📂 Stored at: {CHROMA_DIR}")
+            return
+        except Exception as e:
+            print(f"⚠️ Build attempt {attempt+1} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(2)  # wait before retrying
+            else:
+                raise  # re-raise the last exception
 
 # ===============================
-# BUILD VECTOR DATABASE
-# ===============================
-
-def build_vectorstore(chunks, embeddings):
-    try:
-        if CHROMA_DIR.exists():
-            print("⚠️ Resetting existing Chroma database...")
-            shutil.rmtree(CHROMA_DIR)
-
-        vectordb = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-            persist_directory=str(CHROMA_DIR)
-        )
-        vectordb.persist()
-        print("✅ Chroma DB built successfully.")
-        print(f"📂 Stored at: {CHROMA_DIR}")
-
-    except PermissionError:
-        raise PermissionError(
-            f"❌ Cannot write to Chroma directory: {CHROMA_DIR}. "
-            "Make sure the folder is writable or use a temp directory."
-        )
-
-
-# ===============================
-# MAIN INGEST FUNCTION (WITH LOCK)
+# MAIN INGEST FUNCTION
 # ===============================
 
 def ingest_documents():
-    # Lock file to prevent concurrent rebuilds on multi‑process platforms
-    lock_file_path = Path(tempfile.gettempdir()) / "wasla_ingest.lock"
-
-    with open(lock_file_path, "w") as lock_file:
-        try:
-            # Try non‑blocking to show a message if another process is already ingesting
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("⏳ Another process is already ingesting. Waiting...")
-            fcntl.flock(lock_file, fcntl.LOCK_EX)  # wait indefinitely
-
-        print("🚀 Starting ingestion process...\n")
-        documents = load_documents()
-        chunks = split_documents(documents)
-        embeddings = create_embeddings()
-        build_vectorstore(chunks, embeddings)
-        print("\n🎉 Ingestion completed successfully.")
-
-        # Lock will be released automatically when the block ends
-
-
-# ===============================
-# RUN
-# ===============================
+    print("🚀 Starting ingestion process...\n")
+    documents = load_documents()
+    chunks = split_documents(documents)
+    embeddings = create_embeddings()
+    build_vectorstore(chunks, embeddings)
+    print("\n🎉 Ingestion completed successfully.")
 
 if __name__ == "__main__":
     ingest_documents()
