@@ -9,6 +9,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
+import chromadb
+from chromadb.config import Settings as ChromaSettings
 from constant import CHROMA_SETTINGS
 
 rebuild_lock = threading.Lock()
@@ -30,6 +32,13 @@ if not GROQ_API_KEY:
     st.error("❌ GROQ_API_KEY not found in .env file")
     st.stop()
 
+def create_chroma_client(persist_dir):
+    """Create a persistent Chroma client."""
+    return chromadb.PersistentClient(
+        path=persist_dir,
+        settings=ChromaSettings(anonymized_telemetry=False)
+    )
+
 def load_vectorstore():
     embeddings = HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
@@ -40,20 +49,18 @@ def load_vectorstore():
     os.makedirs(persist_dir, exist_ok=True)
 
     try:
+        client = create_chroma_client(persist_dir)
         db = Chroma(
-            persist_directory=persist_dir,
-            embedding_function=embeddings,
-            collection_name="company_docs"
+            client=client,
+            collection_name="company_docs",
+            embedding_function=embeddings
         )
-        # DEBUG: list collections
-        collections = db._client.list_collections()
+        # Debug: list collections and document count
+        collections = client.list_collections()
         st.write(f"📚 Collections in database: {[c.name for c in collections]}")
-
-        # DEBUG: check document count and sample
         count = db._collection.count()
         st.write(f"📊 Document count in collection: {count}")
         if count > 0:
-            # Get first 5 documents to see content
             all_docs = db._collection.get(limit=5)
             st.write("📄 Sample document content (first 200 chars each):")
             for i, doc_text in enumerate(all_docs['documents']):
@@ -69,18 +76,22 @@ def load_vectorstore():
         st.warning(f"Rebuilding vector database... Reason: {e}")
         if 'db' in locals():
             del db
+        if 'client' in locals():
+            del client
         gc.collect()
         time.sleep(1)
+
         with rebuild_lock:
+            # Double-check after lock
             try:
+                client = create_chroma_client(persist_dir)
                 db = Chroma(
-                    persist_directory=persist_dir,
-                    embedding_function=embeddings,
-                    collection_name="company_docs"
+                    client=client,
+                    collection_name="company_docs",
+                    embedding_function=embeddings
                 )
                 test = db.similarity_search("test", k=1)
                 if len(test) > 0:
-                    # Still debug after rebuild success
                     count = db._collection.count()
                     st.write(f"📊 Document count after rebuild: {count}")
                     if count > 0:
@@ -91,17 +102,20 @@ def load_vectorstore():
                     return db
             except Exception:
                 pass
+
             if os.path.exists(persist_dir):
                 shutil.rmtree(persist_dir, ignore_errors=True)
                 time.sleep(1)
+
             from ingest import ingest_documents
             ingest_documents()
+
+        client = create_chroma_client(persist_dir)
         db = Chroma(
-            persist_directory=persist_dir,
-            embedding_function=embeddings,
-            collection_name="company_docs"
+            client=client,
+            collection_name="company_docs",
+            embedding_function=embeddings
         )
-        # Debug after rebuild
         count = db._collection.count()
         st.write(f"📊 Document count after fresh rebuild: {count}")
         if count > 0:

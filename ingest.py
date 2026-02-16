@@ -11,10 +11,6 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from constant import CHROMA_SETTINGS
 
-# ===============================
-# PATHS
-# ===============================
-
 BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
 
@@ -131,7 +127,7 @@ def build_vectorstore(chunks, embeddings, retries=3):
             print("✅ Chroma DB built and moved successfully.")
             print(f"📂 Stored at: {CHROMA_DIR}")
             sys.stdout.flush()
-            return  # <-- No final verification that causes tenant error
+            return
         except Exception as e:
             print(f"⚠️ Build attempt {attempt+1} failed: {e}")
             sys.stdout.flush()
