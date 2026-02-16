@@ -9,7 +9,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
-from constant import CHROMA_SETTINGS  # make sure this is imported
+from constant import CHROMA_SETTINGS
 
 rebuild_lock = threading.Lock()
 
@@ -20,7 +20,7 @@ st.title("🤖 Company AI Assistant")
 # ===== FORCE REBUILD BUTTON =====
 if st.sidebar.button("🗑️ Force Rebuild Database"):
     try:
-        shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
+        shutil.rmtree(CHROMA_SETTINGS["persist_directory"], ignore_errors=True)  # <-- dict access
         st.success("Database cleared. Please ask a question to rebuild.")
         st.rerun()
     except Exception as e:
@@ -38,7 +38,7 @@ def load_vectorstore():
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
-    persist_dir = CHROMA_SETTINGS.persist_directory
+    persist_dir = CHROMA_SETTINGS["persist_directory"]  # <-- dict access
     os.makedirs(persist_dir, exist_ok=True)
 
     try:
@@ -46,7 +46,7 @@ def load_vectorstore():
             persist_directory=persist_dir,
             embedding_function=embeddings,
             collection_name="company_docs",
-            client_settings=CHROMA_SETTINGS  # <-- ADD THIS
+            client_settings=CHROMA_SETTINGS  # this stays as dict
         )
         test = db.similarity_search("test", k=1)
         if len(test) == 0:
@@ -65,7 +65,7 @@ def load_vectorstore():
                     persist_directory=persist_dir,
                     embedding_function=embeddings,
                     collection_name="company_docs",
-                    client_settings=CHROMA_SETTINGS  # <-- ADD THIS
+                    client_settings=CHROMA_SETTINGS
                 )
                 test = db.similarity_search("test", k=1)
                 if len(test) > 0:
@@ -84,7 +84,7 @@ def load_vectorstore():
             persist_directory=persist_dir,
             embedding_function=embeddings,
             collection_name="company_docs",
-            client_settings=CHROMA_SETTINGS  # <-- ADD THIS
+            client_settings=CHROMA_SETTINGS
         )
         return db
 
