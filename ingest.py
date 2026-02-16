@@ -4,6 +4,7 @@ import sqlite3
 import time
 import sys
 import os
+import gc
 from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -13,7 +14,6 @@ from constant import CHROMA_SETTINGS
 
 BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
-# Use the exact path from constant (no fallback)
 CHROMA_DIR = Path(CHROMA_SETTINGS.persist_directory)
 
 def load_documents():
@@ -101,31 +101,51 @@ def build_vectorstore(chunks, embeddings, retries=3):
             else:
                 raise RuntimeError("Temp collection is empty after persist!")
 
+            # --- Clean up client before moving ---
+            print("🧹 Cleaning up Chroma client...")
+            del vectordb
+            gc.collect()
+            time.sleep(1)  # Give OS time to release file locks
+
             # Ensure final directory parent exists
             CHROMA_DIR.parent.mkdir(parents=True, exist_ok=True)
             if CHROMA_DIR.exists():
                 print("⚠️ Removing old Chroma database...")
                 sys.stdout.flush()
                 shutil.rmtree(CHROMA_DIR)
-            shutil.move(str(temp_dir), str(CHROMA_DIR))
-            print(f"✅ Chroma DB built and moved successfully to {CHROMA_DIR}")
+                time.sleep(1)
+
+            # Move the directory
+            print(f"📦 Moving {temp_dir} -> {CHROMA_DIR}")
             sys.stdout.flush()
+            shutil.move(str(temp_dir), str(CHROMA_DIR))
 
             # --- POST-MOVE VERIFICATION ---
-            # Reopen the moved database and count again
-            from chromadb.config import Settings
+            print("🔍 Verifying moved database...")
+            sys.stdout.flush()
+            time.sleep(1)  # Allow filesystem to settle
+
+            # Use a fresh client to check
             import chromadb
+            from chromadb.config import Settings
             client = chromadb.PersistentClient(
                 path=str(CHROMA_DIR),
                 settings=Settings(anonymized_telemetry=False)
             )
-            # Use the same embeddings to create a Chroma wrapper (or just check collection)
             collection = client.get_collection("company_docs")
             final_count = collection.count()
             print(f"📊 Final document count after move: {final_count}")
             sys.stdout.flush()
+
+            # List files in the directory for debugging
+            print(f"📁 Files in {CHROMA_DIR}:")
+            for f in CHROMA_DIR.iterdir():
+                print(f"   - {f.name}")
+            sys.stdout.flush()
+
             if final_count == 0:
                 raise RuntimeError("Moved database has zero documents!")
+            print("✅ Verification passed.")
             return  # success
         except Exception as e:
             print(f"⚠️ Build attempt {attempt+1} failed: {e}")
