@@ -77,7 +77,6 @@ def build_vectorstore(chunks, embeddings, retries=3):
     final_parent.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(retries):
-        # Create a temporary directory inside the same parent
         temp_build_dir = final_parent / f"temp_build_{int(time.time())}_{attempt}"
         temp_build_dir.mkdir(parents=True, exist_ok=False)
 
@@ -85,13 +84,12 @@ def build_vectorstore(chunks, embeddings, retries=3):
             print(f"🛠 Building in temporary directory: {temp_build_dir}")
             sys.stdout.flush()
 
-            # IMPORTANT: Do NOT pass client_settings here – use only persist_directory
+            # IMPORTANT: Do NOT pass client_settings – use only persist_directory
             vectordb = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,
                 persist_directory=str(temp_build_dir),
                 collection_name="company_docs"
-                # client_settings removed
             )
 
             count_before = vectordb._collection.count()
@@ -110,7 +108,7 @@ def build_vectorstore(chunks, embeddings, retries=3):
             else:
                 raise RuntimeError("Temp collection is empty after persist!")
 
-            # List files before closing to confirm they exist
+            # List files before closing
             print(f"📁 Files in {temp_build_dir} before cleanup:")
             for f in temp_build_dir.iterdir():
                 size = f.stat().st_size if f.is_file() else 0
