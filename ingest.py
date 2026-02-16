@@ -73,18 +73,27 @@ def create_embeddings():
     )
 
 def build_vectorstore(chunks, embeddings, retries=3):
+    # Ensure final parent directory exists
+    final_parent = CHROMA_DIR.parent
+    final_parent.mkdir(parents=True, exist_ok=True)
+
     for attempt in range(retries):
-        temp_dir = Path(tempfile.mkdtemp(prefix="wasla_build_"))
+        # Create a temporary directory inside the same parent (for atomic rename)
+        temp_build_dir = final_parent / f"temp_build_{int(time.time())}_{attempt}"
+        temp_build_dir.mkdir(parents=True, exist_ok=False)  # ensure it's new
+
         try:
-            print(f"🛠 Building in temporary directory: {temp_dir}")
+            print(f"🛠 Building in temporary directory: {temp_build_dir}")
             sys.stdout.flush()
+
             vectordb = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,
-                persist_directory=str(temp_dir),
+                persist_directory=str(temp_build_dir),
                 collection_name="company_docs",
                 client_settings=CHROMA_SETTINGS   # Disables telemetry
             )
+
             count_before = vectordb._collection.count()
             print(f"📊 Document count in temp collection (before persist): {count_before}")
             sys.stdout.flush()
@@ -101,31 +110,32 @@ def build_vectorstore(chunks, embeddings, retries=3):
             else:
                 raise RuntimeError("Temp collection is empty after persist!")
 
-            # --- Clean up client before moving ---
-            print("🧹 Cleaning up Chroma client...")
+            # Attempt to close the underlying client to release file locks
+            try:
+                vectordb._client.close()
+            except:
+                pass
             del vectordb
             gc.collect()
-            time.sleep(1)  # Give OS time to release file locks
+            time.sleep(1)  # Give OS time to release handles
 
-            # Ensure final directory parent exists
-            CHROMA_DIR.parent.mkdir(parents=True, exist_ok=True)
+            # Remove old database if it exists
             if CHROMA_DIR.exists():
                 print("⚠️ Removing old Chroma database...")
                 sys.stdout.flush()
                 shutil.rmtree(CHROMA_DIR)
                 time.sleep(1)
 
-            # Move the directory
-            print(f"📦 Moving {temp_dir} -> {CHROMA_DIR}")
+            # Rename the temporary directory to the final name (atomic on same filesystem)
+            print(f"📦 Renaming {temp_build_dir} -> {CHROMA_DIR}")
             sys.stdout.flush()
-            shutil.move(str(temp_dir), str(CHROMA_DIR))
+            temp_build_dir.rename(CHROMA_DIR)
 
-            # --- POST-MOVE VERIFICATION ---
+            # Verify the moved database with a fresh client
             print("🔍 Verifying moved database...")
             sys.stdout.flush()
-            time.sleep(1)  # Allow filesystem to settle
+            time.sleep(1)
 
-            # Use a fresh client to check
             import chromadb
             from chromadb.config import Settings
             client = chromadb.PersistentClient(
@@ -137,7 +147,7 @@ def build_vectorstore(chunks, embeddings, retries=3):
             print(f"📊 Final document count after move: {final_count}")
             sys.stdout.flush()
 
-            # List files in the directory for debugging
+            # List files for debugging (optional)
             print(f"📁 Files in {CHROMA_DIR}:")
             for f in CHROMA_DIR.iterdir():
                 print(f"   - {f.name}")
@@ -147,10 +157,12 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 raise RuntimeError("Moved database has zero documents!")
             print("✅ Verification passed.")
             return  # success
+
         except Exception as e:
             print(f"⚠️ Build attempt {attempt+1} failed: {e}")
             sys.stdout.flush()
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            # Clean up temporary directory
+            shutil.rmtree(temp_build_dir, ignore_errors=True)
             if attempt < retries - 1:
                 time.sleep(2)
             else:
