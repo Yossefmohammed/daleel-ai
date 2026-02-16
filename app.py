@@ -101,7 +101,7 @@ def load_vectorstore():
 def load_llm():
     return ChatGroq(
         groq_api_key=GROQ_API_KEY,
-        model_name="llama-3.1-8b-instant",  # <-- Updated model name
+        model_name="llama-3.1-8b-instant",  # Updated to a supported model
         temperature=0.4
     )
 
@@ -199,8 +199,15 @@ if user_input:
         history_text += f"{role}: {msg['content']}\n"
 
     final_prompt = build_prompt(context, history_text, user_input)
-    response = llm.invoke(final_prompt)
-    answer = response.content
+
+    # ===== ADDED ERROR HANDLING =====
+    try:
+        response = llm.invoke(final_prompt)
+        answer = response.content
+    except Exception as e:
+        st.error(f"Sorry, an error occurred: {e}")
+        st.stop()  # Stop further execution
+    # ===== END OF ERROR HANDLING =====
 
     st.chat_message("assistant").write(answer)
     st.session_state.messages.append({"role": "assistant", "content": answer})
