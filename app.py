@@ -19,13 +19,19 @@ load_dotenv()
 st.set_page_config(page_title="Company AI Assistant", page_icon="🤖")
 st.title("🤖 Company AI Assistant")
 
-if st.sidebar.button("🗑️ Force Rebuild Database"):
-    try:
-        shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
-        st.success("Database cleared. Please ask a question to rebuild.")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Error clearing database: {e}")
+# Sidebar controls
+with st.sidebar:
+    st.header("Controls")
+    if st.button("🗑️ Force Rebuild Database"):
+        try:
+            shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
+            st.success("Database cleared. Please ask a question to rebuild.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error clearing database: {e}")
+    
+    # Optional debug toggle
+    show_debug = st.checkbox("Show debug info", value=False)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
@@ -33,12 +39,13 @@ if not GROQ_API_KEY:
     st.stop()
 
 def create_chroma_client(persist_dir):
-    """Create a persistent Chroma client."""
+    """Create a persistent Chroma client with telemetry disabled."""
     return chromadb.PersistentClient(
         path=persist_dir,
         settings=ChromaSettings(anonymized_telemetry=False)
     )
 
+@st.cache_resource(show_spinner="Loading knowledge base...")
 def load_vectorstore():
     embeddings = HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
@@ -55,25 +62,27 @@ def load_vectorstore():
             collection_name="company_docs",
             embedding_function=embeddings
         )
-        # Debug: list collections and document count
-        collections = client.list_collections()
-        st.write(f"📚 Collections in database: {[c.name for c in collections]}")
-        count = db._collection.count()
-        st.write(f"📊 Document count in collection: {count}")
-        if count > 0:
-            all_docs = db._collection.get(limit=5)
-            st.write("📄 Sample document content (first 200 chars each):")
-            for i, doc_text in enumerate(all_docs['documents']):
-                st.write(f"Doc {i+1}: {doc_text[:200]}")
-        else:
-            st.warning("Collection is empty!")
-
+        # Quick check to ensure database is not empty
         test = db.similarity_search("test", k=1)
         if len(test) == 0:
             raise ValueError("Empty database")
+        
+        # Optional debug info (only if show_debug is True)
+        if st.session_state.get("show_debug", False):
+            collections = client.list_collections()
+            st.write(f"📚 Collections: {[c.name for c in collections]}")
+            count = db._collection.count()
+            st.write(f"📊 Document count: {count}")
+            if count > 0:
+                all_docs = db._collection.get(limit=2)
+                st.write("📄 Sample documents:")
+                for i, doc_text in enumerate(all_docs['documents']):
+                    st.write(f"Doc {i+1}: {doc_text[:200]}...")
+        
         return db
     except Exception as e:
         st.warning(f"Rebuilding vector database... Reason: {e}")
+        # Clean up
         if 'db' in locals():
             del db
         if 'client' in locals():
@@ -82,7 +91,7 @@ def load_vectorstore():
         time.sleep(1)
 
         with rebuild_lock:
-            # Double-check after lock
+            # Double-check after acquiring lock
             try:
                 client = create_chroma_client(persist_dir)
                 db = Chroma(
@@ -92,17 +101,11 @@ def load_vectorstore():
                 )
                 test = db.similarity_search("test", k=1)
                 if len(test) > 0:
-                    count = db._collection.count()
-                    st.write(f"📊 Document count after rebuild: {count}")
-                    if count > 0:
-                        all_docs = db._collection.get(limit=5)
-                        st.write("📄 Sample after rebuild:")
-                        for i, doc_text in enumerate(all_docs['documents']):
-                            st.write(f"Doc {i+1}: {doc_text[:200]}")
                     return db
             except Exception:
                 pass
 
+            # Remove corrupted database and rebuild
             if os.path.exists(persist_dir):
                 shutil.rmtree(persist_dir, ignore_errors=True)
                 time.sleep(1)
@@ -110,19 +113,13 @@ def load_vectorstore():
             from ingest import ingest_documents
             ingest_documents()
 
+        # Load the newly built database
         client = create_chroma_client(persist_dir)
         db = Chroma(
             client=client,
             collection_name="company_docs",
             embedding_function=embeddings
         )
-        count = db._collection.count()
-        st.write(f"📊 Document count after fresh rebuild: {count}")
-        if count > 0:
-            all_docs = db._collection.get(limit=5)
-            st.write("📄 Sample after fresh rebuild:")
-            for i, doc_text in enumerate(all_docs['documents']):
-                st.write(f"Doc {i+1}: {doc_text[:200]}")
         return db
 
 @st.cache_resource
@@ -173,33 +170,41 @@ def format_context(docs):
         context_parts.append(f"[{source}]\n{content}")
     return "\n\n".join(context_parts)
 
+# Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Display chat history
 for msg in st.session_state.messages:
-    if msg["role"] == "user":
-        st.chat_message("user").write(msg["content"])
-    else:
-        st.chat_message("assistant").write(msg["content"])
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
 
+# User input
 user_input = st.chat_input("Ask something about our company...")
 
 if user_input:
+    # Add user message
     st.chat_message("user").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
     try:
+        # Pass debug flag to cached function via session state
+        st.session_state["show_debug"] = show_debug
         db = load_vectorstore()
         llm = load_llm()
-        docs = retrieve_docs(db, user_input)
+        
+        with st.spinner("Searching documents..."):
+            docs = retrieve_docs(db, user_input)
 
-        st.write(f"**Retrieved {len(docs)} documents**")
-        if len(docs) == 0:
-            st.warning("No relevant documents found.")
-        else:
-            for i, doc in enumerate(docs):
-                with st.expander(f"Chunk {i+1} – Source: {doc.metadata.get('source_file', 'Unknown')}"):
-                    st.write(doc.page_content)
+        # Show retrieved chunks only if debug is enabled
+        if show_debug:
+            st.write(f"**Retrieved {len(docs)} documents**")
+            if len(docs) == 0:
+                st.warning("No relevant documents found.")
+            else:
+                for i, doc in enumerate(docs):
+                    with st.expander(f"Chunk {i+1} – Source: {doc.metadata.get('source_file', 'Unknown')}"):
+                        st.write(doc.page_content)
 
         context = format_context(docs)
         history_text = ""
@@ -209,14 +214,11 @@ if user_input:
 
         final_prompt = build_prompt(context, history_text, user_input)
 
-        try:
+        with st.spinner("Thinking..."):
             response = llm.invoke(final_prompt)
             answer = response.content
-        except Exception as e:
-            st.error(f"LLM error: {e}")
-            st.exception(e)
-            st.stop()
 
+        # Display assistant response
         st.chat_message("assistant").write(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})
 
