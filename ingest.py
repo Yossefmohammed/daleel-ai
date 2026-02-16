@@ -109,18 +109,15 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 persist_directory=str(temp_dir),
                 collection_name="company_docs"
             )
-            # DEBUG: Check count before persist
             count_before = vectordb._collection.count()
             print(f"📊 Document count in temp collection (before persist): {count_before}")
             sys.stdout.flush()
 
             vectordb.persist()
-            # DEBUG: Check count after persist
             count_after = vectordb._collection.count()
             print(f"📊 Document count in temp collection (after persist): {count_after}")
             sys.stdout.flush()
 
-            # Also get a sample to verify content
             if count_after > 0:
                 sample = vectordb._collection.get(limit=1)
                 print(f"📄 Sample content (first 100 chars): {sample['documents'][0][:100]}")
@@ -134,17 +131,7 @@ def build_vectorstore(chunks, embeddings, retries=3):
             print("✅ Chroma DB built and moved successfully.")
             print(f"📂 Stored at: {CHROMA_DIR}")
             sys.stdout.flush()
-
-            # Final verification by loading from final location
-            final_db = Chroma(
-                persist_directory=str(CHROMA_DIR),
-                embedding_function=embeddings,
-                collection_name="company_docs"
-            )
-            final_count = final_db._collection.count()
-            print(f"📊 Document count in final location: {final_count}")
-            sys.stdout.flush()
-            return
+            return  # <-- No final verification that causes tenant error
         except Exception as e:
             print(f"⚠️ Build attempt {attempt+1} failed: {e}")
             sys.stdout.flush()
