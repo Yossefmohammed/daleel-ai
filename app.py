@@ -1,5 +1,7 @@
 import os
 import shutil
+import gc
+import time
 import threading
 import streamlit as st
 from dotenv import load_dotenv
@@ -25,7 +27,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("❌ GROQ_API_KEY not found in .env file")
     st.stop()
-
 
 # ===============================
 # LOAD VECTORSTORE (MATCH INGEST)
@@ -55,6 +56,12 @@ def load_vectorstore():
     except Exception:
         st.warning("Rebuilding vector database... ⏳")
 
+        # Ensure any previous Chroma instance is released
+        if 'db' in locals():
+            del db
+        gc.collect()
+        time.sleep(1)  # Give OS time to release file handles
+
         # Acquire threading lock (only one thread rebuilds at a time)
         with rebuild_lock:
             # Double-check if another thread already rebuilt while we waited
@@ -70,12 +77,13 @@ def load_vectorstore():
             except Exception:
                 pass
 
-            # Proceed with rebuild
+            # Remove any leftover directory (will be recreated by ingest)
             if os.path.exists(persist_dir):
-                shutil.rmtree(persist_dir)
+                shutil.rmtree(persist_dir, ignore_errors=True)
+                time.sleep(1)
 
             from ingest import ingest_documents
-            ingest_documents()   # this will create the database using the same persist_dir
+            ingest_documents()   # this will create the database using atomic replacement
 
         # After lock is released, load the fresh database
         db = Chroma(
@@ -84,7 +92,6 @@ def load_vectorstore():
             collection_name="company_docs"
         )
         return db
-
 
 # ===============================
 # LOAD LLM
@@ -97,7 +104,6 @@ def load_llm():
         model_name="llama3-8b-8192",
         temperature=0.4
     )
-
 
 # ===============================
 # PROMPT TEMPLATE
@@ -131,7 +137,6 @@ User Question:
         question=question
     )
 
-
 # ===============================
 # RETRIEVE DOCUMENTS
 # ===============================
@@ -147,7 +152,6 @@ def retrieve_docs(db, query):
     )
     return retriever.invoke(query)
 
-
 # ===============================
 # FORMAT CONTEXT
 # ===============================
@@ -159,7 +163,6 @@ def format_context(docs):
         content = doc.page_content[:1000]
         context_parts.append(f"[{source}]\n{content}")
     return "\n\n".join(context_parts)
-
 
 # ===============================
 # STREAMLIT CHAT MEMORY
@@ -173,7 +176,6 @@ for msg in st.session_state.messages:
         st.chat_message("user").write(msg["content"])
     else:
         st.chat_message("assistant").write(msg["content"])
-
 
 # ===============================
 # CHAT INPUT

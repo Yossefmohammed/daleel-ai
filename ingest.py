@@ -17,7 +17,7 @@ BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
 
 def get_writable_chroma_dir():
-    """Return a Path that is writable by both the OS and SQLite."""
+    """Return the final persist directory (must be writable)."""
     primary_dir = Path(CHROMA_SETTINGS.persist_directory)
     try:
         primary_dir.mkdir(parents=True, exist_ok=True)
@@ -85,27 +85,34 @@ def create_embeddings():
     )
 
 # ===============================
-# BUILD VECTOR DATABASE (with retry)
+# BUILD VECTOR DATABASE (atomic)
 # ===============================
 
 def build_vectorstore(chunks, embeddings, retries=3):
     for attempt in range(retries):
+        # Build into a unique temporary directory
+        temp_dir = Path(tempfile.mkdtemp(prefix="wasla_build_"))
         try:
-            if CHROMA_DIR.exists():
-                print("⚠️ Resetting existing Chroma database...")
-                shutil.rmtree(CHROMA_DIR)
-
+            print(f"🛠 Building in temporary directory: {temp_dir}")
             vectordb = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,
-                persist_directory=str(CHROMA_DIR)
+                persist_directory=str(temp_dir)
             )
             vectordb.persist()
-            print("✅ Chroma DB built successfully.")
+            # Success – now atomically replace the final directory
+            if CHROMA_DIR.exists():
+                print("⚠️ Removing old Chroma database...")
+                shutil.rmtree(CHROMA_DIR)
+            # Move the new database into place
+            shutil.move(str(temp_dir), str(CHROMA_DIR))
+            print("✅ Chroma DB built and moved successfully.")
             print(f"📂 Stored at: {CHROMA_DIR}")
             return
         except Exception as e:
             print(f"⚠️ Build attempt {attempt+1} failed: {e}")
+            # Clean up temporary directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
             if attempt < retries - 1:
                 time.sleep(2)  # wait before retrying
             else:
