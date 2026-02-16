@@ -1,5 +1,8 @@
 import shutil
 import tempfile
+import sqlite3
+import fcntl
+import time
 from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -14,19 +17,29 @@ from constant import CHROMA_SETTINGS
 BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
 
-# Ensure a writable path for Chroma DB
-try:
-    CHROMA_DIR = Path(CHROMA_SETTINGS.persist_directory)
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    test_file = CHROMA_DIR / "test.txt"
-    test_file.write_text("test")  # test write
-    test_file.unlink()  # remove test file
-except Exception:
-    # If the original path is not writable, fallback to temp
-    CHROMA_DIR = Path(tempfile.gettempdir()) / "wasla_chroma"
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"⚠️ Original CHROMA_DIR not writable. Using temp dir: {CHROMA_DIR}")
+# Determine a writable directory for Chroma DB
+def get_writable_chroma_dir():
+    """Return a Path that is writable by both the OS and SQLite."""
+    primary_dir = Path(CHROMA_SETTINGS.persist_directory)
+    try:
+        primary_dir.mkdir(parents=True, exist_ok=True)
+        # Test with a real SQLite file – this catches read-only filesystem issues
+        test_db = primary_dir / "test_writable.sqlite"
+        conn = sqlite3.connect(str(test_db))
+        conn.execute("CREATE TABLE test (id integer)")
+        conn.close()
+        test_db.unlink()
+        print(f"✅ Primary directory is writable: {primary_dir}")
+        return primary_dir
+    except Exception as e:
+        print(f"⚠️ Primary directory not fully writable: {e}")
+        # Fallback to a subdirectory of the system temp dir
+        fallback = Path(tempfile.gettempdir()) / "wasla_chroma_fallback"
+        fallback.mkdir(parents=True, exist_ok=True)
+        print(f"ℹ️ Using fallback directory: {fallback}")
+        return fallback
 
+CHROMA_DIR = get_writable_chroma_dir()
 
 # ===============================
 # LOAD DOCUMENTS
@@ -109,16 +122,29 @@ def build_vectorstore(chunks, embeddings):
 
 
 # ===============================
-# MAIN INGEST FUNCTION
+# MAIN INGEST FUNCTION (WITH LOCK)
 # ===============================
 
 def ingest_documents():
-    print("🚀 Starting ingestion process...\n")
-    documents = load_documents()
-    chunks = split_documents(documents)
-    embeddings = create_embeddings()
-    build_vectorstore(chunks, embeddings)
-    print("\n🎉 Ingestion completed successfully.")
+    # Lock file to prevent concurrent rebuilds on multi‑process platforms
+    lock_file_path = Path(tempfile.gettempdir()) / "wasla_ingest.lock"
+
+    with open(lock_file_path, "w") as lock_file:
+        try:
+            # Try non‑blocking to show a message if another process is already ingesting
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("⏳ Another process is already ingesting. Waiting...")
+            fcntl.flock(lock_file, fcntl.LOCK_EX)  # wait indefinitely
+
+        print("🚀 Starting ingestion process...\n")
+        documents = load_documents()
+        chunks = split_documents(documents)
+        embeddings = create_embeddings()
+        build_vectorstore(chunks, embeddings)
+        print("\n🎉 Ingestion completed successfully.")
+
+        # Lock will be released automatically when the block ends
 
 
 # ===============================

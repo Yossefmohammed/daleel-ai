@@ -1,10 +1,12 @@
 import os
+import shutil
+import tempfile
+import fcntl
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage, AIMessage
 from langchain_groq import ChatGroq
 from constant import CHROMA_SETTINGS
 
@@ -28,9 +30,7 @@ if not GROQ_API_KEY:
 # LOAD VECTORSTORE (MATCH INGEST)
 # ===============================
 
-
 def load_vectorstore():
-    
     embeddings = HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
         model_kwargs={"device": "cpu"},
@@ -40,40 +40,59 @@ def load_vectorstore():
     persist_dir = CHROMA_SETTINGS.persist_directory
     os.makedirs(persist_dir, exist_ok=True)
 
+    # Lock file to coordinate rebuilds across processes
+    lock_file_path = os.path.join(tempfile.gettempdir(), "wasla_rebuild.lock")
+
     try:
         db = Chroma(
             persist_directory=persist_dir,
             embedding_function=embeddings,
             collection_name="company_docs"
         )
-
-        # Try simple test query instead of using _collection
+        # Simple test to see if collection exists and has documents
         test = db.similarity_search("test", k=1)
-
-        # If no documents → rebuild
         if len(test) == 0:
             raise ValueError("Empty database")
-
+        return db
     except Exception:
         st.warning("Rebuilding vector database... ⏳")
 
-        # 🔥 FULL RESET (fixes dimension mismatch)
-        import shutil
-        if os.path.exists(persist_dir):
-            shutil.rmtree(persist_dir)
+        # Acquire exclusive lock (block until available)
+        with open(lock_file_path, "w") as lock_file:
+            try:
+                # Try non‑blocking first to show a friendly message
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                st.info("Another process is already rebuilding. Waiting...")
+                fcntl.flock(lock_file, fcntl.LOCK_EX)  # wait indefinitely
 
-        from ingest import ingest_documents
-        ingest_documents()
+            # Double‑check if another process already rebuilt while we waited
+            try:
+                db = Chroma(
+                    persist_directory=persist_dir,
+                    embedding_function=embeddings,
+                    collection_name="company_docs"
+                )
+                test = db.similarity_search("test", k=1)
+                if len(test) > 0:
+                    return db
+            except Exception:
+                pass
 
+            # Proceed with rebuild
+            if os.path.exists(persist_dir):
+                shutil.rmtree(persist_dir)
+
+            from ingest import ingest_documents
+            ingest_documents()   # this will create the database using the same persist_dir
+
+        # After lock is released, load the fresh database
         db = Chroma(
             persist_directory=persist_dir,
             embedding_function=embeddings,
             collection_name="company_docs"
         )
-
-    return db
-
-
+        return db
 
 
 # ===============================
@@ -94,7 +113,6 @@ def load_llm():
 # ===============================
 
 def build_prompt(context, chat_history, question):
-
     system_template = """
 You are a professional, friendly AI assistant for a company website.
 
@@ -136,7 +154,6 @@ def retrieve_docs(db, query):
             "lambda_mult": 0.5
         }
     )
-
     return retriever.invoke(query)
 
 
@@ -146,12 +163,10 @@ def retrieve_docs(db, query):
 
 def format_context(docs):
     context_parts = []
-
     for doc in docs:
         source = doc.metadata.get("source_file", "Unknown")
         content = doc.page_content[:1000]
         context_parts.append(f"[{source}]\n{content}")
-
     return "\n\n".join(context_parts)
 
 
@@ -161,7 +176,6 @@ def format_context(docs):
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
 
 # Display old messages
 for msg in st.session_state.messages:
@@ -178,7 +192,6 @@ for msg in st.session_state.messages:
 user_input = st.chat_input("Ask something about our company...")
 
 if user_input:
-
     # Show user message
     st.chat_message("user").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
@@ -202,7 +215,6 @@ if user_input:
 
     # Get response
     response = llm.invoke(final_prompt)
-
     answer = response.content
 
     # Show assistant message
