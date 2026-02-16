@@ -64,18 +64,19 @@ def create_chroma_client(persist_dir):
         settings=ChromaSettings(anonymized_telemetry=False)
     )
 
-# -------------------- Database Verification --------------------
+# -------------------- Database Verification (FIXED) --------------------
 def verify_db(persist_dir, embeddings, collection_name="company_docs"):
-    """Verify that the database exists and is queryable."""
+    """Verify that the database exists and is non‑empty by checking document count."""
     client = create_chroma_client(persist_dir)
     db = Chroma(
         client=client,
         collection_name=collection_name,
         embedding_function=embeddings
     )
-    test = db.similarity_search("test", k=1)
-    if len(test) == 0:
-        raise ValueError("Database exists but returned no documents")
+    # Simply check that the collection has documents
+    count = db._collection.count()
+    if count == 0:
+        raise ValueError("Database exists but collection is empty")
     return db
 
 # -------------------- Load Vector Store (cached) --------------------
