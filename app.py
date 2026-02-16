@@ -28,24 +28,38 @@ if not GROQ_API_KEY:
 # LOAD VECTORSTORE (MATCH INGEST)
 # ===============================
 
+
 @st.cache_resource
 def load_vectorstore():
+
     embeddings = HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
 
+    persist_dir = CHROMA_SETTINGS.persist_directory
+    os.makedirs(persist_dir, exist_ok=True)
+
     db = Chroma(
-        persist_directory=CHROMA_SETTINGS.persist_directory,
+        persist_directory=persist_dir,
         embedding_function=embeddings
     )
 
+    # 🔥 If empty → auto build DB
     if db._collection.count() == 0:
-        st.error("❌ Chroma DB is empty. Run ingest.py first.")
-        st.stop()
+        st.info("Building vector database... Please wait ⏳")
+
+        from ingest import ingest_documents
+        ingest_documents()
+
+        db = Chroma(
+            persist_directory=persist_dir,
+            embedding_function=embeddings
+        )
 
     return db
+
 
 
 # ===============================
