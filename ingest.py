@@ -13,29 +13,7 @@ from constant import CHROMA_SETTINGS
 
 BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
-
-def get_writable_chroma_dir():
-    primary_dir = Path(CHROMA_SETTINGS.persist_directory)
-    try:
-        primary_dir.mkdir(parents=True, exist_ok=True)
-        test_db = primary_dir / "test_writable.sqlite"
-        conn = sqlite3.connect(str(test_db))
-        conn.execute("CREATE TABLE test (id integer)")
-        conn.close()
-        test_db.unlink()
-        print(f"✅ Primary directory is writable: {primary_dir}")
-        sys.stdout.flush()
-        return primary_dir
-    except Exception as e:
-        print(f"⚠️ Primary directory not fully writable: {e}")
-        sys.stdout.flush()
-        fallback = Path(tempfile.gettempdir()) / "wasla_chroma_fallback"
-        fallback.mkdir(parents=True, exist_ok=True)
-        print(f"ℹ️ Using fallback directory: {fallback}")
-        sys.stdout.flush()
-        return fallback
-
-CHROMA_DIR = get_writable_chroma_dir()
+CHROMA_DIR = Path(CHROMA_SETTINGS.persist_directory)  # Use the path from constant directly
 
 def load_documents():
     print("\n" + "="*60)
@@ -104,7 +82,7 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 embedding=embeddings,
                 persist_directory=str(temp_dir),
                 collection_name="company_docs",
-                client_settings=CHROMA_SETTINGS   # 👈 Disables telemetry, avoids extra errors
+                client_settings=CHROMA_SETTINGS   # Disables telemetry
             )
             count_before = vectordb._collection.count()
             print(f"📊 Document count in temp collection (before persist): {count_before}")
@@ -120,6 +98,8 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 print(f"📄 Sample content (first 100 chars): {sample['documents'][0][:100]}")
                 sys.stdout.flush()
 
+            # Ensure the final directory exists (create parent if needed)
+            CHROMA_DIR.parent.mkdir(parents=True, exist_ok=True)
             if CHROMA_DIR.exists():
                 print("⚠️ Removing old Chroma database...")
                 sys.stdout.flush()

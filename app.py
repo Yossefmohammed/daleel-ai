@@ -3,6 +3,8 @@ import shutil
 import gc
 import time
 import threading
+import logging
+from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
@@ -12,14 +14,24 @@ from langchain_groq import ChatGroq
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from constant import CHROMA_SETTINGS
-import sqlite3  # for explicit db check
+import sqlite3
 
+# -------------------- Logging Setup --------------------
+logging.basicConfig(
+    filename='chatbot.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# -------------------- Global Lock --------------------
 rebuild_lock = threading.Lock()
 
+# -------------------- Streamlit Page Config --------------------
 load_dotenv()
-st.set_page_config(page_title="Company AI Assistant", page_icon="🤖")
-st.title("🤖 Company AI Assistant")
+st.set_page_config(page_title="Wasla AI Assistant", page_icon="🤖")
+st.title("🤖 Wasla AI Assistant")
 
+# -------------------- Sidebar Controls --------------------
 with st.sidebar:
     st.header("Controls")
     if st.button("🗑️ Force Rebuild Database"):
@@ -29,13 +41,22 @@ with st.sidebar:
             st.rerun()
         except Exception as e:
             st.error(f"Error clearing database: {e}")
+            logging.error(f"Force rebuild failed: {e}")
+
+    if st.button("🧹 Clear chat history"):
+        st.session_state.messages = []
+        st.session_state.feedback_given = {}
+        st.rerun()
+
     show_debug = st.checkbox("Show debug info", value=False)
 
+# -------------------- API Key Check --------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     st.error("❌ GROQ_API_KEY not found in .env file")
     st.stop()
 
+# -------------------- Chroma Client Helper --------------------
 def create_chroma_client(persist_dir):
     """Create a persistent Chroma client with telemetry disabled."""
     return chromadb.PersistentClient(
@@ -43,6 +64,7 @@ def create_chroma_client(persist_dir):
         settings=ChromaSettings(anonymized_telemetry=False)
     )
 
+# -------------------- Database Verification --------------------
 def verify_db(persist_dir, embeddings, collection_name="company_docs"):
     """Verify that the database exists and is queryable."""
     client = create_chroma_client(persist_dir)
@@ -51,12 +73,12 @@ def verify_db(persist_dir, embeddings, collection_name="company_docs"):
         collection_name=collection_name,
         embedding_function=embeddings
     )
-    # Test a simple query
     test = db.similarity_search("test", k=1)
     if len(test) == 0:
         raise ValueError("Database exists but returned no documents")
     return db
 
+# -------------------- Load Vector Store (cached) --------------------
 @st.cache_resource(show_spinner="Loading knowledge base...")
 def load_vectorstore():
     embeddings = HuggingFaceEmbeddings(
@@ -67,7 +89,6 @@ def load_vectorstore():
     persist_dir = CHROMA_SETTINGS.persist_directory
     os.makedirs(persist_dir, exist_ok=True)
 
-    # First attempt to load existing DB
     try:
         db = verify_db(persist_dir, embeddings)
         if st.session_state.get("show_debug", False):
@@ -79,19 +100,19 @@ def load_vectorstore():
         return db
     except Exception as e:
         st.warning(f"Database not usable: {e}. Rebuilding...")
-        # Clean up any stale objects
+        logging.warning(f"Database unusable, rebuilding: {e}")
         gc.collect()
         time.sleep(1)
 
         with rebuild_lock:
-            # Double-check after acquiring lock (another thread might have rebuilt)
+            # Double-check after acquiring lock
             try:
                 db = verify_db(persist_dir, embeddings)
                 return db
             except Exception:
                 pass
 
-            # Remove any corrupted database files
+            # Remove corrupted database
             if os.path.exists(persist_dir):
                 shutil.rmtree(persist_dir, ignore_errors=True)
                 time.sleep(1)
@@ -99,18 +120,17 @@ def load_vectorstore():
             # Run ingestion
             from ingest import ingest_documents
             ingest_documents()
+            time.sleep(2)  # Let filesystem settle
 
-            # Give the filesystem a moment
-            time.sleep(2)
-
-            # Verify the newly built database
+            # Verify newly built database
             try:
                 db = verify_db(persist_dir, embeddings)
                 return db
             except Exception as e:
-                # If verification still fails, raise a clear error
+                logging.error(f"Rebuild verification failed: {e}")
                 raise RuntimeError(f"Database rebuild succeeded but verification failed: {e}")
 
+# -------------------- Load LLM (cached) --------------------
 @st.cache_resource
 def load_llm():
     return ChatGroq(
@@ -119,17 +139,19 @@ def load_llm():
         temperature=0.4
     )
 
+# -------------------- Build Prompt (Improved) --------------------
 def build_prompt(context, chat_history, question):
     system_template = """
-You are a professional, friendly AI assistant for a company website.
+You are Wasla's AI assistant — professional, friendly, and knowledgeable about our company.
 
-Your job:
-- Answer using ONLY the provided context
-- If answer is not in context, say:
-  "I'm sorry, I couldn't find that information in our documents."
-- Be natural and conversational
-- Do NOT mention internal processing or retrieval
-- Keep answers clear and helpful
+Guidelines:
+- Always speak as Wasla, using "we" and "us". Never refer to yourself as a chatbot.
+- Answer using ONLY the provided context.
+- If the answer is not in the context, say: "I'm sorry, I couldn't find that information in our documents."
+- Be natural, conversational, and concise.
+- If the user asks a yes/no question, first answer clearly (yes/no), then provide additional relevant information or ask a follow‑up question.
+- Do NOT mention internal processes like retrieval, vector databases, or "according to my training".
+- Keep responses helpful and aligned with Wasla's tone: quietly powerful, precise, and focused on long‑term solutions.
 
 Context:
 {context}
@@ -144,6 +166,7 @@ User Question:
         context=context, chat_history=chat_history, question=question
     )
 
+# -------------------- Retrieve Documents --------------------
 def retrieve_docs(db, query):
     retriever = db.as_retriever(
         search_type="mmr",
@@ -152,10 +175,11 @@ def retrieve_docs(db, query):
     try:
         return retriever.invoke(query)
     except sqlite3.OperationalError as e:
-        # If we get a database error, suggest a rebuild
-        st.error(f"Database error: {e}. Try the 'Force Rebuild' button.")
+        st.error("⚠️ Database error. Please try the 'Force Rebuild' button in the sidebar.")
+        logging.error(f"Database error on query '{query}': {e}")
         raise
 
+# -------------------- Format Context --------------------
 def format_context(docs):
     context_parts = []
     for doc in docs:
@@ -164,16 +188,40 @@ def format_context(docs):
         context_parts.append(f"[{source}]\n{content}")
     return "\n\n".join(context_parts)
 
+# -------------------- Log Unanswered Questions --------------------
+def log_unanswered(question, answer):
+    if "I couldn't find that information" in answer:
+        logging.info(f"UNANSWERED: {question}")
+
+# -------------------- Initialize Session State --------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "feedback_given" not in st.session_state:
+    st.session_state.feedback_given = {}  # maps message index to 'up' or 'down'
 
-for msg in st.session_state.messages:
+# -------------------- Display Chat History --------------------
+for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
+        # If this is an assistant message, show feedback buttons (unless already given)
+        if msg["role"] == "assistant" and idx not in st.session_state.feedback_given:
+            col1, col2 = st.columns([0.1, 0.1])
+            with col1:
+                if st.button("👍", key=f"up_{idx}"):
+                    st.session_state.feedback_given[idx] = "up"
+                    logging.info(f"Feedback positive for message {idx}")
+                    st.rerun()
+            with col2:
+                if st.button("👎", key=f"down_{idx}"):
+                    st.session_state.feedback_given[idx] = "down"
+                    logging.info(f"Feedback negative for message {idx}")
+                    st.rerun()
 
-user_input = st.chat_input("Ask something about our company...")
+# -------------------- User Input --------------------
+user_input = st.chat_input("Ask something about Wasla...")
 
 if user_input:
+    # Add user message
     st.chat_message("user").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
@@ -203,9 +251,17 @@ if user_input:
             response = llm.invoke(final_prompt)
             answer = response.content
 
+        # Log unanswered questions
+        log_unanswered(user_input, answer)
+
+        # Display assistant response
         st.chat_message("assistant").write(answer)
         st.session_state.messages.append({"role": "assistant", "content": answer})
 
+        # Rerun to show feedback buttons for the new message
+        st.rerun()
+
     except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
-        st.exception(e)
+        st.error("😓 An unexpected error occurred. Our team has been notified.")
+        logging.error(f"Unhandled exception: {e}", exc_info=True)
+        st.exception(e)  # Still show full error in dev; you may remove in production
