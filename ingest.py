@@ -127,7 +127,8 @@ def build_vectorstore(chunks, embeddings, retries=3):
             vectordb = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,
-                persist_directory=str(temp_dir)
+                persist_directory=str(temp_dir),
+                collection_name="company_docs"   # <-- ADD THIS
             )
             vectordb.persist()
             if CHROMA_DIR.exists():
