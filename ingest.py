@@ -77,7 +77,6 @@ def build_vectorstore(chunks, embeddings, retries=3):
     final_parent.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(retries):
-        # Create a temporary directory inside the same parent
         temp_build_dir = final_parent / f"temp_build_{int(time.time())}_{attempt}"
         temp_build_dir.mkdir(parents=True, exist_ok=False)
 
@@ -109,6 +108,13 @@ def build_vectorstore(chunks, embeddings, retries=3):
             else:
                 raise RuntimeError("Temp collection is empty after persist!")
 
+            # List files before closing
+            print(f"📁 Files in {temp_build_dir} before cleanup:")
+            for f in temp_build_dir.iterdir():
+                size = f.stat().st_size if f.is_file() else 0
+                print(f"   - {f.name} (size: {size})")
+            sys.stdout.flush()
+
             # Attempt to close the client properly
             try:
                 vectordb._client.close()
@@ -118,6 +124,13 @@ def build_vectorstore(chunks, embeddings, retries=3):
             gc.collect()
             time.sleep(2)  # Give OS time to release file handles
 
+            # List files after closing
+            print(f"📁 Files in {temp_build_dir} after cleanup:")
+            for f in temp_build_dir.iterdir():
+                size = f.stat().st_size if f.is_file() else 0
+                print(f"   - {f.name} (size: {size})")
+            sys.stdout.flush()
+
             # Remove old database if it exists
             if CHROMA_DIR.exists():
                 print("⚠️ Removing old Chroma database...")
@@ -125,10 +138,17 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 shutil.rmtree(CHROMA_DIR)
                 time.sleep(1)
 
-            # Copy (not rename) the temporary directory to the final location
+            # Copy the temporary directory to the final location
             print(f"📦 Copying {temp_build_dir} -> {CHROMA_DIR}")
             sys.stdout.flush()
             shutil.copytree(str(temp_build_dir), str(CHROMA_DIR))
+
+            # List files in destination after copy
+            print(f"📁 Files in {CHROMA_DIR} after copy:")
+            for f in CHROMA_DIR.iterdir():
+                size = f.stat().st_size if f.is_file() else 0
+                print(f"   - {f.name} (size: {size})")
+            sys.stdout.flush()
 
             # Verify the copied database with a fresh client
             print("🔍 Verifying copied database...")
@@ -144,11 +164,6 @@ def build_vectorstore(chunks, embeddings, retries=3):
             collection = client.get_collection("company_docs")
             final_count = collection.count()
             print(f"📊 Final document count after copy: {final_count}")
-            sys.stdout.flush()
-
-            print(f"📁 Files in {CHROMA_DIR}:")
-            for f in CHROMA_DIR.iterdir():
-                print(f"   - {f.name}")
             sys.stdout.flush()
 
             if final_count == 0:
