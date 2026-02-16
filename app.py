@@ -3,14 +3,13 @@ import shutil
 import gc
 import time
 import threading
-import traceback
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
-from constant import CHROMA_SETTINGS
+from constant import CHROMA_SETTINGS  # make sure this is imported
 
 rebuild_lock = threading.Lock()
 
@@ -41,42 +40,52 @@ def load_vectorstore():
     )
     persist_dir = CHROMA_SETTINGS.persist_directory
     os.makedirs(persist_dir, exist_ok=True)
+
     try:
-        db = Chroma(persist_directory=persist_dir, embedding_function=embeddings, collection_name="company_docs")
+        db = Chroma(
+            persist_directory=persist_dir,
+            embedding_function=embeddings,
+            collection_name="company_docs",
+            client_settings=CHROMA_SETTINGS  # <-- ADD THIS
+        )
         test = db.similarity_search("test", k=1)
         if len(test) == 0:
             raise ValueError("Empty database")
         return db
     except Exception as e:
         st.warning(f"Rebuilding vector database... Reason: {e}")
-        # Clean up any previous instance
         if 'db' in locals():
             del db
         gc.collect()
         time.sleep(1)
+
         with rebuild_lock:
-            # Double-check if another thread rebuilt
             try:
-                db = Chroma(persist_directory=persist_dir, embedding_function=embeddings, collection_name="company_docs")
+                db = Chroma(
+                    persist_directory=persist_dir,
+                    embedding_function=embeddings,
+                    collection_name="company_docs",
+                    client_settings=CHROMA_SETTINGS  # <-- ADD THIS
+                )
                 test = db.similarity_search("test", k=1)
                 if len(test) > 0:
                     return db
             except Exception:
                 pass
-            # Remove old directory
+
             if os.path.exists(persist_dir):
                 shutil.rmtree(persist_dir, ignore_errors=True)
                 time.sleep(1)
-            # Run ingestion
-            try:
-                from ingest import ingest_documents
-                ingest_documents()
-            except Exception as ingest_error:
-                st.error(f"Ingestion failed: {ingest_error}")
-                st.exception(ingest_error)  # Show full traceback
-                st.stop()
-        # Load the new database
-        db = Chroma(persist_directory=persist_dir, embedding_function=embeddings, collection_name="company_docs")
+
+            from ingest import ingest_documents
+            ingest_documents()
+
+        db = Chroma(
+            persist_directory=persist_dir,
+            embedding_function=embeddings,
+            collection_name="company_docs",
+            client_settings=CHROMA_SETTINGS  # <-- ADD THIS
+        )
         return db
 
 @st.cache_resource
@@ -179,4 +188,4 @@ if user_input:
 
     except Exception as e:
         st.error(f"An unexpected error occurred: {e}")
-        st.exception(e)  # This shows the full traceback in the app
+        st.exception(e)
