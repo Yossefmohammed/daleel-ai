@@ -3,6 +3,7 @@ import shutil
 import gc
 import time
 import threading
+import traceback
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma
@@ -19,8 +20,12 @@ st.title("🤖 Company AI Assistant")
 
 # ===== FORCE REBUILD BUTTON =====
 if st.sidebar.button("🗑️ Force Rebuild Database"):
-    shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
-    st.rerun()
+    try:
+        shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
+        st.success("Database cleared. Please ask a question to rebuild.")
+        st.rerun()
+    except Exception as e:
+        st.error(f"Error clearing database: {e}")
 # =================================
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -42,13 +47,15 @@ def load_vectorstore():
         if len(test) == 0:
             raise ValueError("Empty database")
         return db
-    except Exception:
-        st.warning("Rebuilding vector database... ⏳")
+    except Exception as e:
+        st.warning(f"Rebuilding vector database... Reason: {e}")
+        # Clean up any previous instance
         if 'db' in locals():
             del db
         gc.collect()
         time.sleep(1)
         with rebuild_lock:
+            # Double-check if another thread rebuilt
             try:
                 db = Chroma(persist_directory=persist_dir, embedding_function=embeddings, collection_name="company_docs")
                 test = db.similarity_search("test", k=1)
@@ -56,11 +63,19 @@ def load_vectorstore():
                     return db
             except Exception:
                 pass
+            # Remove old directory
             if os.path.exists(persist_dir):
                 shutil.rmtree(persist_dir, ignore_errors=True)
                 time.sleep(1)
-            from ingest import ingest_documents
-            ingest_documents()
+            # Run ingestion
+            try:
+                from ingest import ingest_documents
+                ingest_documents()
+            except Exception as ingest_error:
+                st.error(f"Ingestion failed: {ingest_error}")
+                st.exception(ingest_error)  # Show full traceback
+                st.stop()
+        # Load the new database
         db = Chroma(persist_directory=persist_dir, embedding_function=embeddings, collection_name="company_docs")
         return db
 
@@ -127,36 +142,41 @@ if user_input:
     st.chat_message("user").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    db = load_vectorstore()
-    llm = load_llm()
-
-    docs = retrieve_docs(db, user_input)
-
-    # ===== DEBUG DISPLAY =====
-    st.write(f"**Retrieved {len(docs)} documents**")
-    if len(docs) == 0:
-        st.warning("No relevant documents found. The database might be empty or the query doesn't match.")
-    else:
-        for i, doc in enumerate(docs):
-            with st.expander(f"Chunk {i+1} – Source: {doc.metadata.get('source_file', 'Unknown')}"):
-                st.write(doc.page_content)
-    # ===== END DEBUG =====
-
-    context = format_context(docs)
-
-    history_text = ""
-    for msg in st.session_state.messages[-6:]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        history_text += f"{role}: {msg['content']}\n"
-
-    final_prompt = build_prompt(context, history_text, user_input)
-
     try:
-        response = llm.invoke(final_prompt)
-        answer = response.content
-    except Exception as e:
-        st.error(f"Sorry, an error occurred: {e}")
-        st.stop()
+        db = load_vectorstore()
+        llm = load_llm()
 
-    st.chat_message("assistant").write(answer)
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+        docs = retrieve_docs(db, user_input)
+
+        # Debug display
+        st.write(f"**Retrieved {len(docs)} documents**")
+        if len(docs) == 0:
+            st.warning("No relevant documents found. The database might be empty or the query doesn't match.")
+        else:
+            for i, doc in enumerate(docs):
+                with st.expander(f"Chunk {i+1} – Source: {doc.metadata.get('source_file', 'Unknown')}"):
+                    st.write(doc.page_content)
+
+        context = format_context(docs)
+
+        history_text = ""
+        for msg in st.session_state.messages[-6:]:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            history_text += f"{role}: {msg['content']}\n"
+
+        final_prompt = build_prompt(context, history_text, user_input)
+
+        try:
+            response = llm.invoke(final_prompt)
+            answer = response.content
+        except Exception as e:
+            st.error(f"LLM error: {e}")
+            st.exception(e)
+            st.stop()
+
+        st.chat_message("assistant").write(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
+        st.exception(e)  # This shows the full traceback in the app
