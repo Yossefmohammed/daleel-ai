@@ -43,8 +43,7 @@ def load_vectorstore():
         db = Chroma(
             persist_directory=persist_dir,
             embedding_function=embeddings,
-            collection_name="company_docs",
-            client_settings=CHROMA_SETTINGS
+            collection_name="company_docs"
         )
         # DEBUG: list collections
         collections = db._client.list_collections()
@@ -77,8 +76,7 @@ def load_vectorstore():
                 db = Chroma(
                     persist_directory=persist_dir,
                     embedding_function=embeddings,
-                    collection_name="company_docs",
-                    client_settings=CHROMA_SETTINGS
+                    collection_name="company_docs"
                 )
                 test = db.similarity_search("test", k=1)
                 if len(test) > 0:
@@ -101,8 +99,7 @@ def load_vectorstore():
         db = Chroma(
             persist_directory=persist_dir,
             embedding_function=embeddings,
-            collection_name="company_docs",
-            client_settings=CHROMA_SETTINGS
+            collection_name="company_docs"
         )
         # Debug after rebuild
         count = db._collection.count()
