@@ -73,14 +73,13 @@ def create_embeddings():
     )
 
 def build_vectorstore(chunks, embeddings, retries=3):
-    # Ensure final parent directory exists
     final_parent = CHROMA_DIR.parent
     final_parent.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(retries):
-        # Create a temporary directory inside the same parent (for atomic rename)
+        # Create a temporary directory inside the same parent
         temp_build_dir = final_parent / f"temp_build_{int(time.time())}_{attempt}"
-        temp_build_dir.mkdir(parents=True, exist_ok=False)  # ensure it's new
+        temp_build_dir.mkdir(parents=True, exist_ok=False)
 
         try:
             print(f"🛠 Building in temporary directory: {temp_build_dir}")
@@ -91,7 +90,7 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 embedding=embeddings,
                 persist_directory=str(temp_build_dir),
                 collection_name="company_docs",
-                client_settings=CHROMA_SETTINGS   # Disables telemetry
+                client_settings=CHROMA_SETTINGS
             )
 
             count_before = vectordb._collection.count()
@@ -110,14 +109,14 @@ def build_vectorstore(chunks, embeddings, retries=3):
             else:
                 raise RuntimeError("Temp collection is empty after persist!")
 
-            # Attempt to close the underlying client to release file locks
+            # Attempt to close the client properly
             try:
                 vectordb._client.close()
             except:
                 pass
             del vectordb
             gc.collect()
-            time.sleep(1)  # Give OS time to release handles
+            time.sleep(2)  # Give OS time to release file handles
 
             # Remove old database if it exists
             if CHROMA_DIR.exists():
@@ -126,13 +125,13 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 shutil.rmtree(CHROMA_DIR)
                 time.sleep(1)
 
-            # Rename the temporary directory to the final name (atomic on same filesystem)
-            print(f"📦 Renaming {temp_build_dir} -> {CHROMA_DIR}")
+            # Copy (not rename) the temporary directory to the final location
+            print(f"📦 Copying {temp_build_dir} -> {CHROMA_DIR}")
             sys.stdout.flush()
-            temp_build_dir.rename(CHROMA_DIR)
+            shutil.copytree(str(temp_build_dir), str(CHROMA_DIR))
 
-            # Verify the moved database with a fresh client
-            print("🔍 Verifying moved database...")
+            # Verify the copied database with a fresh client
+            print("🔍 Verifying copied database...")
             sys.stdout.flush()
             time.sleep(1)
 
@@ -144,24 +143,22 @@ def build_vectorstore(chunks, embeddings, retries=3):
             )
             collection = client.get_collection("company_docs")
             final_count = collection.count()
-            print(f"📊 Final document count after move: {final_count}")
+            print(f"📊 Final document count after copy: {final_count}")
             sys.stdout.flush()
 
-            # List files for debugging (optional)
             print(f"📁 Files in {CHROMA_DIR}:")
             for f in CHROMA_DIR.iterdir():
                 print(f"   - {f.name}")
             sys.stdout.flush()
 
             if final_count == 0:
-                raise RuntimeError("Moved database has zero documents!")
+                raise RuntimeError("Copied database has zero documents!")
             print("✅ Verification passed.")
             return  # success
 
         except Exception as e:
             print(f"⚠️ Build attempt {attempt+1} failed: {e}")
             sys.stdout.flush()
-            # Clean up temporary directory
             shutil.rmtree(temp_build_dir, ignore_errors=True)
             if attempt < retries - 1:
                 time.sleep(2)
