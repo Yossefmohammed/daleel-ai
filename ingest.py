@@ -19,11 +19,9 @@ BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
 
 def get_writable_chroma_dir():
-    """Return the final persist directory (must be writable)."""
-    primary_dir = Path(CHROMA_SETTINGS.persist_directory)  # dot notation
+    primary_dir = Path(CHROMA_SETTINGS.persist_directory)
     try:
         primary_dir.mkdir(parents=True, exist_ok=True)
-        # Test with a real SQLite file – catches read‑only filesystem issues
         test_db = primary_dir / "test_writable.sqlite"
         conn = sqlite3.connect(str(test_db))
         conn.execute("CREATE TABLE test (id integer)")
@@ -43,10 +41,6 @@ def get_writable_chroma_dir():
 
 CHROMA_DIR = get_writable_chroma_dir()
 
-# ===============================
-# LOAD DOCUMENTS
-# ===============================
-
 def load_documents():
     print("\n" + "="*60)
     print("🔍 DEBUG: Starting load_documents()")
@@ -58,7 +52,6 @@ def load_documents():
     if not DOCS_DIR.exists():
         raise FileNotFoundError(f"❌ 'docs' folder not found at {DOCS_DIR}")
 
-    # List all PDF files
     pdf_files = list(DOCS_DIR.rglob("*.pdf"))
     print(f"📄 Found {len(pdf_files)} PDF file(s):")
     for pdf in pdf_files:
@@ -82,15 +75,9 @@ def load_documents():
 
     print(f"\n✅ Total documents loaded: {len(documents)}")
     sys.stdout.flush()
-
     if len(documents) == 0:
-        raise RuntimeError("No pages were loaded from PDFs. They may be empty or contain no extractable text.")
-
+        raise RuntimeError("No pages were loaded from PDFs.")
     return documents
-
-# ===============================
-# SPLIT DOCUMENTS
-# ===============================
 
 def split_documents(documents):
     splitter = RecursiveCharacterTextSplitter(
@@ -103,20 +90,12 @@ def split_documents(documents):
     sys.stdout.flush()
     return chunks
 
-# ===============================
-# CREATE EMBEDDINGS
-# ===============================
-
 def create_embeddings():
     return HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
-
-# ===============================
-# BUILD VECTOR DATABASE (atomic)
-# ===============================
 
 def build_vectorstore(chunks, embeddings, retries=3):
     for attempt in range(retries):
@@ -128,8 +107,11 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 documents=chunks,
                 embedding=embeddings,
                 persist_directory=str(temp_dir),
-                collection_name="company_docs"   # <-- ADD THIS LINE
+                collection_name="company_docs"   # <-- CRITICAL
             )
+            # DEBUG: print the actual collection name
+            print(f"📚 Collection name created: {vectordb._collection.name}")
+            sys.stdout.flush()
             vectordb.persist()
             if CHROMA_DIR.exists():
                 print("⚠️ Removing old Chroma database...")
@@ -148,10 +130,6 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 time.sleep(2)
             else:
                 raise
-
-# ===============================
-# MAIN INGEST FUNCTION
-# ===============================
 
 def ingest_documents():
     print("🚀🚀🚀 INGESTION STARTED 🚀🚀🚀")

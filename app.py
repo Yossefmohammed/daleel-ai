@@ -17,7 +17,6 @@ load_dotenv()
 st.set_page_config(page_title="Company AI Assistant", page_icon="🤖")
 st.title("🤖 Company AI Assistant")
 
-# ===== FORCE REBUILD BUTTON =====
 if st.sidebar.button("🗑️ Force Rebuild Database"):
     try:
         shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
@@ -25,7 +24,6 @@ if st.sidebar.button("🗑️ Force Rebuild Database"):
         st.rerun()
     except Exception as e:
         st.error(f"Error clearing database: {e}")
-# =================================
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
@@ -46,8 +44,11 @@ def load_vectorstore():
             persist_directory=persist_dir,
             embedding_function=embeddings,
             collection_name="company_docs",
-            client_settings=CHROMA_SETTINGS  # Pass the Settings object
+            client_settings=CHROMA_SETTINGS
         )
+        # DEBUG: list collections
+        collections = db._client.list_collections()
+        st.write(f"📚 Collections in database: {[c.name for c in collections]}")
         test = db.similarity_search("test", k=1)
         if len(test) == 0:
             raise ValueError("Empty database")
@@ -58,7 +59,6 @@ def load_vectorstore():
             del db
         gc.collect()
         time.sleep(1)
-
         with rebuild_lock:
             try:
                 db = Chroma(
@@ -72,14 +72,11 @@ def load_vectorstore():
                     return db
             except Exception:
                 pass
-
             if os.path.exists(persist_dir):
                 shutil.rmtree(persist_dir, ignore_errors=True)
                 time.sleep(1)
-
             from ingest import ingest_documents
             ingest_documents()
-
         db = Chroma(
             persist_directory=persist_dir,
             embedding_function=embeddings,
@@ -154,20 +151,17 @@ if user_input:
     try:
         db = load_vectorstore()
         llm = load_llm()
-
         docs = retrieve_docs(db, user_input)
 
-        # Debug display
         st.write(f"**Retrieved {len(docs)} documents**")
         if len(docs) == 0:
-            st.warning("No relevant documents found. The database might be empty or the query doesn't match.")
+            st.warning("No relevant documents found.")
         else:
             for i, doc in enumerate(docs):
                 with st.expander(f"Chunk {i+1} – Source: {doc.metadata.get('source_file', 'Unknown')}"):
                     st.write(doc.page_content)
 
         context = format_context(docs)
-
         history_text = ""
         for msg in st.session_state.messages[-6:]:
             role = "User" if msg["role"] == "user" else "Assistant"
