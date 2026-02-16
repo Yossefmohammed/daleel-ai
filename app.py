@@ -20,7 +20,7 @@ st.title("🤖 Company AI Assistant")
 # ===== FORCE REBUILD BUTTON =====
 if st.sidebar.button("🗑️ Force Rebuild Database"):
     try:
-        shutil.rmtree(CHROMA_SETTINGS["persist_directory"], ignore_errors=True)  # <-- dict access
+        shutil.rmtree(CHROMA_SETTINGS.persist_directory, ignore_errors=True)
         st.success("Database cleared. Please ask a question to rebuild.")
         st.rerun()
     except Exception as e:
@@ -38,7 +38,7 @@ def load_vectorstore():
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
-    persist_dir = CHROMA_SETTINGS["persist_directory"]  # <-- dict access
+    persist_dir = CHROMA_SETTINGS.persist_directory
     os.makedirs(persist_dir, exist_ok=True)
 
     try:
@@ -46,7 +46,7 @@ def load_vectorstore():
             persist_directory=persist_dir,
             embedding_function=embeddings,
             collection_name="company_docs",
-            client_settings=CHROMA_SETTINGS  # this stays as dict
+            client_settings=CHROMA_SETTINGS  # Pass the Settings object
         )
         test = db.similarity_search("test", k=1)
         if len(test) == 0:

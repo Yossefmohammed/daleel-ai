@@ -20,7 +20,7 @@ DOCS_DIR = BASE_DIR / "docs"
 
 def get_writable_chroma_dir():
     """Return the final persist directory (must be writable)."""
-    primary_dir = Path(CHROMA_SETTINGS["persist_directory"])  # <-- dict access
+    primary_dir = Path(CHROMA_SETTINGS.persist_directory)  # dot notation
     try:
         primary_dir.mkdir(parents=True, exist_ok=True)
         # Test with a real SQLite file – catches read‑only filesystem issues
