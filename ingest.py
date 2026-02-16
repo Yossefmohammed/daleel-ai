@@ -103,7 +103,8 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 documents=chunks,
                 embedding=embeddings,
                 persist_directory=str(temp_dir),
-                collection_name="company_docs"
+                collection_name="company_docs",
+                client_settings=CHROMA_SETTINGS   # 👈 Disables telemetry, avoids extra errors
             )
             count_before = vectordb._collection.count()
             print(f"📊 Document count in temp collection (before persist): {count_before}")
