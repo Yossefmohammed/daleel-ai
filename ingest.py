@@ -2,6 +2,8 @@ import shutil
 import tempfile
 import sqlite3
 import time
+import sys
+import os
 from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -28,12 +30,15 @@ def get_writable_chroma_dir():
         conn.close()
         test_db.unlink()
         print(f"✅ Primary directory is writable: {primary_dir}")
+        sys.stdout.flush()
         return primary_dir
     except Exception as e:
         print(f"⚠️ Primary directory not fully writable: {e}")
+        sys.stdout.flush()
         fallback = Path(tempfile.gettempdir()) / "wasla_chroma_fallback"
         fallback.mkdir(parents=True, exist_ok=True)
         print(f"ℹ️ Using fallback directory: {fallback}")
+        sys.stdout.flush()
         return fallback
 
 CHROMA_DIR = get_writable_chroma_dir()
@@ -43,7 +48,13 @@ CHROMA_DIR = get_writable_chroma_dir()
 # ===============================
 
 def load_documents():
-    print(f"\n🔍 Checking for documents in: {DOCS_DIR}")
+    print("\n" + "="*60)
+    print("🔍 DEBUG: Starting load_documents()")
+    print(f"🔍 Current working directory: {os.getcwd()}")
+    print(f"🔍 DOCS_DIR absolute path: {DOCS_DIR.absolute()}")
+    print(f"🔍 DOCS_DIR exists? {DOCS_DIR.exists()}")
+    sys.stdout.flush()
+
     if not DOCS_DIR.exists():
         raise FileNotFoundError(f"❌ 'docs' folder not found at {DOCS_DIR}")
 
@@ -52,6 +63,7 @@ def load_documents():
     print(f"📄 Found {len(pdf_files)} PDF file(s):")
     for pdf in pdf_files:
         print(f"   - {pdf.name}")
+    sys.stdout.flush()
 
     if not pdf_files:
         raise ValueError("❌ No PDF files found in docs/")
@@ -59,14 +71,21 @@ def load_documents():
     documents = []
     for pdf_file in pdf_files:
         print(f"\n📂 Loading: {pdf_file.name}")
+        sys.stdout.flush()
         loader = PyPDFLoader(str(pdf_file))
         docs = loader.load()
         for doc in docs:
             doc.metadata["source_file"] = pdf_file.name
         documents.extend(docs)
         print(f"   → {len(docs)} pages loaded")
+        sys.stdout.flush()
 
     print(f"\n✅ Total documents loaded: {len(documents)}")
+    sys.stdout.flush()
+
+    if len(documents) == 0:
+        raise RuntimeError("No pages were loaded from PDFs. They may be empty or contain no extractable text.")
+
     return documents
 
 # ===============================
@@ -81,6 +100,7 @@ def split_documents(documents):
     )
     chunks = splitter.split_documents(documents)
     print(f"🔹 Created {len(chunks)} chunks.")
+    sys.stdout.flush()
     return chunks
 
 # ===============================
@@ -100,45 +120,47 @@ def create_embeddings():
 
 def build_vectorstore(chunks, embeddings, retries=3):
     for attempt in range(retries):
-        # Build into a unique temporary directory
         temp_dir = Path(tempfile.mkdtemp(prefix="wasla_build_"))
         try:
             print(f"🛠 Building in temporary directory: {temp_dir}")
+            sys.stdout.flush()
             vectordb = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,
                 persist_directory=str(temp_dir)
             )
             vectordb.persist()
-            # Success – now atomically replace the final directory
             if CHROMA_DIR.exists():
                 print("⚠️ Removing old Chroma database...")
+                sys.stdout.flush()
                 shutil.rmtree(CHROMA_DIR)
-            # Move the new database into place
             shutil.move(str(temp_dir), str(CHROMA_DIR))
             print("✅ Chroma DB built and moved successfully.")
             print(f"📂 Stored at: {CHROMA_DIR}")
+            sys.stdout.flush()
             return
         except Exception as e:
             print(f"⚠️ Build attempt {attempt+1} failed: {e}")
-            # Clean up temporary directory
+            sys.stdout.flush()
             shutil.rmtree(temp_dir, ignore_errors=True)
             if attempt < retries - 1:
-                time.sleep(2)  # wait before retrying
+                time.sleep(2)
             else:
-                raise  # re-raise the last exception
+                raise
 
 # ===============================
 # MAIN INGEST FUNCTION
 # ===============================
 
 def ingest_documents():
-    print("🚀 Starting ingestion process...\n")
+    print("🚀🚀🚀 INGESTION STARTED 🚀🚀🚀")
+    sys.stdout.flush()
     documents = load_documents()
     chunks = split_documents(documents)
     embeddings = create_embeddings()
     build_vectorstore(chunks, embeddings)
     print("\n🎉 Ingestion completed successfully.")
+    sys.stdout.flush()
 
 if __name__ == "__main__":
     ingest_documents()
