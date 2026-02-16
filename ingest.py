@@ -13,7 +13,8 @@ from constant import CHROMA_SETTINGS
 
 BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
-CHROMA_DIR = Path(CHROMA_SETTINGS.persist_directory)  # Use the path from constant directly
+# Use the exact path from constant (no fallback)
+CHROMA_DIR = Path(CHROMA_SETTINGS.persist_directory)
 
 def load_documents():
     print("\n" + "="*60)
@@ -97,18 +98,35 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 sample = vectordb._collection.get(limit=1)
                 print(f"📄 Sample content (first 100 chars): {sample['documents'][0][:100]}")
                 sys.stdout.flush()
+            else:
+                raise RuntimeError("Temp collection is empty after persist!")
 
-            # Ensure the final directory exists (create parent if needed)
+            # Ensure final directory parent exists
             CHROMA_DIR.parent.mkdir(parents=True, exist_ok=True)
             if CHROMA_DIR.exists():
                 print("⚠️ Removing old Chroma database...")
                 sys.stdout.flush()
                 shutil.rmtree(CHROMA_DIR)
             shutil.move(str(temp_dir), str(CHROMA_DIR))
-            print("✅ Chroma DB built and moved successfully.")
-            print(f"📂 Stored at: {CHROMA_DIR}")
+            print(f"✅ Chroma DB built and moved successfully to {CHROMA_DIR}")
             sys.stdout.flush()
-            return
+
+            # --- POST-MOVE VERIFICATION ---
+            # Reopen the moved database and count again
+            from chromadb.config import Settings
+            import chromadb
+            client = chromadb.PersistentClient(
+                path=str(CHROMA_DIR),
+                settings=Settings(anonymized_telemetry=False)
+            )
+            # Use the same embeddings to create a Chroma wrapper (or just check collection)
+            collection = client.get_collection("company_docs")
+            final_count = collection.count()
+            print(f"📊 Final document count after move: {final_count}")
+            sys.stdout.flush()
+            if final_count == 0:
+                raise RuntimeError("Moved database has zero documents!")
+            return  # success
         except Exception as e:
             print(f"⚠️ Build attempt {attempt+1} failed: {e}")
             sys.stdout.flush()
