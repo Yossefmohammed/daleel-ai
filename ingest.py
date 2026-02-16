@@ -107,12 +107,25 @@ def build_vectorstore(chunks, embeddings, retries=3):
                 documents=chunks,
                 embedding=embeddings,
                 persist_directory=str(temp_dir),
-                collection_name="company_docs"   # <-- CRITICAL
+                collection_name="company_docs"
             )
-            # DEBUG: print the actual collection name
-            print(f"📚 Collection name created: {vectordb._collection.name}")
+            # DEBUG: Check count before persist
+            count_before = vectordb._collection.count()
+            print(f"📊 Document count in temp collection (before persist): {count_before}")
             sys.stdout.flush()
+
             vectordb.persist()
+            # DEBUG: Check count after persist
+            count_after = vectordb._collection.count()
+            print(f"📊 Document count in temp collection (after persist): {count_after}")
+            sys.stdout.flush()
+
+            # Also get a sample to verify content
+            if count_after > 0:
+                sample = vectordb._collection.get(limit=1)
+                print(f"📄 Sample content (first 100 chars): {sample['documents'][0][:100]}")
+                sys.stdout.flush()
+
             if CHROMA_DIR.exists():
                 print("⚠️ Removing old Chroma database...")
                 sys.stdout.flush()
@@ -120,6 +133,16 @@ def build_vectorstore(chunks, embeddings, retries=3):
             shutil.move(str(temp_dir), str(CHROMA_DIR))
             print("✅ Chroma DB built and moved successfully.")
             print(f"📂 Stored at: {CHROMA_DIR}")
+            sys.stdout.flush()
+
+            # Final verification by loading from final location
+            final_db = Chroma(
+                persist_directory=str(CHROMA_DIR),
+                embedding_function=embeddings,
+                collection_name="company_docs"
+            )
+            final_count = final_db._collection.count()
+            print(f"📊 Document count in final location: {final_count}")
             sys.stdout.flush()
             return
         except Exception as e:
