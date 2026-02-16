@@ -1,5 +1,4 @@
 import shutil
-import tempfile
 import sqlite3
 import time
 import sys
@@ -16,6 +15,9 @@ BASE_DIR = Path(__file__).parent
 DOCS_DIR = BASE_DIR / "docs"
 CHROMA_DIR = Path(CHROMA_SETTINGS.persist_directory)
 
+# =========================
+# LOAD DOCUMENTS
+# =========================
 def load_documents():
     print("\n" + "="*60)
     print("🔍 DEBUG: Starting load_documents()")
@@ -54,6 +56,9 @@ def load_documents():
         raise RuntimeError("No pages were loaded from PDFs.")
     return documents
 
+# =========================
+# SPLIT DOCUMENTS INTO CHUNKS
+# =========================
 def split_documents(documents):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
@@ -65,121 +70,72 @@ def split_documents(documents):
     sys.stdout.flush()
     return chunks
 
+# =========================
+# CREATE EMBEDDINGS
+# =========================
 def create_embeddings():
+    print("🧠 Creating embeddings model...")
+    sys.stdout.flush()
     return HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
 
-def build_vectorstore(chunks, embeddings, retries=3):
-    final_parent = CHROMA_DIR.parent
-    final_parent.mkdir(parents=True, exist_ok=True)
+# =========================
+# BUILD VECTORSTORE
+# =========================
+def build_vectorstore(chunks, embeddings):
+    CHROMA_DIR.parent.mkdir(parents=True, exist_ok=True)
 
-    for attempt in range(retries):
-        temp_build_dir = final_parent / f"temp_build_{int(time.time())}_{attempt}"
-        temp_build_dir.mkdir(parents=True, exist_ok=False)
+    # Remove old database if it exists
+    if CHROMA_DIR.exists():
+        print(f"⚠️ Removing old Chroma database at {CHROMA_DIR}")
+        sys.stdout.flush()
+        shutil.rmtree(CHROMA_DIR)
+        time.sleep(1)
 
-        try:
-            print(f"🛠 Building in temporary directory: {temp_build_dir}")
-            sys.stdout.flush()
+    print(f"🛠 Building vectorstore directly in {CHROMA_DIR}")
+    sys.stdout.flush()
 
-            # IMPORTANT: Do NOT pass client_settings – use only persist_directory
-            vectordb = Chroma.from_documents(
-                documents=chunks,
-                embedding=embeddings,
-                persist_directory=str(temp_build_dir),
-                collection_name="company_docs"
-            )
+    vectordb = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=str(CHROMA_DIR),
+        collection_name="company_docs"
+    )
+    vectordb.persist()
+    print("💾 Persisted vectorstore to disk.")
+    sys.stdout.flush()
 
-            count_before = vectordb._collection.count()
-            print(f"📊 Document count in temp collection (before persist): {count_before}")
-            sys.stdout.flush()
+    # Verify database
+    print("🔍 Verifying database...")
+    sys.stdout.flush()
+    import chromadb
+    from chromadb.config import Settings
+    client = chromadb.PersistentClient(
+        path=str(CHROMA_DIR),
+        settings=Settings(anonymized_telemetry=False)
+    )
+    collection = client.get_collection("company_docs")
+    final_count = collection.count()
+    print(f"📊 Final document count: {final_count}")
+    sys.stdout.flush()
 
-            vectordb.persist()
-            count_after = vectordb._collection.count()
-            print(f"📊 Document count in temp collection (after persist): {count_after}")
-            sys.stdout.flush()
+    if final_count == 0:
+        raise RuntimeError("❌ Verification failed: database has zero documents!")
+    print("✅ Verification passed.")
+    try:
+        vectordb._client.close()
+    except:
+        pass
+    del vectordb
+    gc.collect()
+    time.sleep(1)
 
-            if count_after > 0:
-                sample = vectordb._collection.get(limit=1)
-                print(f"📄 Sample content (first 100 chars): {sample['documents'][0][:100]}")
-                sys.stdout.flush()
-            else:
-                raise RuntimeError("Temp collection is empty after persist!")
-
-            # List files before closing
-            print(f"📁 Files in {temp_build_dir} before cleanup:")
-            for f in temp_build_dir.iterdir():
-                size = f.stat().st_size if f.is_file() else 0
-                print(f"   - {f.name} (size: {size})")
-            sys.stdout.flush()
-
-            # Close client and clean up
-            try:
-                vectordb._client.close()
-            except:
-                pass
-            del vectordb
-            gc.collect()
-            time.sleep(2)
-
-            # List files after closing
-            print(f"📁 Files in {temp_build_dir} after cleanup:")
-            for f in temp_build_dir.iterdir():
-                size = f.stat().st_size if f.is_file() else 0
-                print(f"   - {f.name} (size: {size})")
-            sys.stdout.flush()
-
-            # Remove old database if it exists
-            if CHROMA_DIR.exists():
-                print("⚠️ Removing old Chroma database...")
-                sys.stdout.flush()
-                shutil.rmtree(CHROMA_DIR)
-                time.sleep(1)
-
-            # Copy the temporary directory to the final location
-            print(f"📦 Copying {temp_build_dir} -> {CHROMA_DIR}")
-            sys.stdout.flush()
-            shutil.copytree(str(temp_build_dir), str(CHROMA_DIR))
-
-            # List files in destination after copy
-            print(f"📁 Files in {CHROMA_DIR} after copy:")
-            for f in CHROMA_DIR.iterdir():
-                size = f.stat().st_size if f.is_file() else 0
-                print(f"   - {f.name} (size: {size})")
-            sys.stdout.flush()
-
-            # Verify the copied database with a fresh client using CHROMA_SETTINGS (telemetry off)
-            print("🔍 Verifying copied database...")
-            sys.stdout.flush()
-            time.sleep(1)
-
-            import chromadb
-            from chromadb.config import Settings
-            client = chromadb.PersistentClient(
-                path=str(CHROMA_DIR),
-                settings=Settings(anonymized_telemetry=False)
-            )
-            collection = client.get_collection("company_docs")
-            final_count = collection.count()
-            print(f"📊 Final document count after copy: {final_count}")
-            sys.stdout.flush()
-
-            if final_count == 0:
-                raise RuntimeError("Copied database has zero documents!")
-            print("✅ Verification passed.")
-            return  # success
-
-        except Exception as e:
-            print(f"⚠️ Build attempt {attempt+1} failed: {e}")
-            sys.stdout.flush()
-            shutil.rmtree(temp_build_dir, ignore_errors=True)
-            if attempt < retries - 1:
-                time.sleep(2)
-            else:
-                raise
-
+# =========================
+# INGESTION PIPELINE
+# =========================
 def ingest_documents():
     print("🚀🚀🚀 INGESTION STARTED 🚀🚀🚀")
     sys.stdout.flush()
@@ -190,5 +146,8 @@ def ingest_documents():
     print("\n🎉 Ingestion completed successfully.")
     sys.stdout.flush()
 
+# =========================
+# MAIN
+# =========================
 if __name__ == "__main__":
     ingest_documents()
