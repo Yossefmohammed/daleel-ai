@@ -14,7 +14,7 @@ For a given query the retriever:
 
 import re
 from typing import List, Optional
-from langchain.schema import Document
+from langchain_core.documents import Document
 import networkx as nx
 
 
