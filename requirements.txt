@@ -18,17 +18,23 @@ huggingface-hub>=0.17.0
 torchvision>=0.15.0
 torch>=2.0.0
 
-# NLP & Text Processing
-spacy>=3.7.0
+# PDF & Document Processing
 pypdf>=4.0.0
+pydantic>=2.0.0
+
+# GitHub API
+PyGithub>=1.60.0
 
 # Data Processing
 numpy>=1.24.0
 pandas>=2.0.0
 
+# NLP & Text Processing
+spacy>=3.7.0
+
 # Networking & Utilities
 requests>=2.31.0
 urllib3>=2.0.0
 
-# Protobuf Fix (Critical - prevents descriptor errors)
+# Protobuf Fix
 protobuf==3.20.0
