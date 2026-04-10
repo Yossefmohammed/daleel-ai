@@ -1,40 +1,26 @@
-# Core Dependencies
+# Career AI Assistant
+
+# Core
 streamlit>=1.28.0
 python-dotenv>=1.0.0
 
-# LLM & Chat
+# LLM
 groq>=0.9.0
-langchain>=0.1.0
-langchain-core>=0.1.0
-langchain-text-splitters>=0.0.1
-langchain-community>=0.0.10
 
-# Vector Database & Embeddings
-chromadb>=0.4.0
-sentence-transformers>=2.2.0
-huggingface-hub>=0.17.0
-
-# Vision & Image Processing
-torchvision>=0.15.0
-torch>=2.0.0
-
-# PDF & Document Processing
+# PDF
 pypdf>=4.0.0
-pydantic>=2.0.0
 
 # GitHub API
 PyGithub>=1.60.0
 
-# Data Processing
-numpy>=1.24.0
+# Data
 pandas>=2.0.0
+numpy>=1.24.0
 
-# NLP & Text Processing
-spacy>=3.7.0
-
-# Networking & Utilities
+# Web scraping (Wuzzuf)
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
 requests>=2.31.0
-urllib3>=2.0.0
 
-# Protobuf Fix
-protobuf==3.20.0
+# Misc
+pydantic>=2.0.0

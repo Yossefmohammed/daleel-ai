@@ -1,266 +1,369 @@
 """
 Data Scraper Module
-Scrapes fresh job data from RemoteOK and GitHub Jobs
-Combines with Kaggle dataset for comprehensive job database
+Sources:
+  ✅ RemoteOK     — free public JSON API
+  ✅ Arbeitnow    — free public JSON API
+  ✅ The Muse     — free public JSON API
+  ✅ Wuzzuf       — HTML scraping with BeautifulSoup (Egypt-focused)
+  ⚠️  LinkedIn    — NOT supported (see note below)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LinkedIn Scraping — Why it is NOT included:
+  1. ToS section 8.2 explicitly forbids automated data collection.
+  2. Pages are JavaScript-rendered — requests/BS4 gets a login
+     redirect, not job data.
+  3. Aggressive bot detection (Cloudflare + proprietary layer).
+  4. They have legally pursued scrapers (hiQ v LinkedIn, 2022).
+  Legitimate option: LinkedIn Jobs API via a registered partner app:
+  https://developer.linkedin.com/product-catalog/jobs
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
+import os
+import time
+import logging
 import requests
 import pandas as pd
 from datetime import datetime
-import json
-import logging
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/json,*/*",
+}
 
+OUTPUT_PATH = "data/jobs_combined.csv"
+KAGGLE_FALLBACK_PATHS = ["data/jobs.csv", "docs/ai_jobs_market_2025_2026.csv"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. RemoteOK
+# ─────────────────────────────────────────────────────────────────────────────
 class RemoteOKScraper:
-    """Scrapes jobs from RemoteOK (allows scraping per their ToS)"""
-    
-    def __init__(self):
-        self.api_url = "https://remoteok.com/api/jobs"
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-    
-    def scrape_jobs(self, keywords=None, limit=100):
-        """
-        Scrape jobs from RemoteOK
-        
-        Args:
-            keywords: Search keywords (e.g., "python")
-            limit: Maximum jobs to return
-            
-        Returns:
-            List of job dictionaries
-        """
+    URL = "https://remoteok.com/api"
+
+    def scrape(self, limit: int = 100) -> list:
         try:
-            params = {
-                "category": "programming"
-            }
-            
-            if keywords:
-                params["search"] = keywords
-            
-            logger.info("Fetching jobs from RemoteOK...")
-            response = requests.get(self.api_url, params=params, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            
-            jobs_raw = response.json()
-            
-            # Standardize format
-            jobs_standardized = []
-            for job in jobs_raw[:limit]:
-                standardized = {
-                    "job_title": job.get("title", "Unknown"),
-                    "company": job.get("company", "Unknown"),
-                    "description": job.get("description", "")[:500],  # Limit description
-                    "location": job.get("location", "Remote"),
-                    "country": "Remote/Global",
+            logger.info("📡 RemoteOK: fetching...")
+            r = requests.get(self.URL, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            jobs = []
+            for item in r.json()[1:limit + 1]:
+                if not isinstance(item, dict):
+                    continue
+                jobs.append({
+                    "job_title":   item.get("position", "Unknown"),
+                    "company":     item.get("company", "Unknown"),
+                    "description": item.get("description", "")[:600],
+                    "location":    item.get("location", "Remote"),
                     "remote_work": "Fully Remote",
-                    "url": job.get("url", ""),
-                    "posted_date": datetime.now().isoformat(),
-                    "salary_range": job.get("salary", "Not specified"),
-                    "source": "RemoteOK"
-                }
-                jobs_standardized.append(standardized)
-            
-            logger.info(f"✅ Scraped {len(jobs_standardized)} jobs from RemoteOK")
-            return jobs_standardized
-            
+                    "tags":        ", ".join(item.get("tags", [])),
+                    "url":         item.get("url", ""),
+                    "salary_range": item.get("salary", "Not specified"),
+                    "posted_date": item.get("date", datetime.now().isoformat()),
+                    "source":      "RemoteOK",
+                })
+            logger.info(f"✅ RemoteOK: {len(jobs)} jobs")
+            return jobs
         except Exception as e:
-            logger.error(f"❌ Error scraping RemoteOK: {e}")
+            logger.warning(f"⚠️  RemoteOK failed: {e}")
             return []
 
 
-class GitHubJobsScraper:
-    """Fetches jobs from GitHub Jobs API (no scraping needed - free API)"""
-    
-    def __init__(self):
-        self.api_url = "https://jobs.github.com/positions.json"
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-    
-    def scrape_jobs(self, description="AI", limit=50):
-        """
-        Fetch jobs from GitHub Jobs API
-        
-        Args:
-            description: Job search term (e.g., "Python", "AI", "Backend")
-            limit: Maximum jobs to return
-            
-        Returns:
-            List of job dictionaries
-        """
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. Arbeitnow
+# ─────────────────────────────────────────────────────────────────────────────
+class ArbeitnowScraper:
+    URL = "https://www.arbeitnow.com/api/job-board-api"
+
+    def scrape(self, pages: int = 3) -> list:
+        jobs = []
         try:
-            params = {
-                "description": description,
-                "page": 1
-            }
-            
-            logger.info(f"Fetching jobs from GitHub Jobs API for: {description}")
-            response = requests.get(self.api_url, params=params, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            
-            jobs_raw = response.json()
-            
-            # Standardize format
-            jobs_standardized = []
-            for job in jobs_raw[:limit]:
-                standardized = {
-                    "job_title": job.get("title", "Unknown"),
-                    "company": job.get("company", "Unknown"),
-                    "description": job.get("description", "")[:500],
-                    "location": job.get("location", "Unknown"),
-                    "country": "USA",  # GitHub Jobs mostly USA
-                    "remote_work": "Fully Remote" if "remote" in job.get("title", "").lower() else "On-site",
-                    "url": job.get("url", ""),
-                    "posted_date": job.get("created_at", datetime.now().isoformat()),
-                    "salary_range": "Not specified",
-                    "source": "GitHub Jobs"
-                }
-                jobs_standardized.append(standardized)
-            
-            logger.info(f"✅ Fetched {len(jobs_standardized)} jobs from GitHub Jobs API")
-            return jobs_standardized
-            
+            for page in range(1, pages + 1):
+                logger.info(f"📡 Arbeitnow page {page}...")
+                r = requests.get(self.URL, params={"page": page}, headers=HEADERS, timeout=15)
+                r.raise_for_status()
+                data = r.json().get("data", [])
+                if not data:
+                    break
+                for item in data:
+                    jobs.append({
+                        "job_title":   item.get("title", "Unknown"),
+                        "company":     item.get("company_name", "Unknown"),
+                        "description": item.get("description", "")[:600],
+                        "location":    item.get("location", "Unknown"),
+                        "remote_work": "Fully Remote" if item.get("remote") else "On-site / Hybrid",
+                        "tags":        ", ".join(item.get("tags", [])),
+                        "url":         item.get("url", ""),
+                        "salary_range": "Not specified",
+                        "posted_date": item.get("created_at", datetime.now().isoformat()),
+                        "source":      "Arbeitnow",
+                    })
+                time.sleep(0.5)
         except Exception as e:
-            logger.error(f"❌ Error fetching GitHub jobs: {e}")
-            return []
+            logger.warning(f"⚠️  Arbeitnow failed: {e}")
+        logger.info(f"✅ Arbeitnow: {len(jobs)} jobs")
+        return jobs
 
 
-class DataMerger:
-    """Merges Kaggle dataset with scraped data"""
-    
-    @staticmethod
-    def load_kaggle_data(csv_path):
-        """Load Kaggle AI Jobs dataset"""
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. The Muse
+# ─────────────────────────────────────────────────────────────────────────────
+class TheMuseScraper:
+    URL = "https://www.themuse.com/api/public/jobs"
+    CATEGORIES = ["Software Engineer", "Data Science", "Product & UX"]
+
+    def scrape(self, pages: int = 2) -> list:
+        jobs = []
         try:
-            logger.info(f"Loading Kaggle data from {csv_path}...")
-            df = pd.read_csv(csv_path)
-            
-            # Use columns as-is (already well-formatted from Kaggle)
-            df["description"] = df.get("job_category", "AI").astype(str) + " - " + df.get("required_skills", "").astype(str)
-            df["description"] = df["description"].str[:500]
-            df["source"] = "Kaggle AI Jobs"
-            df["url"] = ""
-            
-            # Select relevant columns
-            cols_to_use = [
-                "job_title", "company_size", "job_category", 
-                "description", "city", "country", "remote_work",
-                "annual_salary_usd", "demand_score", "posting_year", 
-                "required_skills", "source", "url"
-            ]
-            
-            # Keep only available columns
-            cols_available = [c for c in cols_to_use if c in df.columns]
-            df_standardized = df[cols_available].copy()
-            
-            logger.info(f"✅ Loaded {len(df_standardized)} jobs from Kaggle")
-            return df_standardized
-            
+            for cat in self.CATEGORIES:
+                for page in range(1, pages + 1):
+                    logger.info(f"📡 The Muse: {cat} p{page}...")
+                    r = requests.get(
+                        self.URL, params={"category": cat, "page": page},
+                        headers=HEADERS, timeout=15,
+                    )
+                    r.raise_for_status()
+                    results = r.json().get("results", [])
+                    if not results:
+                        break
+                    for item in results:
+                        loc_list = item.get("locations", [{}])
+                        location = loc_list[0].get("name", "Unknown") if loc_list else "Unknown"
+                        jobs.append({
+                            "job_title":   item.get("name", "Unknown"),
+                            "company":     item.get("company", {}).get("name", "Unknown"),
+                            "description": item.get("contents", "")[:600],
+                            "location":    location,
+                            "remote_work": "Remote" if "remote" in location.lower() else "On-site / Hybrid",
+                            "tags":        ", ".join(c.get("name","") for c in item.get("categories",[])),
+                            "url":         item.get("refs", {}).get("landing_page", ""),
+                            "salary_range": "Not specified",
+                            "posted_date": item.get("publication_date", datetime.now().isoformat()),
+                            "source":      "The Muse",
+                        })
+                    time.sleep(0.5)
         except Exception as e:
-            logger.error(f"❌ Error loading Kaggle data: {e}")
-            import traceback
-            traceback.print_exc()
-            return pd.DataFrame()
-    
-    @staticmethod
-    def merge_datasets(kaggle_df, scraped_jobs_list):
-        """
-        Merge Kaggle dataset with scraped jobs
-        
-        Args:
-            kaggle_df: DataFrame from Kaggle
-            scraped_jobs_list: List of dicts from scrapers
-            
-        Returns:
-            Combined DataFrame
-        """
+            logger.warning(f"⚠️  The Muse failed: {e}")
+        logger.info(f"✅ The Muse: {len(jobs)} jobs")
+        return jobs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Wuzzuf  🇪🇬
+# ─────────────────────────────────────────────────────────────────────────────
+class WuzzufScraper:
+    """
+    Scrapes Wuzzuf.net — Egypt's largest job board.
+    Server-renders HTML so BeautifulSoup works fine.
+
+    Wuzzuf uses minified/hashed CSS class names (e.g. css-m604qf) that can
+    change on any deploy.  This scraper uses semantic / structural selectors
+    (tag names, href patterns, text content) so it stays robust.
+    """
+
+    BASE_URL   = "https://wuzzuf.net"
+    SEARCH_URL = "https://wuzzuf.net/search/jobs/"
+
+    # Cast a wide net — Wuzzuf is Egypt-first
+    KEYWORDS = [
+        "software engineer",
+        "python developer",
+        "data scientist",
+        "frontend developer",
+        "backend developer",
+        "full stack developer",
+        "devops engineer",
+        "mobile developer",
+        "machine learning",
+        "ui ux",
+    ]
+
+    EGYPT_CITIES = {
+        "Cairo", "Giza", "Alexandria", "Maadi", "Nasr City",
+        "Heliopolis", "Zamalek", "Smart Village", "New Cairo",
+        "6th of October", "Mansoura", "Tanta", "Assiut",
+        "Egypt", "Remote", "Hybrid",
+    }
+
+    def _fetch(self, keyword: str, page: int) -> BeautifulSoup | None:
         try:
-            # Convert scraped jobs to DataFrame
-            scraped_df = pd.DataFrame(scraped_jobs_list)
-            
-            # Combine datasets
-            merged = pd.concat([kaggle_df, scraped_df], ignore_index=True)
-            
-            # Remove duplicates based on title and company
-            merged = merged.drop_duplicates(
-                subset=["job_title", "company"],
-                keep="first"
+            r = requests.get(
+                self.SEARCH_URL,
+                params={"q": keyword, "l": "Egypt", "start": page},
+                headers=HEADERS,
+                timeout=20,
             )
-            
-            logger.info(f"✅ Merged datasets: {len(merged)} unique jobs total")
-            return merged
-            
+            if r.status_code == 200:
+                return BeautifulSoup(r.text, "lxml")
+            logger.warning(f"   Wuzzuf HTTP {r.status_code} for '{keyword}' p{page}")
         except Exception as e:
-            logger.error(f"❌ Error merging datasets: {e}")
-            return kaggle_df if not kaggle_df.empty else pd.DataFrame()
-    
-    @staticmethod
-    def save_combined_data(df, output_path):
-        """Save combined dataset to CSV"""
-        try:
-            df.to_csv(output_path, index=False)
-            logger.info(f"✅ Saved combined data to {output_path}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Error saving data: {e}")
-            return False
+            logger.warning(f"   Wuzzuf fetch error: {e}")
+        return None
+
+    def _parse(self, soup: BeautifulSoup) -> list:
+        jobs = []
+
+        # Wuzzuf wraps each listing in <article> — the most stable selector
+        cards = soup.find_all("article")
+
+        # Fallback: any block with a /jobs/ link and an <h2>
+        if not cards:
+            cards = [h2.parent.parent for h2 in soup.find_all("h2") if h2.find("a", href=True)]
+
+        for card in cards:
+            try:
+                # ── Title ───────────────────────────────────────────────
+                h2 = card.find("h2")
+                title_tag = h2.find("a") if h2 else card.find("a", href=lambda h: h and "/jobs/" in h)
+                title = title_tag.get_text(strip=True) if title_tag else ""
+                if not title:
+                    continue
+
+                # ── URL ─────────────────────────────────────────────────
+                href = title_tag.get("href", "") if title_tag else ""
+                job_url = href if href.startswith("http") else (self.BASE_URL + href if href else "")
+
+                # ── Company ─────────────────────────────────────────────
+                company_tag = card.find("a", href=lambda h: h and "/company/" in (h or "").lower())
+                company = company_tag.get_text(strip=True) if company_tag else "Unknown"
+
+                # ── Location ────────────────────────────────────────────
+                location = "Egypt"
+                for span in card.find_all("span"):
+                    txt = span.get_text(strip=True)
+                    if any(city.lower() in txt.lower() for city in self.EGYPT_CITIES) and len(txt) < 50:
+                        location = txt
+                        break
+
+                # ── Skills / Tags ────────────────────────────────────────
+                tag_links = card.select("a[href*='/a/']")  # Wuzzuf skill tags use /a/ path
+                tags = ", ".join(t.get_text(strip=True) for t in tag_links[:8] if t.get_text(strip=True))
+
+                # ── Posted date ──────────────────────────────────────────
+                time_tag = card.find("time")
+                posted = time_tag.get("datetime", datetime.now().isoformat()) if time_tag else datetime.now().isoformat()
+
+                jobs.append({
+                    "job_title":   title,
+                    "company":     company,
+                    "description": tags or title,
+                    "location":    location,
+                    "remote_work": "Remote" if "remote" in location.lower() else "On-site / Hybrid",
+                    "tags":        tags,
+                    "url":         job_url,
+                    "salary_range": "Not specified",
+                    "posted_date": posted,
+                    "source":      "Wuzzuf",
+                })
+            except Exception:
+                continue
+
+        return jobs
+
+    def scrape(self, keywords: list | None = None, pages_per_keyword: int = 2) -> list:
+        keywords = keywords or self.KEYWORDS
+        all_jobs = []
+
+        for kw in keywords:
+            logger.info(f"📡 Wuzzuf: '{kw}'")
+            for page in range(0, pages_per_keyword):   # Wuzzuf paginates from 0
+                soup = self._fetch(kw, page)
+                if not soup:
+                    break
+                found = self._parse(soup)
+                if not found:
+                    break
+                all_jobs.extend(found)
+                logger.info(f"   page {page}: {len(found)} jobs")
+                time.sleep(1.5)                        # respectful crawl delay
+
+        # Deduplicate within source
+        seen: set = set()
+        unique = []
+        for job in all_jobs:
+            key = (job["job_title"].lower(), job["company"].lower())
+            if key not in seen:
+                seen.add(key)
+                unique.append(job)
+
+        logger.info(f"✅ Wuzzuf: {len(unique)} unique jobs")
+        return unique
 
 
-def get_combined_jobs(kaggle_path="docs/ai_jobs_market_2025_2026.csv", output_path="data/jobs_combined.csv"):
-    """
-    Main function: Get combined job data from Kaggle + Scraping
-    Falls back to Kaggle-only if scraping fails
-    
-    Returns:
-        DataFrame with all jobs
-    """
-    logger.info("🔄 Starting data collection...")
-    
-    # Load Kaggle data (PRIMARY)
-    kaggle_df = DataMerger.load_kaggle_data(kaggle_path)
-    
-    if kaggle_df.empty:
-        logger.warning("⚠️  Could not load Kaggle data")
+# ─────────────────────────────────────────────────────────────────────────────
+# Main merge function
+# ─────────────────────────────────────────────────────────────────────────────
+def _load_existing() -> pd.DataFrame:
+    for path in [OUTPUT_PATH] + KAGGLE_FALLBACK_PATHS:
+        if os.path.exists(path):
+            try:
+                df = pd.read_csv(path)
+                rename = {"title": "job_title", "position": "job_title",
+                          "name": "job_title", "company_name": "company"}
+                df.rename(columns={k: v for k, v in rename.items() if k in df.columns}, inplace=True)
+                df.setdefault("job_title", "Unknown")
+                df.setdefault("company",   "Unknown")
+                df.setdefault("source",    "Kaggle")
+                logger.info(f"✅ Loaded {len(df)} existing jobs from {path}")
+                return df
+            except Exception as e:
+                logger.warning(f"⚠️  {path}: {e}")
+    return pd.DataFrame()
+
+
+def scrape_and_save(
+    include_remoteok:  bool = True,
+    include_arbeitnow: bool = True,
+    include_muse:      bool = True,
+    include_wuzzuf:    bool = True,
+    remoteok_limit:    int  = 100,
+    arbeitnow_pages:   int  = 3,
+    muse_pages:        int  = 2,
+    wuzzuf_keywords:   list | None = None,
+    wuzzuf_pages:      int  = 2,
+) -> pd.DataFrame:
+    os.makedirs("data", exist_ok=True)
+    existing = _load_existing()
+    fresh = []
+
+    if include_remoteok:
+        fresh += RemoteOKScraper().scrape(limit=remoteok_limit)
+    if include_arbeitnow:
+        fresh += ArbeitnowScraper().scrape(pages=arbeitnow_pages)
+    if include_muse:
+        fresh += TheMuseScraper().scrape(pages=muse_pages)
+    if include_wuzzuf:
+        fresh += WuzzufScraper().scrape(keywords=wuzzuf_keywords, pages_per_keyword=wuzzuf_pages)
+
+    logger.info(f"📊 Fresh scraped: {len(fresh)} | Existing: {len(existing)}")
+
+    if not fresh and existing.empty:
         return pd.DataFrame()
-    
-    # Scrape fresh data (OPTIONAL - for enhancement)
-    logger.info("\n📡 Attempting to scrape fresh data...")
-    all_scraped = []
-    
-    try:
-        remote_ok_scraper = RemoteOKScraper()
-        remote_ok_jobs = remote_ok_scraper.scrape_jobs(keywords="AI", limit=50)
-        all_scraped.extend(remote_ok_jobs)
-    except Exception as e:
-        logger.warning(f"⚠️  RemoteOK scraping unavailable (offline?): {type(e).__name__}")
-    
-    try:
-        github_scraper = GitHubJobsScraper()
-        github_jobs = github_scraper.scrape_jobs(description="AI", limit=50)
-        all_scraped.extend(github_jobs)
-    except Exception as e:
-        logger.warning(f"⚠️  GitHub Jobs API unavailable (offline?): {type(e).__name__}")
-    
-    logger.info(f"📊 Total fresh jobs scraped: {len(all_scraped)}")
-    
-    # Merge with Kaggle (or use Kaggle-only if scraping failed)
-    merged_df = DataMerger.merge_datasets(kaggle_df, all_scraped)
-    
-    # Save combined data
-    DataMerger.save_combined_data(merged_df, output_path)
-    
-    logger.info(f"\n✅ ✅ COMPLETE! Total jobs available: {len(merged_df)}")
-    logger.info(f"📁 Data saved to: {output_path}")
-    return merged_df
+
+    combined = pd.concat([existing, pd.DataFrame(fresh)], ignore_index=True)
+    before = len(combined)
+    combined.drop_duplicates(subset=["job_title", "company"], keep="first", inplace=True)
+    logger.info(f"🗑️  {before - len(combined)} duplicates removed → {len(combined)} total")
+
+    combined.to_csv(OUTPUT_PATH, index=False)
+    logger.info(f"💾 Saved → {OUTPUT_PATH}")
+    return combined
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Run the scraper
-    df = get_combined_jobs()
-    print(f"\nDataset shape: {df.shape}")
-    print(f"\nSample jobs:\n{df.head()}")
+    df = scrape_and_save()
+    if not df.empty:
+        print(f"\n✅ {len(df)} total jobs")
+        print(df[["job_title", "company", "location", "source"]].head(15).to_string(index=False))
+    else:
+        print("❌ No jobs collected.")

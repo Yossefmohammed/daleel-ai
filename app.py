@@ -1,1090 +1,440 @@
 """
-Career AI Assistant - Phase 1
-MVP combining CV analysis + GitHub profile + Job matching
+Career AI Assistant - app.py
+CV Analyzer + GitHub Profiler + Job Matcher + Live Job Scraper
 """
 
 import os
 import streamlit as st
 from dotenv import load_dotenv
+
+load_dotenv()
+
+st.set_page_config(
+    page_title="🎯 Career AI Assistant",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
 from cv_analyzer import CVAnalyzer
 from github_analyzer import GitHubAnalyzer
 from job_matcher import JobMatcher
-import json
 
-# Load environment variables
-load_dotenv()
-
-# Page configuration
-st.set_page_config(
-    page_title="🚀 Career AI Assistant",
-    page_icon="🎯",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS
 st.markdown("""
-    <style>
-    .main {
-        padding: 2rem;
-    }
-    .stTabs [data-baseweb="tab-list"] button {
-        font-size: 1.1rem;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+<style>
+.stApp { background: linear-gradient(135deg, #0f0c29, #302b63, #24243e); color: #E8E8F0; }
+h1 { text-align: center; font-size: 2.8rem; font-weight: 800;
+     background: linear-gradient(135deg, #00D9FF, #0091FF);
+     -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+h2, h3 { color: #00D9FF; }
+.stTabs [data-baseweb="tab-list"] button { font-size: 1rem; font-weight: 600; }
+footer { visibility: hidden; }
+</style>
+""", unsafe_allow_html=True)
 
-# Title and description
 st.title("🎯 Career AI Assistant")
-st.markdown("""
-    ### Phase 1: MVP Features
-    - 📄 **CV Analyzer** - Extract skills, experience, education
-    - 🐙 **GitHub Profile Analysis** - Assess your coding skills
-    - 💼 **Job Matcher** - Find positions that match your profile
-""")
-
+st.markdown(
+    "<p style='text-align:center;color:#aaa;'>AI-powered CV analysis · GitHub profiling · Job matching</p>",
+    unsafe_allow_html=True,
+)
 st.divider()
 
-# Initialize session state
-if "cv_analysis" not in st.session_state:
-    st.session_state.cv_analysis = None
-if "github_analysis" not in st.session_state:
-    st.session_state.github_analysis = None
-if "job_matches" not in st.session_state:
-    st.session_state.job_matches = None
+for key in ["cv_analysis", "github_analysis", "job_matches"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
-# Create tabs for different features
-tab1, tab2, tab3, tab4 = st.tabs([
+groq_key = os.getenv("GROQ_API_KEY", "")
+if not groq_key:
+    st.error("❌ GROQ_API_KEY not set. Add it to your `.env` file.")
+    st.stop()
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📄 CV Analyzer",
     "🐙 GitHub Profile",
     "💼 Job Matcher",
-    "📊 Full Assessment"
+    "🌐 Scrape Jobs",
+    "📊 Full Assessment",
 ])
 
-# ============= TAB 1: CV ANALYZER =============
+# ═══════════════════════════════════════════════════════════════
+# TAB 1 – CV Analyzer
+# ═══════════════════════════════════════════════════════════════
 with tab1:
     st.header("📄 CV Analyzer")
-    st.markdown("Upload your CV (PDF) to extract skills, experience, and education")
-    
-    col1, col2 = st.columns([2, 1])
-    
+    col1, col2 = st.columns([3, 1])
     with col1:
-        uploaded_file = st.file_uploader(
-            "Choose your CV file",
-            type=["pdf"],
-            help="Upload a PDF version of your CV"
-        )
-    
+        uploaded_file = st.file_uploader("Upload your CV (PDF)", type=["pdf"])
     with col2:
-        analyze_cv = st.button("🔍 Analyze CV", use_container_width=True)
-    
-    if analyze_cv and uploaded_file:
-        with st.spinner("Analyzing CV..."):
+        st.write(""); st.write("")
+        go = st.button("🔍 Analyze CV", use_container_width=True)
+
+    if go:
+        if not uploaded_file:
+            st.warning("⚠️ Upload a PDF first.")
+        else:
+            temp = f"temp_{uploaded_file.name}"
             try:
-                # Save uploaded file temporarily
-                temp_path = f"temp_{uploaded_file.name}"
-                with open(temp_path, "wb") as f:
+                with open(temp, "wb") as f:
                     f.write(uploaded_file.getbuffer())
-                
-                # Analyze
-                analyzer = CVAnalyzer()
-                result = analyzer.analyze_cv(temp_path)
-                
-                # Clean up
-                os.remove(temp_path)
-                
+                with st.spinner("Analyzing..."):
+                    result = CVAnalyzer().analyze_cv(temp)
                 if result.get("success"):
                     st.session_state.cv_analysis = result
-                    st.success("✅ CV analyzed successfully!")
-                    
-                    # Display results
-                    st.markdown("### Analysis Results")
-                    st.json(result.get("analysis", {}))
+                    st.success("✅ Done!")
                 else:
-                    st.error(f"❌ Error: {result.get('error', 'Unknown error')}")
-                    
+                    st.error(result.get("error"))
             except Exception as e:
-                st.error(f"❌ Error processing file: {e}")
-    
-    # Display cached analysis
+                st.error(str(e))
+            finally:
+                if os.path.exists(temp):
+                    os.remove(temp)
+
     if st.session_state.cv_analysis:
-        st.markdown("### Cached Analysis")
-        st.info("Previous CV analysis (from this session)")
-        st.json(st.session_state.cv_analysis.get("analysis", {}))
+        analysis = st.session_state.cv_analysis.get("analysis", {})
+        if isinstance(analysis, dict):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**🛠️ Skills**")
+                for s in analysis.get("skills", []):
+                    st.markdown(f"- {s}")
+                st.markdown("**💻 Technologies**")
+                for t in analysis.get("technologies", []):
+                    st.markdown(f"- {t}")
+            with c2:
+                st.markdown("**🎓 Education**")
+                for e in analysis.get("education", []):
+                    st.markdown(f"- {e.get('degree','?')} @ {e.get('school','?')}")
+                st.markdown("**💼 Experience**")
+                for ex in analysis.get("experience", []):
+                    st.markdown(f"- {ex.get('title','?')} at {ex.get('company','?')}")
+            st.markdown(f"**Seniority:** `{analysis.get('seniority_level','?')}`")
+            st.info(analysis.get("summary", ""))
+        else:
+            st.code(str(analysis))
 
-
-# ============= TAB 2: GITHUB ANALYZER =============
+# ═══════════════════════════════════════════════════════════════
+# TAB 2 – GitHub
+# ═══════════════════════════════════════════════════════════════
 with tab2:
     st.header("🐙 GitHub Profile Analysis")
-    st.markdown("Enter your GitHub username to analyze your coding profile")
-    
-    col1, col2 = st.columns([2, 1])
-    
+    col1, col2 = st.columns([3, 1])
     with col1:
-        github_username = st.text_input(
-            "GitHub Username",
-            placeholder="e.g., your-username",
-            help="Enter your GitHub username (without @)"
-        )
-    
+        username = st.text_input("GitHub Username", placeholder="e.g. torvalds")
     with col2:
-        analyze_github = st.button("🔍 Analyze GitHub", use_container_width=True)
-    
-    if analyze_github and github_username:
-        with st.spinner("Fetching GitHub profile..."):
-            try:
-                analyzer = GitHubAnalyzer()
-                result = analyzer.analyze_github_profile(github_username)
-                
-                if result.get("success"):
-                    st.session_state.github_analysis = result
-                    st.success("✅ GitHub profile analyzed!")
-                    
-                    # Display profile info
-                    profile = result.get("profile", {})
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.metric("Followers", profile.get("followers", 0))
-                    with col2:
-                        st.metric("Public Repos", profile.get("public_repos", 0))
-                    with col3:
-                        st.metric("Following", profile.get("following", 0))
-                    
-                    # Languages
-                    st.markdown("### Top Languages")
-                    languages = profile.get("languages", {})
-                    if languages:
-                        st.bar_chart(languages)
-                    
-                    # Analysis
-                    st.markdown("### AI Analysis")
-                    st.json(result.get("analysis", {}))
-                else:
-                    st.error(f"❌ Error: {result.get('error', 'Unknown error')}")
-                    st.info("💡 Tip: Make sure the username is correct and the profile is public")
-                    
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-    
-    # Display cached analysis
+        st.write(""); st.write("")
+        go_gh = st.button("🔍 Analyze", use_container_width=True)
+
+    if go_gh:
+        if not username.strip():
+            st.warning("⚠️ Enter a username.")
+        else:
+            with st.spinner("Fetching profile..."):
+                try:
+                    result = GitHubAnalyzer().analyze_github_profile(username.strip())
+                    if result.get("success"):
+                        st.session_state.github_analysis = result
+                        st.success("✅ Done!")
+                    else:
+                        st.error(result.get("error"))
+                except Exception as e:
+                    st.error(str(e))
+
     if st.session_state.github_analysis:
-        st.markdown("### Cached Analysis")
-        st.info("Previous GitHub analysis (from this session)")
-        profile = st.session_state.github_analysis.get("profile", {})
-        st.json(profile)
+        profile  = st.session_state.github_analysis.get("profile", {})
+        analysis = st.session_state.github_analysis.get("analysis", {})
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Followers",    profile.get("followers", 0))
+        c2.metric("Public Repos", profile.get("public_repos", 0))
+        c3.metric("Following",    profile.get("following", 0))
+        if profile.get("languages"):
+            st.bar_chart(profile["languages"])
+        if isinstance(analysis, dict):
+            st.markdown(f"**Strength:** `{analysis.get('profile_strength','?')}/10` | **Readiness:** `{analysis.get('career_readiness','?')}`")
+            for r in analysis.get("recommendations", []):
+                st.markdown(f"- {r}")
+        else:
+            st.code(str(analysis))
 
-
-# ============= TAB 3: JOB MATCHER =============
+# ═══════════════════════════════════════════════════════════════
+# TAB 3 – Job Matcher
+# ═══════════════════════════════════════════════════════════════
 with tab3:
     st.header("💼 Job Matcher")
-    st.markdown("Find jobs that match your skills and experience")
-    
-    st.warning("⚠️ **Note:** Job database needs to be populated from Kaggle datasets. See README for setup instructions.")
-    
-    # User profile form
+    db_exists = os.path.exists("data/jobs_combined.csv") or os.path.exists("data/jobs.csv")
+    if not db_exists:
+        st.warning("⚠️ No job database found. Use the **🌐 Scrape Jobs** tab first.")
+
     col1, col2 = st.columns(2)
-    
     with col1:
-        skills_input = st.text_area(
-            "Your Skills",
-            placeholder="Python, JavaScript, React, Node.js\n(one per line)",
-            height=100
-        )
-        experience_years = st.number_input("Years of Experience", min_value=0, max_value=50, value=2)
-    
+        skills_input = st.text_area("Your Skills (one per line)",
+                                    placeholder="Python\nJavaScript\nReact", height=120)
+        exp_years = st.number_input("Years of Experience", 0, 50, 2)
     with col2:
-        seniority = st.selectbox("Seniority Level", ["Junior", "Mid-Level", "Senior"])
-        interested_roles = st.multiselect(
-            "Interested Roles",
-            ["Full Stack Developer", "Backend Engineer", "Frontend Developer", 
-             "Data Scientist", "DevOps Engineer", "Product Manager"]
-        )
-    
+        seniority = st.selectbox("Seniority", ["Junior", "Mid-Level", "Senior"])
+        roles = st.multiselect("Interested Roles", [
+            "Full Stack Developer", "Backend Engineer", "Frontend Developer",
+            "Data Scientist", "ML Engineer", "DevOps Engineer", "Product Manager",
+        ])
+
     if st.button("🔍 Find Matching Jobs", use_container_width=True):
-        with st.spinner("Matching jobs..."):
-            try:
-                user_profile = {
-                    "skills": [s.strip() for s in skills_input.split('\n') if s.strip()],
-                    "experience_years": experience_years,
-                    "seniority_level": seniority.lower(),
-                    "interested_roles": interested_roles
-                }
-                
-                matcher = JobMatcher()
-                result = matcher.match_jobs(user_profile)
-                
-                if result.get("success"):
-                    st.session_state.job_matches = result
-                    st.success("✅ Job matching complete!")
-                    st.json(result.get("matches", {}))
-                else:
-                    st.warning(f"⚠️ {result.get('error', 'No jobs found')}")
-                    
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-
-
-# ============= TAB 4: FULL ASSESSMENT =============
-with tab4:
-    st.header("📊 Complete Career Assessment")
-    st.markdown("Compile all analyses into a comprehensive career report")
-    
-    if st.button("📋 Generate Full Report", use_container_width=True):
-        report_data = {
-            "cv_analysis": st.session_state.cv_analysis,
-            "github_analysis": st.session_state.github_analysis,
-            "job_matches": st.session_state.job_matches
-        }
-        
-        if not any(report_data.values()):
-            st.warning("⚠️ Please complete at least one analysis first")
+        skills = [s.strip() for s in skills_input.splitlines() if s.strip()]
+        if not skills:
+            st.warning("⚠️ Enter at least one skill.")
         else:
-            st.success("✅ Report compiled!")
-            
-            if st.session_state.cv_analysis:
-                st.markdown("### CV Analysis")
-                st.json(st.session_state.cv_analysis)
-            
-            if st.session_state.github_analysis:
-                st.markdown("### GitHub Analysis")
-                st.json(st.session_state.github_analysis)
-            
-            if st.session_state.job_matches:
-                st.markdown("### Job Matches")
-                st.json(st.session_state.job_matches)
-
-
-# Sidebar
-st.sidebar.markdown("## 📚 Resources")
-st.sidebar.markdown("""
-### Kaggle Datasets to Download:
-1. **[Data Science Job Salaries](https://www.kaggle.com/datasets/ruchi798/data-science-job-salaries)**
-2. **[Tech Jobs](https://www.kaggle.com/datasets/andrewmvd/tech-jobs)**
-3. **[LinkedIn Jobs](https://www.kaggle.com/datasets/arjunprasadsarkhel/linkedin-job-postings)**
-
-### Setup Instructions:
-1. Download CSV files from Kaggle
-2. Create `data/` folder
-3. Place CSV files: `data/jobs.csv`
-
-### Environment Variables:
-```
-GROQ_API_KEY=your_key
-GITHUB_TOKEN=your_token (optional)
-```
-""")
-
-st.sidebar.divider()
-st.sidebar.markdown("**Phase 1 Status:** ✅ MVP Complete")
-st.sidebar.markdown("""
-**Coming in Phase 2:**
-- Mock Interview Practice
-- LinkedIn Optimization
-- Enhancement Recommendations
-""")
-"""
-app.py  –  Wasla AI  ·  Graph RAG Edition
-==========================================
-Drop-in replacement for the original app.py.
-
-What changed vs the classic RAG version
-────────────────────────────────────────
-• Ingestion now builds BOTH a ChromaDB vector store AND a knowledge graph
-  (entity co-occurrence graph stored as JSON in db/knowledge_graph.json).
-• Retrieval uses GraphRetriever: vector similarity search PLUS graph-based
-  neighbour expansion, so multi-hop questions get much richer context.
-• The sidebar shows graph stats (nodes / edges).
-• Everything else (Groq LLM, dark theme, conversation tracker, feedback CSV)
-  is kept exactly as before.
-"""
-
-import streamlit as st
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_core.prompts import PromptTemplate
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-import os, csv, re, random, datetime, time
-from pathlib import Path
-
-# ── Graph RAG modules ──────────────────────────────────────────────────────────
-from graph_builder import KnowledgeGraphBuilder, GRAPH_PATH
-from graph_retriever import GraphRetriever
-
-# ── Constants ──────────────────────────────────────────────────────────────────
-DB_DIR      = "db"
-EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
-CHUNK_SIZE  = 500
-CHUNK_OVERLAP = 100
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Theme
-# ══════════════════════════════════════════════════════════════════════════════
-
-def set_dark_theme():
-    st.markdown("""
-    <style>
-    /* Modern gradient background */
-    .stApp { 
-        background: linear-gradient(135deg, #0F0F1E 0%, #1A1A2E 50%, #16213E 100%);
-        color: #E8E8F0;
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    
-    /* Main content area */
-    section.main > div { 
-        max-width: 950px; 
-        margin: auto;
-        padding: 20px;
-    }
-    
-    /* Headers */
-    h1 { 
-        text-align: center; 
-        font-size: 48px; 
-        font-weight: 800; 
-        background: linear-gradient(135deg, #00D9FF, #0091FF);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin-bottom: 5px;
-        letter-spacing: -1px;
-    }
-    
-    h2, h3 { color: #00D9FF; font-weight: 700; }
-    
-    /* Chat messages */
-    .stChatMessage {
-        background: linear-gradient(135deg, rgba(30,30,46,0.9) 0%, rgba(24,24,40,0.9) 100%);
-        border-radius: 15px; 
-        padding: 16px;
-        margin: 12px 0; 
-        border: 1px solid rgba(0, 217, 255, 0.2);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-        transition: all 0.3s ease;
-    }
-    
-    .stChatMessage:hover {
-        border-color: rgba(0, 217, 255, 0.4);
-        box-shadow: 0 6px 20px rgba(0, 217, 255, 0.1);
-    }
-    
-    [data-testid="chatMessageContent"] { 
-        color: #E8E8F0 !important;
-        font-size: 15px;
-        line-height: 1.6;
-    }
-    
-    /* Input area */
-    .stChatInputContainer { margin-top: 20px; }
-    
-    textarea { 
-        background-color: #1A1A2E !important; 
-        color: #E8E8F0 !important;
-        border-radius: 12px !important; 
-        border: 1px solid rgba(0, 217, 255, 0.3) !important;
-        font-size: 15px !important;
-        transition: all 0.3s ease !important;
-    }
-    
-    textarea:focus { 
-        border-color: #00D9FF !important;
-        box-shadow: 0 0 10px rgba(0, 217, 255, 0.2) !important;
-    }
-    
-    /* Buttons */
-    button {
-        background: linear-gradient(135deg, #00D9FF, #0091FF) !important; 
-        color: #000 !important;
-        border-radius: 10px !important; 
-        width: 100%; 
-        transition: all 0.3s ease !important;
-        font-weight: 600 !important;
-        font-size: 14px !important;
-    }
-    
-    button:hover { 
-        background: linear-gradient(135deg, #00E5FF, #0099FF) !important;
-        box-shadow: 0 6px 20px rgba(0, 217, 255, 0.3) !important;
-        transform: translateY(-2px);
-    }
-    
-    button:active {
-        transform: translateY(0);
-    }
-    
-    /* Expanders */
-    .stExpander { 
-        background: rgba(30,30,46,0.6); 
-        border: 1px solid rgba(0, 217, 255, 0.2); 
-        border-radius: 12px;
-        transition: all 0.3s ease;
-    }
-    
-    .stExpander:hover {
-        border-color: rgba(0, 217, 255, 0.4);
-    }
-    
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(135deg, #0F0F1E 0%, #1A1A2E 100%);
-        border-right: 1px solid rgba(0, 217, 255, 0.2);
-    }
-    
-    /* Status messages */
-    .stSuccess {
-        background-color: rgba(34, 197, 94, 0.15) !important;
-        border: 1px solid rgba(34, 197, 94, 0.5) !important;
-        border-radius: 10px !important;
-    }
-    
-    .stWarning {
-        background-color: rgba(251, 191, 36, 0.15) !important;
-        border: 1px solid rgba(251, 191, 36, 0.5) !important;
-        border-radius: 10px !important;
-    }
-    
-    .stError {
-        background-color: rgba(239, 68, 68, 0.15) !important;
-        border: 1px solid rgba(239, 68, 68, 0.5) !important;
-        border-radius: 10px !important;
-    }
-    
-    .stInfo {
-        background-color: rgba(59, 130, 246, 0.15) !important;
-        border: 1px solid rgba(59, 130, 246, 0.5) !important;
-        border-radius: 10px !important;
-    }
-    
-    /* Control buttons */
-    div[data-testid="column"] button {
-        background: rgba(45, 55, 72, 0.8) !important; 
-        color: #00D9FF !important;
-        border: 1px solid rgba(0, 217, 255, 0.3) !important; 
-        margin: 3px !important;
-        transition: all 0.3s ease !important;
-    }
-    
-    div[data-testid="column"] button:hover { 
-        background: rgba(0, 217, 255, 0.1) !important;
-        border-color: rgba(0, 217, 255, 0.6) !important;
-    }
-    
-    /* Hide footer */
-    footer { visibility: hidden; }
-    
-    /* Markdown styling */
-    [data-testid="stMarkdownContainer"] { color: #E8E8F0; }
-    </style>""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Helpers (kept from original)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def is_greeting(query: str) -> bool:
-    patterns = [r'\b(hi|hello|hey|greetings|howdy|sup|yo)\b',
-                r'how are you', r"how's it going", r"what's up",
-                r'good (morning|afternoon|evening)', r'nice to meet you']
-    q = query.lower().strip()
-    if len(q.split()) <= 3:
-        for p in patterns:
-            if re.search(p, q):
-                return True
-    return False
-
-
-def get_greeting_response() -> str:
-    opts = [
-        "Hi there! 👋 I'm Wasla AI. How can I help you explore Wasla Solutions today?",
-        "Hello! Great to have you here. What would you like to know about Wasla?",
-        "Hey! I'm here to assist with any questions about Wasla Solutions. What's on your mind?",
-    ]
-    return random.choice(opts)
-
-
-def save_to_csv(question, answer):
-    path = "chat_history.csv"
-    exists = os.path.isfile(path)
-    try:
-        with open(path, "a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            if not exists:
-                w.writerow(["Question", "Answer", "Time", "Date"])
-            w.writerow([question, answer,
-                        datetime.datetime.now().strftime("%H:%M:%S"),
-                        datetime.datetime.now().strftime("%Y-%m-%d")])
-    except Exception:
-        pass
-
-
-def save_feedback(question, response, feedback):
-    path = "feedback.csv"
-    exists = os.path.isfile(path)
-    try:
-        with open(path, "a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            if not exists:
-                w.writerow(["Question", "Response", "Feedback", "Time", "Date"])
-            w.writerow([question, response, feedback,
-                        datetime.datetime.now().strftime("%H:%M:%S"),
-                        datetime.datetime.now().strftime("%Y-%m-%d")])
-    except Exception:
-        pass
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Conversation tracker
-# ══════════════════════════════════════════════════════════════════════════════
-
-class ConversationTracker:
-    def __init__(self):
-        self.topics_discussed = []
-        self.message_count = 0
-
-    def add_topic(self, topic):
-        if topic and topic not in self.topics_discussed:
-            self.topics_discussed.append(topic)
-            if len(self.topics_discussed) > 5:
-                self.topics_discussed = self.topics_discussed[-5:]
-
-    def increment_count(self):
-        self.message_count += 1
-
-    def get_context(self):
-        return {
-            "msg_count": self.message_count,
-            "previous_topics": ", ".join(self.topics_discussed) or "none yet",
-        }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Prompt
-# ══════════════════════════════════════════════════════════════════════════════
-
-WASLA_PROMPT = PromptTemplate(
-    template="""You are Wasla AI, a knowledgeable and friendly assistant for Wasla Solutions.
-
-**CONVERSATION CONTEXT:**
-Message #{msg_count} in conversation. Previous topics: {previous_topics}
-
-**RETRIEVED CONTEXT (vector + graph-expanded):**
-{context}
-
-**USER QUESTION:**
-{question}
-
-**GUIDELINES:**
-- Vary your openings; never repeat the same phrase twice.
-- Use bullet points for lists; be specific and quote document details.
-- If information is missing, say so politely and suggest related topics.
-- Professional, warm tone. End with a natural follow-up question.
-
-**YOUR RESPONSE:**""",
-    input_variables=["context", "question", "msg_count", "previous_topics"],
-)
-
-
-def get_system_prompt() -> str:
-    return (
-        "You are Wasla AI, a knowledgeable and friendly assistant for Wasla Solutions. "
-        "Be professional, warm, and vary your responses naturally. "
-        "Only share information from the provided document context; never invent facts."
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# LLM  (Groq – unchanged from original)
-# ══════════════════════════════════════════════════════════════════════════════
-
-@st.cache_resource(ttl=3600)
-def load_llm():
-    try:
-        from groq import Groq
-    except ImportError:
-        st.sidebar.error("❌ Install groq: pip install groq")
-        return None
-
-    if "GROQ_API_KEY" not in st.secrets:
-        st.sidebar.error("❌ GROQ_API_KEY not in secrets!")
-        return None
-
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-    models = [
-        "llama-3.3-70b-versatile",
-        "deepseek-r1-distill-llama-70b",
-        "meta-llama/llama-4-scout-17b-16e-instruct",
-        "gemma2-9b-it",
-    ]
-
-    class GroqLLM:
-        def __init__(self, client, model):
-            self.client = client
-            self.model = model
-
-        def invoke(self, prompt):
-            try:
-                r = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": get_system_prompt()},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.8,
-                    max_tokens=600,
-                    top_p=0.9,
-                )
-                return r.choices[0].message.content
-            except Exception as e:
-                return f"Error: {e}"
-
-    placeholder = st.sidebar.empty()
-    for model in models:
-        try:
-            placeholder.info(f"🔄 Testing {model}…")
-            llm = GroqLLM(client, model)
-            test = llm.invoke("Reply with 'ready'")
-            if test and "Error" not in test:
-                placeholder.success(f"✅ AI ready  ({model.split('/')[-1]})")
-                return llm
-        except Exception:
-            continue
-
-    placeholder.error("❌ Could not start AI – check API key.")
-    return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Vector store init
-# ══════════════════════════════════════════════════════════════════════════════
-
-@st.cache_resource(ttl=3600)
-def init_vectorstore():
-    try:
-        embeddings = HuggingFaceEmbeddings(
-            model_name=EMBED_MODEL, model_kwargs={"device": "cpu"}
-        )
-        if os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3")):
-            db = Chroma(embedding_function=embeddings, persist_directory=DB_DIR)
-            try:
-                count = db._collection.count()
-                st.sidebar.success(f"✅ Vector DB: {count} chunks")
-            except Exception:
-                st.sidebar.warning("⚠️ Vector DB loaded (count unavailable)")
-            return db
-        st.sidebar.warning("📁 No vector DB found – run ingestion first.")
-        return None
-    except Exception as e:
-        st.sidebar.error(f"❌ Vector store error: {e}")
-        return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Knowledge graph init
-# ══════════════════════════════════════════════════════════════════════════════
-
-@st.cache_resource(ttl=3600)
-def init_graph():
-    builder = KnowledgeGraphBuilder()
-    ok = builder.load()
-    if ok:
-        stats = builder.stats()
-        st.sidebar.success(
-            f"🕸️ Graph: {stats['nodes']} nodes · {stats['edges']} edges"
-        )
-        return builder.G
-    st.sidebar.warning("🕸️ No graph found – run ingestion first.")
-    return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Ingestion (Graph RAG version)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def run_ingestion():
-    progress_bar = st.progress(0)
-    status = st.empty()
-
-    try:
-        status.text("📁 Scanning for PDFs…")
-        docs_path = Path("docs")
-        docs_path.mkdir(exist_ok=True)
-        pdf_files = list(docs_path.glob("**/*.pdf"))
-        if not pdf_files:
-            status.text("❌ No PDFs in docs/ folder.")
-            progress_bar.progress(100)
-            time.sleep(2)
-            return False
-
-        # Load
-        all_docs = []
-        for i, pdf in enumerate(pdf_files):
-            status.text(f"📄 Loading {pdf.name} ({i+1}/{len(pdf_files)})…")
-            all_docs.extend(PyPDFLoader(str(pdf)).load())
-            progress_bar.progress(int(20 * (i + 1) / len(pdf_files)))
-
-        # Split
-        status.text("✂️ Splitting into chunks…")
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
-        )
-        chunks = splitter.split_documents(all_docs)
-        progress_bar.progress(30)
-
-        # Embed + ChromaDB
-        status.text("🔤 Creating embeddings & vector store…")
-        embeddings = HuggingFaceEmbeddings(
-            model_name=EMBED_MODEL, model_kwargs={"device": "cpu"}
-        )
-        Path(DB_DIR).mkdir(exist_ok=True)
-        db = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-            persist_directory=DB_DIR,
-        )
-        db.persist()
-        progress_bar.progress(65)
-
-        # Knowledge graph
-        status.text("🕸️ Building knowledge graph…")
-
-        def _gp(done, total):
-            progress_bar.progress(65 + int(30 * done / total))
-
-        builder = KnowledgeGraphBuilder()
-        builder.build_from_documents(chunks, progress_callback=_gp)
-        stats = builder.stats()
-
-        progress_bar.progress(100)
-        status.text(
-            f"✅ Done!  {len(chunks)} chunks · "
-            f"{stats['nodes']} graph nodes · {stats['edges']} edges"
-        )
-        time.sleep(2)
-        status.empty()
-        progress_bar.empty()
-        return True
-
-    except Exception as e:
-        status.text(f"❌ Error: {e}")
-        progress_bar.progress(100)
-        time.sleep(3)
-        status.empty()
-        progress_bar.empty()
-        return False
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Question processing (Graph RAG)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def process_question(prompt, vectorstore, graph, llm):
-    """
-    Run Graph RAG retrieval + LLM generation.
-    Returns (response_text, retrieved_docs).
-    """
-    conv = st.session_state.conversation_tracker
-
-    # Greeting shortcut
-    if is_greeting(prompt) and conv.get_context()["msg_count"] <= 2:
-        conv.increment_count()
-        return get_greeting_response(), []
-
-    # Build Graph Retriever
-    retriever = GraphRetriever(
-        vectorstore=vectorstore,
-        graph=graph,
-        k=5,
-        graph_k=5,
-        hop_depth=2,
-    )
-
-    docs = retriever.get_relevant_documents(prompt)
-    conv.increment_count()
-
-    # Build context string
-    context = "\n\n".join(
-        f"[Doc {i+1}]: {d.page_content}" for i, d in enumerate(docs)
-    )
-
-    ctx = conv.get_context()
-    formatted = WASLA_PROMPT.format(
-        context=context,
-        question=prompt,
-        msg_count=ctx["msg_count"],
-        previous_topics=ctx["previous_topics"],
-    )
-
-    response = llm.invoke(formatted)
-    save_to_csv(prompt, response)
-    return response, docs
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Welcome message
-# ══════════════════════════════════════════════════════════════════════════════
-
-def get_welcome_message() -> str:
-    return random.choice([
-        "👋 **Welcome to Wasla AI!** I'm your intelligent assistant powered by Graph RAG technology.\n\n✨ **What I can help with:**\n• 📋 Document analysis and insights\n• 🕸️ Connected information across your knowledge base\n• 💡 Detailed answers to your questions\n• 🔗 Relationship discovery between topics\n\n💬 Ask me anything!",
-        "🚀 **Hello! I'm Wasla AI** – leveraging advanced graph-based retrieval to provide you with the most relevant and connected answers.\n\n📊 Ready to explore your knowledge base...\n\n💭 What would you like to know?",
-    ])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Main
-# ══════════════════════════════════════════════════════════════════════════════
-
-def main():
-    st.set_page_config(
-        page_title="Wasla AI – Graph RAG",
-        page_icon="🕸️",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-    set_dark_theme()
-
-    # ── Session state ──────────────────────────────────────────────────────────
-    for key, default in [
-        ("messages", []),
-        ("llm", None),
-        ("vectorstore", None),
-        ("graph", None),
-        ("conversation_tracker", ConversationTracker()),
-        ("welcome_shown", False),
-        ("auto_ingest_done", False),
-    ]:
-        if key not in st.session_state:
-            st.session_state[key] = default
-
-    # ── Auto-ingestion on startup ──────────────────────────────────────────────
-    if not st.session_state.auto_ingest_done:
-        docs_path = Path("docs")
-        docs_path.mkdir(exist_ok=True)
-        pdf_files = list(docs_path.glob("**/*.pdf"))
-        db_exists = os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3"))
-        graph_exists = os.path.exists(GRAPH_PATH)
-        
-        # Auto-ingest if PDFs exist but DB/graph don't
-        if pdf_files and (not db_exists or not graph_exists):
-            with st.spinner("🚀 Setting up knowledge base... (This runs once)"):
+            with st.spinner("Matching..."):
                 try:
-                    run_ingestion()
-                    st.cache_resource.clear()
-                except Exception as e:
-                    st.warning(f"⚠️ Auto-ingestion encountered an issue: {e}")
-        
-        st.session_state.auto_ingest_done = True
-
-    if not st.session_state.welcome_shown:
-        st.session_state.welcome_shown = True
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": get_welcome_message(),
-            "sources": [],
-            "feedback": None,
-        })
-
-    # ── Sidebar ────────────────────────────────────────────────────────────────
-    with st.sidebar:
-        st.title("🕸️ Wasla AI")
-        st.caption("🚀 Graph RAG Engine")
-        st.markdown("---")
-
-        # API Configuration
-        st.subheader("🔑 API Configuration")
-        if "GROQ_API_KEY" in st.secrets:
-            st.success("✅ Groq API ready")
-            if st.button("▶️ Start AI", use_container_width=True, key="btn_start_ai"):
-                with st.spinner("Loading AI…"):
-                    st.session_state.llm = load_llm()
-                st.rerun()
-        else:
-            st.error("❌ GROQ_API_KEY missing")
-
-        st.markdown("---")
-
-        # Knowledge Base
-        st.subheader("📚 Knowledge Base")
-        db_exists = os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3"))
-        graph_exists = os.path.exists(GRAPH_PATH)
-
-        if db_exists and graph_exists:
-            st.success("✅ Ready")
-            if st.session_state.vectorstore is None:
-                with st.spinner("Loading…"):
-                    st.session_state.vectorstore = init_vectorstore()
-            if st.session_state.graph is None:
-                with st.spinner("Loading…"):
-                    st.session_state.graph = init_graph()
-        else:
-            st.info("⏳ Building...")
-
-        docs_path = Path("docs")
-        pdf_files = list(docs_path.glob("**/*.pdf")) if docs_path.exists() else []
-        if pdf_files:
-            st.info(f"📄 {len(pdf_files)} PDF(s) found")
-            if not db_exists or not graph_exists:
-                if st.button("🔨 Build Now", use_container_width=True, key="btn_build_manual"):
-                    ok = run_ingestion()
-                    if ok:
-                        st.cache_resource.clear()
-                        st.rerun()
-
-        st.markdown("---")
-
-        # Quick Controls
-        st.subheader("⚙️ Controls")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("🔄 Reset", use_container_width=True, key="btn_reset"):
-                st.cache_resource.clear()
-                st.session_state.llm = None
-                st.rerun()
-        with c2:
-            if st.button("🗑️ Clear", use_container_width=True, key="btn_clear"):
-                first = st.session_state.messages[:1]
-                st.session_state.messages = first
-                st.session_state.conversation_tracker = ConversationTracker()
-                st.rerun()
-
-        st.markdown("---")
-
-        # System Status
-        with st.expander("ℹ️ System Status", expanded=True):
-            vs = st.session_state.vectorstore
-            g = st.session_state.graph
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Groq", "🟢" if "GROQ_API_KEY" in st.secrets else "🔴")
-                st.metric("AI", "🟢" if st.session_state.llm else "🔴")
-            with col2:
-                st.metric("Vector DB", "🟢" if vs else "🔴")
-                st.metric("Graph", "🟢" if g else "🔴")
-            
-            st.divider()
-            st.caption(f"📊 Messages: {len(st.session_state.messages)}")
-            if g:
-                st.caption(f"🕸️ Nodes: {g.number_of_nodes()} | Edges: {g.number_of_edges()}")
-
-        st.markdown("---")
-
-        # Export Data
-        st.subheader("📥 Export")
-        if os.path.exists("chat_history.csv"):
-            with open("chat_history.csv") as f:
-                st.download_button(
-                    "💬 Chat History",
-                    f,
-                    "chat_history.csv",
-                    use_container_width=True,
-                    key="btn_export_chat"
-                )
-        if os.path.exists("feedback.csv"):
-            with open("feedback.csv") as f:
-                st.download_button(
-                    "👍 Feedback Data",
-                    f,
-                    "feedback.csv",
-                    use_container_width=True,
-                    key="btn_export_feedback"
-                )
-
-    # ── Chat UI ────────────────────────────────────────────────────────────────
-    st.markdown("""
-    <div style='text-align: center; margin-bottom: 30px;'>
-        <h1 style='margin: 0;'>🕸️ Wasla AI Assistant</h1>
-        <p style='color: #00D9FF; font-size: 16px; margin-top: 8px;'>💬 Intelligent Conversations Powered by Graph RAG</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    for i, msg in enumerate(st.session_state.messages):
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-            # Feedback buttons on last assistant message
-            if (msg["role"] == "assistant"
-                    and i == len(st.session_state.messages) - 1
-                    and msg.get("feedback") is None):
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("👍 Helpful", key=f"pos_{i}"):
-                        st.session_state.messages[i]["feedback"] = "positive"
-                        if i > 0 and st.session_state.messages[i-1]["role"] == "user":
-                            save_feedback(st.session_state.messages[i-1]["content"],
-                                          msg["content"], "positive")
-                        st.rerun()
-                with c2:
-                    if st.button("👎 Not helpful", key=f"neg_{i}"):
-                        st.session_state.messages[i]["feedback"] = "negative"
-                        if i > 0 and st.session_state.messages[i-1]["role"] == "user":
-                            save_feedback(st.session_state.messages[i-1]["content"],
-                                          msg["content"], "negative")
-                        st.rerun()
-
-    # ── Input ──────────────────────────────────────────────────────────────────
-    if prompt := st.chat_input("Ask a question about your documents…"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking (Graph RAG)…"):
-                try:
-                    db_ok    = os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3"))
-                    graph_ok = os.path.exists(GRAPH_PATH)
-
-                    if not db_ok or not graph_ok:
-                        resp = ("⚠️ **Knowledge base / graph not found.** "
-                                "Please add PDFs to `docs/` and click *Build Graph RAG Index*.")
-                        st.markdown(resp)
-                        st.session_state.messages.append({
-                            "role": "assistant", "content": resp,
-                            "sources": [], "feedback": None})
-                        st.stop()
-
-                    if st.session_state.vectorstore is None:
-                        st.session_state.vectorstore = init_vectorstore()
-                    if st.session_state.graph is None:
-                        st.session_state.graph = init_graph()
-                    if st.session_state.llm is None:
-                        with st.spinner("Starting AI…"):
-                            st.session_state.llm = load_llm()
-
-                    vs  = st.session_state.vectorstore
-                    g   = st.session_state.graph
-                    llm = st.session_state.llm
-
-                    if not vs or not g or not llm:
-                        resp = ("⚠️ **System not ready.** "
-                                "Please initialise AI and rebuild the index.")
-                        st.markdown(resp)
-                        st.session_state.messages.append({
-                            "role": "assistant", "content": resp,
-                            "sources": [], "feedback": None})
-                        st.stop()
-
-                    response, docs = process_question(prompt, vs, g, llm)
-                    st.markdown(response)
-
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": response,
-                        "sources": [d.page_content for d in docs],
-                        "feedback": None,
+                    result = JobMatcher().match_jobs({
+                        "skills": skills, "experience_years": exp_years,
+                        "seniority_level": seniority.lower(), "interested_roles": roles,
                     })
-
+                    if result.get("success"):
+                        st.session_state.job_matches = result
+                        st.success("✅ Done!")
+                    else:
+                        st.warning(result.get("error"))
                 except Exception as e:
-                    err = f"❌ **Error:** {e}"
-                    st.error(err)
-                    st.session_state.messages.append({
-                        "role": "assistant", "content": err,
-                        "sources": [], "feedback": None})
+                    st.error(str(e))
 
+    if st.session_state.job_matches:
+        matches = st.session_state.job_matches.get("matches", {})
+        if isinstance(matches, dict):
+            for job in matches.get("jobs", []):
+                with st.expander(f"**{job.get('job_title','?')}** @ {job.get('company','?')} — {job.get('match_score','?')}%"):
+                    st.markdown(f"**Why:** {job.get('reason','')}")
+                    st.markdown(f"**Required:** {', '.join(job.get('required_skills', []))}")
+                    st.markdown(f"**Nice to have:** {', '.join(job.get('nice_to_have', []))}")
+            st.info(matches.get("summary", ""))
+        else:
+            st.code(str(matches))
 
-if __name__ == "__main__":
-    main()
+# ═══════════════════════════════════════════════════════════════
+# TAB 4 – Scrape Jobs
+# ═══════════════════════════════════════════════════════════════
+with tab4:
+    st.header("🌐 Scrape Live Jobs")
+
+    # ── DB stats ─────────────────────────────────────────────────
+    db_path = ("data/jobs_combined.csv" if os.path.exists("data/jobs_combined.csv") else
+               "data/jobs.csv"          if os.path.exists("data/jobs.csv") else None)
+    if db_path:
+        try:
+            import pandas as pd
+            df_current = pd.read_csv(db_path)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Jobs in DB", f"{len(df_current):,}")
+            c2.metric("Sources", df_current["source"].nunique() if "source" in df_current.columns else "—")
+            c3.metric("File", db_path)
+        except Exception:
+            pass
+
+    st.divider()
+
+    # ── Source selection ──────────────────────────────────────────
+    st.subheader("📡 Sources")
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.markdown("#### ✅ Available sources")
+        use_remoteok  = st.checkbox("🌍 RemoteOK — global remote tech jobs",  value=True)
+        use_arbeitnow = st.checkbox("🇩🇪 Arbeitnow — European & global jobs", value=True)
+        use_muse      = st.checkbox("🇺🇸 The Muse — professional tech roles", value=True)
+        use_wuzzuf    = st.checkbox("🇪🇬 Wuzzuf — Egypt job board",            value=True)
+
+    with col_b:
+        st.markdown("#### ❌ LinkedIn — why it's not supported")
+        st.error(
+            "**LinkedIn scraping is not possible** for these reasons:\n\n"
+            "1. **ToS violation** — Section 8.2 explicitly forbids it\n"
+            "2. **JS-rendered pages** — `requests` gets a login wall, not job data\n"
+            "3. **Bot detection** — Cloudflare + proprietary layer blocks scripts\n"
+            "4. **Legal risk** — They actively pursue scrapers (hiQ case, 2022)\n\n"
+            "✅ **Legitimate alternative:** Apply for the "
+            "[LinkedIn Jobs API](https://developer.linkedin.com/product-catalog/jobs) "
+            "as a registered partner app."
+        )
+
+    st.divider()
+
+    # ── Per-source settings ───────────────────────────────────────
+    st.subheader("⚙️ Settings")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        remoteok_limit = st.slider("RemoteOK jobs", 20, 200, 100, 20, disabled=not use_remoteok)
+    with c2:
+        arb_pages = st.slider("Arbeitnow pages", 1, 10, 3, disabled=not use_arbeitnow)
+    with c3:
+        muse_pages = st.slider("The Muse pages", 1, 5, 2, disabled=not use_muse)
+    with c4:
+        wuzzuf_pages = st.slider("Wuzzuf pages/keyword", 1, 5, 2, disabled=not use_wuzzuf)
+
+    if use_wuzzuf:
+        default_kw = (
+            "software engineer, python developer, data scientist, "
+            "frontend developer, backend developer, full stack developer, devops"
+        )
+        wuzzuf_kw_raw = st.text_area(
+            "Wuzzuf keywords (comma-separated)",
+            value=default_kw,
+            height=80,
+            help="Each keyword = one search on Wuzzuf. More keywords = more jobs but slower.",
+        )
+        wuzzuf_keywords = [k.strip() for k in wuzzuf_kw_raw.split(",") if k.strip()]
+    else:
+        wuzzuf_keywords = []
+
+    st.divider()
+
+    if st.button("🚀 Scrape Now", use_container_width=True, type="primary"):
+        if not any([use_remoteok, use_arbeitnow, use_muse, use_wuzzuf]):
+            st.warning("⚠️ Select at least one source.")
+        else:
+            progress = st.progress(0, text="Starting...")
+            log_box = st.empty()
+            logs: list = []
+
+            def log(msg: str):
+                logs.append(msg)
+                log_box.markdown("\n\n".join(f"`{l}`" for l in logs[-10:]))
+
+            try:
+                from data_scraper import (
+                    RemoteOKScraper, ArbeitnowScraper,
+                    TheMuseScraper, WuzzufScraper,
+                )
+                import pandas as pd
+
+                os.makedirs("data", exist_ok=True)
+                all_jobs: list = []
+                step = 0
+                total_steps = sum([use_remoteok, use_arbeitnow, use_muse, use_wuzzuf])
+
+                if use_remoteok:
+                    log("📡 Scraping RemoteOK...")
+                    progress.progress(int(100 * step / total_steps), text="RemoteOK...")
+                    j = RemoteOKScraper().scrape(limit=remoteok_limit)
+                    all_jobs += j; step += 1
+                    log(f"   ✅ {len(j)} jobs from RemoteOK")
+
+                if use_arbeitnow:
+                    log("📡 Scraping Arbeitnow...")
+                    progress.progress(int(100 * step / total_steps), text="Arbeitnow...")
+                    j = ArbeitnowScraper().scrape(pages=arb_pages)
+                    all_jobs += j; step += 1
+                    log(f"   ✅ {len(j)} jobs from Arbeitnow")
+
+                if use_muse:
+                    log("📡 Scraping The Muse...")
+                    progress.progress(int(100 * step / total_steps), text="The Muse...")
+                    j = TheMuseScraper().scrape(pages=muse_pages)
+                    all_jobs += j; step += 1
+                    log(f"   ✅ {len(j)} jobs from The Muse")
+
+                if use_wuzzuf:
+                    log(f"📡 Scraping Wuzzuf ({len(wuzzuf_keywords)} keywords × {wuzzuf_pages} pages)...")
+                    progress.progress(int(100 * step / total_steps), text="Wuzzuf...")
+                    j = WuzzufScraper().scrape(
+                        keywords=wuzzuf_keywords, pages_per_keyword=wuzzuf_pages
+                    )
+                    all_jobs += j; step += 1
+                    log(f"   ✅ {len(j)} jobs from Wuzzuf")
+
+                # Merge with existing
+                existing_df = pd.DataFrame()
+                for path in ["data/jobs.csv", "docs/ai_jobs_market_2025_2026.csv"]:
+                    if os.path.exists(path):
+                        try:
+                            existing_df = pd.read_csv(path)
+                            log(f"   📂 Loaded {len(existing_df)} existing jobs from {path}")
+                            break
+                        except Exception:
+                            pass
+
+                combined = pd.concat([existing_df, pd.DataFrame(all_jobs)], ignore_index=True)
+                before = len(combined)
+                combined.drop_duplicates(subset=["job_title", "company"], keep="first", inplace=True)
+                log(f"   🗑️  Removed {before - len(combined)} duplicates")
+
+                combined.to_csv("data/jobs_combined.csv", index=False)
+                progress.progress(100, text="Done!")
+                log(f"💾 Saved {len(combined):,} jobs → data/jobs_combined.csv")
+
+                st.success(f"✅ **{len(combined):,} jobs** saved to `data/jobs_combined.csv`")
+
+                # Source breakdown
+                if "source" in combined.columns:
+                    st.markdown("### 📊 Jobs by source")
+                    st.bar_chart(combined["source"].value_counts())
+
+                # Preview
+                display_cols = [c for c in ["job_title","company","location","remote_work","source"]
+                                if c in combined.columns]
+                st.markdown("### 👀 Preview")
+                st.dataframe(combined[display_cols].head(25), use_container_width=True)
+
+                st.download_button(
+                    "⬇️ Download jobs_combined.csv",
+                    combined.to_csv(index=False).encode(),
+                    "jobs_combined.csv", "text/csv",
+                    use_container_width=True,
+                )
+
+            except Exception as e:
+                st.error(f"❌ Scraping failed: {e}")
+                progress.progress(100)
+
+# ═══════════════════════════════════════════════════════════════
+# TAB 5 – Full Assessment
+# ═══════════════════════════════════════════════════════════════
+with tab5:
+    st.header("📊 Full Career Assessment")
+    has_data = any([st.session_state.cv_analysis,
+                    st.session_state.github_analysis,
+                    st.session_state.job_matches])
+    if not has_data:
+        st.info("Complete at least one analysis in the other tabs first.")
+    else:
+        if st.button("📋 Generate Report", use_container_width=True):
+            if st.session_state.cv_analysis:
+                st.markdown("### 📄 CV")
+                a = st.session_state.cv_analysis.get("analysis", {})
+                st.json(a) if isinstance(a, dict) else st.code(str(a))
+            if st.session_state.github_analysis:
+                st.markdown("### 🐙 GitHub")
+                p = {k: v for k, v in st.session_state.github_analysis.get("profile", {}).items()
+                     if k != "success"}
+                st.json(p)
+            if st.session_state.job_matches:
+                st.markdown("### 💼 Job Matches")
+                m = st.session_state.job_matches.get("matches", {})
+                st.json(m) if isinstance(m, dict) else st.code(str(m))
+            st.success("✅ Report ready!")
+
+# ── Sidebar ────────────────────────────────────────────────────
+with st.sidebar:
+    st.title("🎯 Career AI")
+    st.markdown("---")
+    st.success("✅ Groq API") if groq_key else st.error("❌ No API key")
+    st.success("✅ CV analyzed")     if st.session_state.cv_analysis     else st.info("⬜ CV")
+    st.success("✅ GitHub analyzed") if st.session_state.github_analysis else st.info("⬜ GitHub")
+    st.success("✅ Jobs matched")    if st.session_state.job_matches      else st.info("⬜ Jobs")
+
+    st.markdown("---")
+    db_f = ("data/jobs_combined.csv" if os.path.exists("data/jobs_combined.csv")
+            else "data/jobs.csv"     if os.path.exists("data/jobs.csv") else None)
+    if db_f:
+        try:
+            import pandas as pd
+            n = len(pd.read_csv(db_f))
+            st.success(f"✅ {n:,} jobs in DB")
+        except Exception:
+            st.warning("⚠️ DB unreadable")
+    else:
+        st.warning("⚠️ No DB — Scrape Jobs first")
+
+    st.markdown("---")
+    if st.button("🗑️ Clear Results", use_container_width=True):
+        for k in ["cv_analysis", "github_analysis", "job_matches"]:
+            st.session_state[k] = None
+        st.rerun()
+    st.caption("Phase 1 ✅ | Powered by Groq")
