@@ -1,185 +1,119 @@
-import shutil
-import sqlite3
-import time
-import sys
+"""
+ingest.py  (Graph RAG version)
+==============================
+Loads PDFs → splits into chunks → creates:
+  1. ChromaDB vector store  (unchanged, in ./db/)
+  2. Knowledge graph        (new,       in ./db/knowledge_graph.json)
+
+Run standalone:
+    python ingest.py
+"""
+
 import os
-import gc
+import time
 from pathlib import Path
+
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from constant import CHROMA_SETTINGS
+from langchain_community.vectorstores import Chroma
 
-BASE_DIR = Path(__file__).parent
-DOCS_DIR = BASE_DIR / "docs"
+from graph_builder import KnowledgeGraphBuilder
 
-# Persistent location (outside /tmp, safe for restarts)
-PERSISTENT_CHROMA_DIR = BASE_DIR / "chroma_db"
 
-# =========================
-# LOAD DOCUMENTS
-# =========================
-def load_documents():
-    print("\n" + "="*60)
-    print("🔍 DEBUG: Starting load_documents()")
-    print(f"🔍 Current working directory: {os.getcwd()}")
-    print(f"🔍 DOCS_DIR absolute path: {DOCS_DIR.absolute()}")
-    print(f"🔍 DOCS_DIR exists? {DOCS_DIR.exists()}")
-    sys.stdout.flush()
+# ── Config ─────────────────────────────────────────────────────────────────────
 
-    if not DOCS_DIR.exists():
-        raise FileNotFoundError(f"❌ 'docs' folder not found at {DOCS_DIR}")
+DOCS_DIR   = "docs"
+DB_DIR     = "db"
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 100
+EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
 
-    pdf_files = list(DOCS_DIR.rglob("*.pdf"))
-    print(f"📄 Found {len(pdf_files)} PDF file(s):")
-    for pdf in pdf_files:
-        print(f"   - {pdf.name}")
-    sys.stdout.flush()
 
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def ingest(progress_callback=None):
+    """
+    Full ingestion pipeline. Returns (n_chunks, graph_stats) or raises.
+
+    progress_callback(stage: str, pct: int) is called if provided.
+    Stages: 'loading', 'splitting', 'embedding', 'graph', 'done'
+    """
+
+    def _cb(stage, pct):
+        if progress_callback:
+            progress_callback(stage, pct)
+
+    # 1. Discover PDFs
+    _cb("loading", 0)
+    docs_path = Path(DOCS_DIR)
+    docs_path.mkdir(exist_ok=True)
+    pdf_files = list(docs_path.glob("**/*.pdf"))
     if not pdf_files:
-        raise ValueError("❌ No PDF files found in docs/")
+        raise FileNotFoundError(f"No PDF files found in '{DOCS_DIR}' folder.")
 
-    documents = []
-    for pdf_file in pdf_files:
-        print(f"\n📂 Loading: {pdf_file.name}")
-        sys.stdout.flush()
-        loader = PyPDFLoader(str(pdf_file))
-        docs = loader.load()
-        for doc in docs:
-            doc.metadata["source_file"] = pdf_file.name
-        documents.extend(docs)
-        print(f"   → {len(docs)} pages loaded")
-        sys.stdout.flush()
+    # 2. Load
+    all_documents = []
+    for i, pdf in enumerate(pdf_files):
+        loader = PyPDFLoader(str(pdf))
+        all_documents.extend(loader.load())
+        _cb("loading", int(20 * (i + 1) / len(pdf_files)))
 
-    print(f"\n✅ Total documents loaded: {len(documents)}")
-    sys.stdout.flush()
-    if len(documents) == 0:
-        raise RuntimeError("No pages were loaded from PDFs.")
-    return documents
+    _cb("splitting", 20)
 
-# =========================
-# SPLIT DOCUMENTS INTO CHUNKS
-# =========================
-def split_documents(documents):
+    # 3. Split
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        separators=["\n\n", "\n", ".", "!", "?", " ", ""]
+        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
     )
-    chunks = splitter.split_documents(documents)
-    print(f"🔹 Created {len(chunks)} chunks.")
-    sys.stdout.flush()
-    return chunks
+    chunks = splitter.split_documents(all_documents)
 
-# =========================
-# CREATE EMBEDDINGS
-# =========================
-def create_embeddings():
-    print("🧠 Creating embeddings model...")
-    sys.stdout.flush()
-    return HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
+    _cb("embedding", 40)
+
+    # 4. Embeddings + ChromaDB
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBED_MODEL, model_kwargs={"device": "cpu"}
     )
+    db_path = Path(DB_DIR)
+    db_path.mkdir(exist_ok=True)
 
-# =========================
-# BUILD VECTORSTORE WITH TEMP SAFETY
-# =========================
-def build_vectorstore(chunks, embeddings, retries=3):
-    PERSISTENT_CHROMA_DIR.parent.mkdir(parents=True, exist_ok=True)
+    db = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=str(db_path),
+    )
+    db.persist()
 
-    for attempt in range(retries):
-        temp_dir = PERSISTENT_CHROMA_DIR.parent / f"temp_build_{int(time.time())}_{attempt}"
-        temp_dir.mkdir(parents=True, exist_ok=False)
+    _cb("graph", 70)
 
-        try:
-            print(f"🛠 Building vectorstore in temp directory: {temp_dir}")
-            sys.stdout.flush()
+    # 5. Knowledge graph
+    builder = KnowledgeGraphBuilder()
 
-            vectordb = Chroma.from_documents(
-                documents=chunks,
-                embedding=embeddings,
-                persist_directory=str(temp_dir),
-                collection_name="company_docs"
-            )
-            vectordb.persist()
-            print("💾 Persisted temp vectorstore.")
-            sys.stdout.flush()
+    def _graph_progress(done, total):
+        pct = 70 + int(25 * done / total)
+        _cb("graph", pct)
 
-            # Verify temp database
-            import chromadb
-            from chromadb.config import Settings
-            client = chromadb.PersistentClient(
-                path=str(temp_dir),
-                settings=Settings(anonymized_telemetry=False)
-            )
-            collection = client.get_collection("company_docs")
-            final_count = collection.count()
-            print(f"📊 Temp document count: {final_count}")
-            sys.stdout.flush()
+    builder.build_from_documents(chunks, progress_callback=_graph_progress)
 
-            if final_count == 0:
-                raise RuntimeError("❌ Temp database has zero documents!")
+    _cb("done", 100)
 
-            # Remove old persistent database
-            if PERSISTENT_CHROMA_DIR.exists():
-                print(f"⚠️ Removing old persistent database at {PERSISTENT_CHROMA_DIR}")
-                sys.stdout.flush()
-                shutil.rmtree(PERSISTENT_CHROMA_DIR)
-                time.sleep(1)
+    return len(chunks), builder.stats()
 
-            # Move temp DB to persistent location
-            print(f"📦 Moving temp DB to persistent location: {PERSISTENT_CHROMA_DIR}")
-            sys.stdout.flush()
-            shutil.move(str(temp_dir), str(PERSISTENT_CHROMA_DIR))
 
-            # Verify persistent DB
-            client_final = chromadb.PersistentClient(
-                path=str(PERSISTENT_CHROMA_DIR),
-                settings=Settings(anonymized_telemetry=False)
-            )
-            collection_final = client_final.get_collection("company_docs")
-            final_count2 = collection_final.count()
-            print(f"✅ Final persistent document count: {final_count2}")
-            sys.stdout.flush()
+# ── CLI entry point ────────────────────────────────────────────────────────────
 
-            # Cleanup
-            try:
-                vectordb._client.close()
-            except:
-                pass
-            del vectordb
-            gc.collect()
-            time.sleep(1)
-            return  # success
-
-        except Exception as e:
-            print(f"⚠️ Build attempt {attempt+1} failed: {e}")
-            sys.stdout.flush()
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            if attempt < retries - 1:
-                print("⏳ Retrying...")
-                time.sleep(2)
-            else:
-                raise
-
-# =========================
-# INGESTION PIPELINE
-# =========================
-def ingest_documents():
-    print("🚀🚀🚀 INGESTION STARTED 🚀🚀🚀")
-    sys.stdout.flush()
-    documents = load_documents()
-    chunks = split_documents(documents)
-    embeddings = create_embeddings()
-    build_vectorstore(chunks, embeddings)
-    print("\n🎉 Ingestion completed successfully.")
-    sys.stdout.flush()
-
-# =========================
-# MAIN
-# =========================
 if __name__ == "__main__":
-    ingest_documents()
+    print("📚 Starting Graph RAG ingestion…")
+    t0 = time.time()
+
+    def cli_progress(stage, pct):
+        print(f"  [{pct:3d}%] {stage}")
+
+    try:
+        n_chunks, stats = ingest(progress_callback=cli_progress)
+        elapsed = time.time() - t0
+        print(f"\n✅ Done in {elapsed:.1f}s")
+        print(f"   Chunks : {n_chunks}")
+        print(f"   Nodes  : {stats['nodes']}")
+        print(f"   Edges  : {stats['edges']}")
+    except Exception as e:
+        print(f"❌ Error: {e}")

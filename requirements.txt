@@ -11,3 +11,5 @@ chromadb==0.4.22
 pypdf
 pandas
 python-dotenv
+networkx>=3.2          # knowledge graph storage & traversal
+spacy>=3.7.0           # NER for entity extraction (optional but recommended)
