@@ -42,24 +42,157 @@ CHUNK_OVERLAP = 100
 def set_dark_theme():
     st.markdown("""
     <style>
-    .stApp { background-color: #0B1020; color: #EAEAF2; }
-    section.main > div { max-width: 900px; margin: auto; }
-    h1 { text-align:center; font-size:42px; font-weight:700; color:#FFF; margin-bottom:0; }
-    .stChatMessage { background-color:#1E1E2E; border-radius:10px; padding:10px;
-                     margin:5px 0; border:1px solid #2D3748; }
-    [data-testid="chatMessageContent"] { color:#E5E7EB !important; }
-    textarea { background-color:#111827 !important; color:#E5E7EB !important;
-               border-radius:10px !important; border:1px solid #2D3748 !important; }
-    button { background-color:#2563EB !important; color:white !important;
-             border-radius:10px !important; width:100%; transition:all .3s ease; }
-    button:hover { background-color:#1D4ED8 !important;
-                   box-shadow:0 4px 6px rgba(37,99,235,.3); }
-    .stExpander { background-color:#1E1E2E; border:1px solid #2D3748; border-radius:10px; }
-    footer { visibility:hidden; }
+    /* Modern gradient background */
+    .stApp { 
+        background: linear-gradient(135deg, #0F0F1E 0%, #1A1A2E 50%, #16213E 100%);
+        color: #E8E8F0;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    
+    /* Main content area */
+    section.main > div { 
+        max-width: 950px; 
+        margin: auto;
+        padding: 20px;
+    }
+    
+    /* Headers */
+    h1 { 
+        text-align: center; 
+        font-size: 48px; 
+        font-weight: 800; 
+        background: linear-gradient(135deg, #00D9FF, #0091FF);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        margin-bottom: 5px;
+        letter-spacing: -1px;
+    }
+    
+    h2, h3 { color: #00D9FF; font-weight: 700; }
+    
+    /* Chat messages */
+    .stChatMessage {
+        background: linear-gradient(135deg, rgba(30,30,46,0.9) 0%, rgba(24,24,40,0.9) 100%);
+        border-radius: 15px; 
+        padding: 16px;
+        margin: 12px 0; 
+        border: 1px solid rgba(0, 217, 255, 0.2);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        transition: all 0.3s ease;
+    }
+    
+    .stChatMessage:hover {
+        border-color: rgba(0, 217, 255, 0.4);
+        box-shadow: 0 6px 20px rgba(0, 217, 255, 0.1);
+    }
+    
+    [data-testid="chatMessageContent"] { 
+        color: #E8E8F0 !important;
+        font-size: 15px;
+        line-height: 1.6;
+    }
+    
+    /* Input area */
+    .stChatInputContainer { margin-top: 20px; }
+    
+    textarea { 
+        background-color: #1A1A2E !important; 
+        color: #E8E8F0 !important;
+        border-radius: 12px !important; 
+        border: 1px solid rgba(0, 217, 255, 0.3) !important;
+        font-size: 15px !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    textarea:focus { 
+        border-color: #00D9FF !important;
+        box-shadow: 0 0 10px rgba(0, 217, 255, 0.2) !important;
+    }
+    
+    /* Buttons */
+    button {
+        background: linear-gradient(135deg, #00D9FF, #0091FF) !important; 
+        color: #000 !important;
+        border-radius: 10px !important; 
+        width: 100%; 
+        transition: all 0.3s ease !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+    }
+    
+    button:hover { 
+        background: linear-gradient(135deg, #00E5FF, #0099FF) !important;
+        box-shadow: 0 6px 20px rgba(0, 217, 255, 0.3) !important;
+        transform: translateY(-2px);
+    }
+    
+    button:active {
+        transform: translateY(0);
+    }
+    
+    /* Expanders */
+    .stExpander { 
+        background: rgba(30,30,46,0.6); 
+        border: 1px solid rgba(0, 217, 255, 0.2); 
+        border-radius: 12px;
+        transition: all 0.3s ease;
+    }
+    
+    .stExpander:hover {
+        border-color: rgba(0, 217, 255, 0.4);
+    }
+    
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(135deg, #0F0F1E 0%, #1A1A2E 100%);
+        border-right: 1px solid rgba(0, 217, 255, 0.2);
+    }
+    
+    /* Status messages */
+    .stSuccess {
+        background-color: rgba(34, 197, 94, 0.15) !important;
+        border: 1px solid rgba(34, 197, 94, 0.5) !important;
+        border-radius: 10px !important;
+    }
+    
+    .stWarning {
+        background-color: rgba(251, 191, 36, 0.15) !important;
+        border: 1px solid rgba(251, 191, 36, 0.5) !important;
+        border-radius: 10px !important;
+    }
+    
+    .stError {
+        background-color: rgba(239, 68, 68, 0.15) !important;
+        border: 1px solid rgba(239, 68, 68, 0.5) !important;
+        border-radius: 10px !important;
+    }
+    
+    .stInfo {
+        background-color: rgba(59, 130, 246, 0.15) !important;
+        border: 1px solid rgba(59, 130, 246, 0.5) !important;
+        border-radius: 10px !important;
+    }
+    
+    /* Control buttons */
     div[data-testid="column"] button {
-        background-color:#2D3748 !important; color:#E5E7EB !important;
-        border:1px solid #4A5568 !important; margin:2px !important; }
-    div[data-testid="column"] button:hover { background-color:#4A5568 !important; }
+        background: rgba(45, 55, 72, 0.8) !important; 
+        color: #00D9FF !important;
+        border: 1px solid rgba(0, 217, 255, 0.3) !important; 
+        margin: 3px !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    div[data-testid="column"] button:hover { 
+        background: rgba(0, 217, 255, 0.1) !important;
+        border-color: rgba(0, 217, 255, 0.6) !important;
+    }
+    
+    /* Hide footer */
+    footer { visibility: hidden; }
+    
+    /* Markdown styling */
+    [data-testid="stMarkdownContainer"] { color: #E8E8F0; }
     </style>""", unsafe_allow_html=True)
 
 
@@ -411,8 +544,8 @@ def process_question(prompt, vectorstore, graph, llm):
 
 def get_welcome_message() -> str:
     return random.choice([
-        "👋 **Hi there! I'm Wasla AI** – now powered by **Graph RAG** for smarter, multi-hop answers.\n\nI can help with:\n- 📋 Services & solutions\n- 🕸️ Connected insights across your documents\n- 💡 Specific questions\n\nReady when you are! 🚀",
-        "**Hello! I'm Wasla AI** – upgraded with a **knowledge graph** so I can connect related information across documents.\n\nAsk me anything about Wasla Solutions!",
+        "👋 **Welcome to Wasla AI!** I'm your intelligent assistant powered by Graph RAG technology.\n\n✨ **What I can help with:**\n• 📋 Document analysis and insights\n• 🕸️ Connected information across your knowledge base\n• 💡 Detailed answers to your questions\n• 🔗 Relationship discovery between topics\n\n💬 Ask me anything!",
+        "🚀 **Hello! I'm Wasla AI** – leveraging advanced graph-based retrieval to provide you with the most relevant and connected answers.\n\n📊 Ready to explore your knowledge base...\n\n💭 What would you like to know?",
     ])
 
 
@@ -437,9 +570,29 @@ def main():
         ("graph", None),
         ("conversation_tracker", ConversationTracker()),
         ("welcome_shown", False),
+        ("auto_ingest_done", False),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
+
+    # ── Auto-ingestion on startup ──────────────────────────────────────────────
+    if not st.session_state.auto_ingest_done:
+        docs_path = Path("docs")
+        docs_path.mkdir(exist_ok=True)
+        pdf_files = list(docs_path.glob("**/*.pdf"))
+        db_exists = os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3"))
+        graph_exists = os.path.exists(GRAPH_PATH)
+        
+        # Auto-ingest if PDFs exist but DB/graph don't
+        if pdf_files and (not db_exists or not graph_exists):
+            with st.spinner("🚀 Setting up knowledge base... (This runs once)"):
+                try:
+                    run_ingestion()
+                    st.cache_resource.clear()
+                except Exception as e:
+                    st.warning(f"⚠️ Auto-ingestion encountered an issue: {e}")
+        
+        st.session_state.auto_ingest_done = True
 
     if not st.session_state.welcome_shown:
         st.session_state.welcome_shown = True
@@ -452,112 +605,121 @@ def main():
 
     # ── Sidebar ────────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.title("🕸️ Wasla AI – Graph RAG")
+        st.title("🕸️ Wasla AI")
+        st.caption("🚀 Graph RAG Engine")
         st.markdown("---")
 
-        # API
+        # API Configuration
         st.subheader("🔑 API Configuration")
         if "GROQ_API_KEY" in st.secrets:
-            st.success("✅ Groq API key found")
-            if st.button("🔄 Initialize AI", use_container_width=True):
-                with st.spinner("Loading…"):
+            st.success("✅ Groq API ready")
+            if st.button("▶️ Start AI", use_container_width=True, key="btn_start_ai"):
+                with st.spinner("Loading AI…"):
                     st.session_state.llm = load_llm()
-                if st.session_state.llm:
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": "✅ **Graph RAG AI ready!** Ask me anything.",
-                        "sources": [], "feedback": None,
-                    })
+                st.rerun()
         else:
-            st.error("❌ GROQ_API_KEY not in secrets")
+            st.error("❌ GROQ_API_KEY missing")
 
         st.markdown("---")
 
-        # Knowledge base
-        st.subheader("📚 Knowledge Base (Graph RAG)")
+        # Knowledge Base
+        st.subheader("📚 Knowledge Base")
         db_exists = os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3"))
         graph_exists = os.path.exists(GRAPH_PATH)
 
         if db_exists and graph_exists:
+            st.success("✅ Ready")
             if st.session_state.vectorstore is None:
-                with st.spinner("Loading vector store…"):
+                with st.spinner("Loading…"):
                     st.session_state.vectorstore = init_vectorstore()
             if st.session_state.graph is None:
-                with st.spinner("Loading knowledge graph…"):
+                with st.spinner("Loading…"):
                     st.session_state.graph = init_graph()
         else:
-            if not db_exists:
-                st.warning("❌ Vector store not found")
-            if not graph_exists:
-                st.warning("❌ Knowledge graph not found")
+            st.info("⏳ Building...")
 
         docs_path = Path("docs")
         pdf_files = list(docs_path.glob("**/*.pdf")) if docs_path.exists() else []
         if pdf_files:
-            st.info(f"📄 {len(pdf_files)} PDF(s) in docs/")
-            if st.button("🚀 Build Graph RAG Index", type="primary", use_container_width=True):
-                ok = run_ingestion()
-                if ok:
-                    # Reload caches
-                    st.cache_resource.clear()
-                    st.session_state.vectorstore = None
-                    st.session_state.graph = None
-                    st.rerun()
-        else:
-            st.warning("📁 No PDFs in docs/ folder")
+            st.info(f"📄 {len(pdf_files)} PDF(s) found")
+            if not db_exists or not graph_exists:
+                if st.button("🔨 Build Now", use_container_width=True, key="btn_build_manual"):
+                    ok = run_ingestion()
+                    if ok:
+                        st.cache_resource.clear()
+                        st.rerun()
 
         st.markdown("---")
 
-        # Controls
-        st.subheader("🎮 Controls")
+        # Quick Controls
+        st.subheader("⚙️ Controls")
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("🔄 Reset AI", use_container_width=True):
+            if st.button("🔄 Reset", use_container_width=True, key="btn_reset"):
                 st.cache_resource.clear()
                 st.session_state.llm = None
                 st.rerun()
         with c2:
-            if st.button("🗑️ Clear Chat", use_container_width=True):
+            if st.button("🗑️ Clear", use_container_width=True, key="btn_clear"):
                 first = st.session_state.messages[:1]
                 st.session_state.messages = first
                 st.session_state.conversation_tracker = ConversationTracker()
                 st.rerun()
 
-        with st.expander("ℹ️ System Status"):
-            vs = st.session_state.vectorstore
-            g  = st.session_state.graph
-            lines = [
-                f"🔑 Groq key : {'✅' if 'GROQ_API_KEY' in st.secrets else '❌'}",
-                f"🤖 AI model : {'✅' if st.session_state.llm else '❌'}",
-                f"📚 Vector DB: {'✅' if vs else '❌'}",
-                f"🕸️ Graph    : {'✅ ' + str(g.number_of_nodes()) + ' nodes' if g else '❌'}",
-                f"💬 Messages : {len(st.session_state.messages)}",
-            ]
-            st.write("\n".join(lines))
+        st.markdown("---")
 
+        # System Status
+        with st.expander("ℹ️ System Status", expanded=True):
+            vs = st.session_state.vectorstore
+            g = st.session_state.graph
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Groq", "🟢" if "GROQ_API_KEY" in st.secrets else "🔴")
+                st.metric("AI", "🟢" if st.session_state.llm else "🔴")
+            with col2:
+                st.metric("Vector DB", "🟢" if vs else "🔴")
+                st.metric("Graph", "🟢" if g else "🔴")
+            
+            st.divider()
+            st.caption(f"📊 Messages: {len(st.session_state.messages)}")
+            if g:
+                st.caption(f"🕸️ Nodes: {g.number_of_nodes()} | Edges: {g.number_of_edges()}")
+
+        st.markdown("---")
+
+        # Export Data
+        st.subheader("📥 Export")
         if os.path.exists("chat_history.csv"):
             with open("chat_history.csv") as f:
-                st.download_button("📥 Export Chat", f, "chat_history.csv",
-                                   use_container_width=True)
+                st.download_button(
+                    "💬 Chat History",
+                    f,
+                    "chat_history.csv",
+                    use_container_width=True,
+                    key="btn_export_chat"
+                )
         if os.path.exists("feedback.csv"):
             with open("feedback.csv") as f:
-                st.download_button("📥 Export Feedback", f, "feedback.csv",
-                                   use_container_width=True)
+                st.download_button(
+                    "👍 Feedback Data",
+                    f,
+                    "feedback.csv",
+                    use_container_width=True,
+                    key="btn_export_feedback"
+                )
 
     # ── Chat UI ────────────────────────────────────────────────────────────────
-    st.title("💬 Wasla AI  ·  Graph RAG")
-    st.markdown("*Vector similarity + knowledge graph expansion for richer answers*")
+    st.markdown("""
+    <div style='text-align: center; margin-bottom: 30px;'>
+        <h1 style='margin: 0;'>🕸️ Wasla AI Assistant</h1>
+        <p style='color: #00D9FF; font-size: 16px; margin-top: 8px;'>💬 Intelligent Conversations Powered by Graph RAG</p>
+    </div>
+    """, unsafe_allow_html=True)
 
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-
-            if msg.get("sources"):
-                with st.expander("📚 View Sources"):
-                    for j, src in enumerate(msg["sources"], 1):
-                        preview = src[:200] + "…" if len(src) > 200 else src
-                        st.write(f"**Source {j}:**")
-                        st.write(preview)
 
             # Feedback buttons on last assistant message
             if (msg["role"] == "assistant"
@@ -623,15 +785,6 @@ def main():
 
                     response, docs = process_question(prompt, vs, g, llm)
                     st.markdown(response)
-
-                    if docs:
-                        with st.expander("📚 View Sources"):
-                            for j, doc in enumerate(docs, 1):
-                                preview = (doc.page_content[:200] + "…"
-                                           if len(doc.page_content) > 200
-                                           else doc.page_content)
-                                st.write(f"**Source {j}:**")
-                                st.write(preview)
 
                     st.session_state.messages.append({
                         "role": "assistant",

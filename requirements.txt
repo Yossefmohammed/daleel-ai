@@ -1,15 +1,28 @@
-streamlit>=1.30.0
-langchain==0.0.305
-langchain-community==0.0.20
-langchain-groq==0.0.1
-sentence-transformers==2.2.2
-huggingface_hub==0.16.4
-transformers>=4.35.0
-torch>=2.2.0
-torchvision>=0.16.0
-chromadb==0.4.22
-pypdf
-pandas
-python-dotenv
-networkx>=3.2          # knowledge graph storage & traversal
-spacy>=3.7.0           # NER for entity extraction (optional but recommended)
+# Core Dependencies
+streamlit>=1.28.0
+python-dotenv>=1.0.0
+
+# LLM & Chat
+groq>=0.9.0
+langchain>=0.1.0
+langchain-community>=0.0.10
+
+# Vector Database & Embeddings
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+huggingface-hub>=0.17.0
+
+# NLP & Text Processing
+spacy>=3.7.0
+PyPDF2>=3.0.0
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Networking & Utilities
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Protobuf Fix (Critical - prevents descriptor errors)
+protobuf==3.20.0
