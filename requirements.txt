@@ -14,9 +14,13 @@ chromadb>=0.4.0
 sentence-transformers>=2.2.0
 huggingface-hub>=0.17.0
 
+# Vision & Image Processing
+torchvision>=0.15.0
+torch>=2.0.0
+
 # NLP & Text Processing
 spacy>=3.7.0
-PyPDF2>=3.0.0
+pypdf>=4.0.0
 
 # Data Processing
 numpy>=1.24.0
