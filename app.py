@@ -404,8 +404,8 @@ with tab1:
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-    elif analyze_btn and not cv_file:
-        st.warning("Please upload a PDF file first.")
+            elif analyze_btn and not cv_file:
+                st.warning("Please upload a PDF file first.")
 
     st.divider()
 
