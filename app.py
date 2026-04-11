@@ -395,38 +395,50 @@ def md_to_html(text):
     text = re.sub(r'\*([^*\n]+)\*', r'<em>\1</em>', text)
     # H3
     text = re.sub(r'^### (.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
+
     # Bullet lists
     lines = text.split('\n')
     out, in_ul = [], False
     for line in lines:
         if re.match(r'^[-•]\s(.+)', line):
             if not in_ul:
-                out.append('<ul>'); in_ul = True
-            out.append(f'<li>{re.sub(r"^[-•]\\s", "", line)}</li>')
+                out.append('<ul>')
+                in_ul = True
+            # 🔁 Fix: move substitution outside f-string
+            cleaned = re.sub(r'^[-•]\s', '', line)
+            out.append(f'<li>{cleaned}</li>')
         else:
             if in_ul:
-                out.append('</ul>'); in_ul = False
+                out.append('</ul>')
+                in_ul = False
             out.append(line)
     if in_ul:
         out.append('</ul>')
+
     # Numbered lists
     lines = '\n'.join(out).split('\n')
     out, in_ol = [], False
     for line in lines:
         if re.match(r'^\d+\.\s(.+)', line):
             if not in_ol:
-                out.append('<ol>'); in_ol = True
-            out.append(f'<li>{re.sub(r"^\\d+\\.\\s", "", line)}</li>')
+                out.append('<ol>')
+                in_ol = True
+            # 🔁 Fix: move substitution outside f-string
+            cleaned = re.sub(r'^\d+\.\s', '', line)
+            out.append(f'<li>{cleaned}</li>')
         else:
             if in_ol:
-                out.append('</ol>'); in_ol = False
+                out.append('</ol>')
+                in_ol = False
             out.append(line)
     if in_ol:
         out.append('</ol>')
+
     text = '\n'.join(out)
+
     # Paragraphs
     parts = re.split(r'\n{2,}', text)
-    html  = []
+    html = []
     for p in parts:
         p = p.strip()
         if not p:
