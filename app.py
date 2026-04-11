@@ -7,6 +7,7 @@ Chatbot streams word-by-word, feels human.
 import os, time
 import streamlit as st
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -34,17 +35,82 @@ h1 {
 }
 h2, h3 { color: #00D9FF; }
 .stTabs [data-baseweb="tab-list"] button { font-size: 1rem; font-weight: 600; }
-.stChatMessage {
-    background: rgba(20, 20, 50, 0.8) !important;
-    border: 1px solid rgba(0, 217, 255, 0.12) !important;
-    border-radius: 16px !important;
-    margin: 10px 0 !important;
-    padding: 4px 8px !important;
+
+/* Chat message bubbles */
+.chat-message {
+    display: flex;
+    margin-bottom: 1rem;
+    align-items: flex-start;
 }
-[data-testid="stChatMessageContent"] {
-    color: #E8E8F0 !important;
-    font-size: 15px !important;
-    line-height: 1.8 !important;
+.chat-message-user {
+    justify-content: flex-end;
+}
+.chat-message-assistant {
+    justify-content: flex-start;
+}
+.chat-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #1e1e3a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    margin: 0 8px;
+    flex-shrink: 0;
+}
+.chat-bubble {
+    max-width: 80%;
+    padding: 10px 14px;
+    border-radius: 18px;
+    background: rgba(30, 30, 60, 0.9);
+    border: 1px solid rgba(0, 217, 255, 0.15);
+    font-size: 15px;
+    line-height: 1.5;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+}
+.chat-bubble-user {
+    background: linear-gradient(135deg, #0055cc, #003399);
+    border: none;
+    color: white;
+}
+.chat-bubble-assistant {
+    background: rgba(20, 20, 50, 0.9);
+}
+.chat-time {
+    font-size: 0.7rem;
+    color: #aaa;
+    margin-top: 4px;
+    text-align: right;
+}
+.typing-indicator {
+    background: rgba(20, 20, 50, 0.9);
+    border-radius: 18px;
+    padding: 10px 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #00D9FF;
+}
+.typing-dot {
+    width: 8px;
+    height: 8px;
+    background: #00D9FF;
+    border-radius: 50%;
+    animation: pulse 1.2s infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes pulse {
+    0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
+    30% { opacity: 1; transform: scale(1.2); }
+}
+.chat-container {
+    max-height: 65vh;
+    overflow-y: auto;
+    padding-right: 10px;
+    margin-bottom: 1rem;
 }
 footer { visibility: hidden; }
 </style>
@@ -172,7 +238,7 @@ if st.session_state.chat_messages is None:
             "- 💬 Interview prep and Q&A practice\n"
             "- 🎯 Career advice and salary negotiation"
         )
-    st.session_state.chat_messages = [{"role": "assistant", "content": welcome}]
+    st.session_state.chat_messages = [{"role": "assistant", "content": welcome, "time": datetime.now().isoformat()}]
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -187,7 +253,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Career Chat (Graph RAG · streaming · human-like)
+# TAB 1 — Career Chat (Human‑like UI)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
     st.header("💬 Career AI Chat")
@@ -227,9 +293,9 @@ with tab1:
     # Controls
     cc1, cc2 = st.columns([1, 5])
     with cc1:
-        if st.button("🗑️ Clear", use_container_width=True):
+        if st.button("🗑️ Clear Chat", use_container_width=True):
             st.session_state.chat_messages = [
-                {"role": "assistant", "content": "Chat cleared! What can I help you with?"}
+                {"role": "assistant", "content": "Chat cleared! What can I help you with?", "time": datetime.now().isoformat()}
             ]
             st.rerun()
     with cc2:
@@ -240,17 +306,73 @@ with tab1:
 
     st.divider()
 
-    # Render history
-    for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # Chat container with scroll
+    chat_container = st.container()
+    with chat_container:
+        st.markdown('<div class="chat-container" id="chat-scroll">', unsafe_allow_html=True)
+        # Render existing messages
+        for msg in st.session_state.chat_messages:
+            role = msg["role"]
+            content = msg["content"]
+            timestamp = msg.get("time")
+            if timestamp:
+                try:
+                    dt = datetime.fromisoformat(timestamp)
+                    time_str = dt.strftime("%I:%M %p")
+                except:
+                    time_str = ""
+            else:
+                time_str = ""
+
+            if role == "user":
+                st.markdown(f'''
+                <div class="chat-message chat-message-user">
+                    <div style="flex-grow:1"></div>
+                    <div class="chat-bubble chat-bubble-user">
+                        {content}
+                        <div class="chat-time">{time_str}</div>
+                    </div>
+                    <div class="chat-avatar">👤</div>
+                </div>
+                ''', unsafe_allow_html=True)
+            else:
+                st.markdown(f'''
+                <div class="chat-message chat-message-assistant">
+                    <div class="chat-avatar">🤖</div>
+                    <div class="chat-bubble chat-bubble-assistant">
+                        {content}
+                        <div class="chat-time">{time_str}</div>
+                    </div>
+                </div>
+                ''', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Auto-scroll JavaScript
+    st.markdown("""
+    <script>
+    var chatDiv = document.getElementById('chat-scroll');
+    if(chatDiv) chatDiv.scrollTop = chatDiv.scrollHeight;
+    </script>
+    """, unsafe_allow_html=True)
 
     # Chat input
     if prompt := st.chat_input("Ask me anything about jobs, your career, or say 'write me a cover letter'..."):
 
-        st.session_state.chat_messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        # Add user message
+        user_time = datetime.now().isoformat()
+        st.session_state.chat_messages.append({"role": "user", "content": prompt, "time": user_time})
+        # Re-render
+        with chat_container:
+            st.markdown(f'''
+            <div class="chat-message chat-message-user">
+                <div style="flex-grow:1"></div>
+                <div class="chat-bubble chat-bubble-user">
+                    {prompt}
+                    <div class="chat-time">{datetime.now().strftime("%I:%M %p")}</div>
+                </div>
+                <div class="chat-avatar">👤</div>
+            </div>
+            ''', unsafe_allow_html=True)
 
         # ── Graph RAG retrieval ────────────────────────────────────────────────
         rag_context = ""
@@ -269,7 +391,7 @@ with tab1:
             except Exception as e:
                 st.sidebar.warning(f"Retrieval note: {e}")
 
-        # ── System prompt (human-like personality) ────────────────────────────
+        # ── System prompt ────────────────────────────────────────────
         tone_guide = {
             "Professional": "Write in a confident, professional tone. Avoid filler phrases.",
             "Friendly":     "Be warm, conversational, and encouraging — like a helpful friend.",
@@ -306,9 +428,22 @@ Personality:
             if m["role"] in ("user", "assistant")
         ]
 
-        # ── Streaming response ─────────────────────────────────────────────────
-        with st.chat_message("assistant"):
-            placeholder   = st.empty()
+        # ── Streaming response with typing indicator ─────────────────────────────
+        with chat_container:
+            # Show typing indicator
+            typing_placeholder = st.empty()
+            typing_placeholder.markdown('''
+            <div class="chat-message chat-message-assistant">
+                <div class="chat-avatar">🤖</div>
+                <div class="typing-indicator">
+                    <span>Assistant is typing</span>
+                    <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
+                </div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+            # Placeholder for actual response
+            response_placeholder = st.empty()
             full_response = ""
 
             try:
@@ -323,21 +458,41 @@ Personality:
                     stream      = True,
                 )
 
+                # Remove typing indicator
+                typing_placeholder.empty()
+
+                # Stream word by word
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content
                     if delta:
                         full_response += delta
-                        placeholder.markdown(full_response + "▌")
+                        response_placeholder.markdown(f'''
+                        <div class="chat-message chat-message-assistant">
+                            <div class="chat-avatar">🤖</div>
+                            <div class="chat-bubble chat-bubble-assistant">
+                                {full_response}▌
+                                <div class="chat-time">{datetime.now().strftime("%I:%M %p")}</div>
+                            </div>
+                        </div>
+                        ''', unsafe_allow_html=True)
 
-                placeholder.markdown(full_response)
+                # Final response without cursor
+                response_placeholder.markdown(f'''
+                <div class="chat-message chat-message-assistant">
+                    <div class="chat-avatar">🤖</div>
+                    <div class="chat-bubble chat-bubble-assistant">
+                        {full_response}
+                        <div class="chat-time">{datetime.now().strftime("%I:%M %p")}</div>
+                    </div>
+                </div>
+                ''', unsafe_allow_html=True)
 
             except Exception as e:
-                full_response = f"❌ Error: {e}"
-                placeholder.error(full_response)
+                response_placeholder.error(f"❌ Error: {e}")
+                full_response = f"Error: {e}"
 
-        st.session_state.chat_messages.append(
-            {"role": "assistant", "content": full_response}
-        )
+        # Save assistant message
+        st.session_state.chat_messages.append({"role": "assistant", "content": full_response, "time": datetime.now().isoformat()})
 
     # Quick prompts
     st.markdown("---")
@@ -353,7 +508,7 @@ Personality:
     cols = st.columns(3)
     for i, s in enumerate(suggestions):
         if cols[i % 3].button(s, key=f"q_{i}", use_container_width=True):
-            st.session_state.chat_messages.append({"role": "user", "content": s})
+            st.session_state.chat_messages.append({"role": "user", "content": s, "time": datetime.now().isoformat()})
             st.rerun()
 
 
