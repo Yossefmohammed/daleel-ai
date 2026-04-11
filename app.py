@@ -350,40 +350,45 @@ with tab1:
 
         if analyze_btn and cv_file is not None:
             temp_path = f"temp_chat_{cv_file.name}"
-            try:
-                with open(temp_path, "wb") as f:
-                    f.write(cv_file.getbuffer())
-                with st.spinner("Analyzing your CV..."):
-                    result = CVAnalyzer().analyze_cv(temp_path)
-                if result.get("success"):
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(cv_file.getbuffer())
+            with st.spinner("Analyzing your CV..."):
+                result = CVAnalyzer().analyze_cv(temp_path)
+            if result.get("success"):
+                # Ensure analysis is a dict
+                analysis_data = result.get("analysis")
+                if not isinstance(analysis_data, dict):
+                    st.error(f"Analysis returned unexpected format: {type(analysis_data)}")
+                    analysis_data = {}
+                else:
                     st.session_state.cv_analysis = result
                     st.success("✅ CV analyzed! Asking assistant for feedback...")
 
                     # Build a readable summary for the assistant
-                    a = result.get("analysis", {})
-                    skills = ", ".join(a.get("skills", [])[:10])
-                    tech = ", ".join(a.get("technologies", [])[:10])
+                    skills = ", ".join(analysis_data.get("skills", [])[:10])
+                    tech = ", ".join(analysis_data.get("technologies", [])[:10])
                     exp_summary = []
-                    for ex in a.get("experience", [])[:3]:
+                    for ex in analysis_data.get("experience", [])[:3]:
                         exp_summary.append(f"- {ex.get('title', '')} at {ex.get('company', '')}")
                     exp_text = "\n".join(exp_summary) if exp_summary else "None"
                     edu_summary = []
-                    for ed in a.get("education", [])[:2]:
+                    for ed in analysis_data.get("education", [])[:2]:
                         edu_summary.append(f"- {ed.get('degree', '')} from {ed.get('school', '')}")
                     edu_text = "\n".join(edu_summary) if edu_summary else "None"
 
                     analysis_prompt = f"""I just analyzed my CV. Here are the results:
 
-**Skills:** {skills}
-**Technologies:** {tech}
-**Seniority Level:** {a.get('seniority_level', 'Not specified')}
-**Experience:** 
-{exp_text}
-**Education:**
-{edu_text}
-**Summary:** {a.get('summary', '')}
+    **Skills:** {skills}
+    **Technologies:** {tech}
+    **Seniority Level:** {analysis_data.get('seniority_level', 'Not specified')}
+    **Experience:** 
+    {exp_text}
+    **Education:**
+    {edu_text}
+    **Summary:** {analysis_data.get('summary', '')}
 
-Please give me your honest, professional opinion about my CV. What are its strengths? What could be improved? Any specific suggestions to make it stand out for job applications?"""
+    Please give me your honest, professional opinion about my CV. What are its strengths? What could be improved? Any specific suggestions to make it stand out for job applications?"""
 
                     # Append as a user message (so assistant replies)
                     st.session_state.chat_messages.append({
@@ -392,15 +397,15 @@ Please give me your honest, professional opinion about my CV. What are its stren
                         "time": datetime.now().isoformat()
                     })
                     st.rerun()
-                else:
-                    st.error(result.get("error", "Analysis failed"))
-            except Exception as e:
-                st.error(f"Error: {e}")
-            finally:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-        elif analyze_btn and not cv_file:
-            st.warning("Please upload a PDF file first.")
+            else:
+                st.error(result.get("error", "Analysis failed"))
+        except Exception as e:
+            st.error(f"Error: {e}")
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    elif analyze_btn and not cv_file:
+        st.warning("Please upload a PDF file first.")
 
     st.divider()
 
