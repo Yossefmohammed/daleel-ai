@@ -1,6 +1,6 @@
 """
-Career AI Assistant - app.py
-CV Analyzer + GitHub Profiler + Job Matcher + Live Job Scraper + AI Chatbot
+Career AI Assistant — app.py
+Tabs: Career Chat (Graph RAG) · CV Analyzer · GitHub · Job Matcher · Scrape Jobs · Assessment
 """
 
 import os
@@ -23,68 +23,82 @@ from job_matcher import JobMatcher
 st.markdown("""
 <style>
 .stApp { background: linear-gradient(135deg, #0f0c29, #302b63, #24243e); color: #E8E8F0; }
-h1 { text-align: center; font-size: 2.8rem; font-weight: 800;
-     background: linear-gradient(135deg, #00D9FF, #0091FF);
-     -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+h1 { text-align:center; font-size:2.8rem; font-weight:800;
+     background:linear-gradient(135deg,#00D9FF,#0091FF);
+     -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
 h2, h3 { color: #00D9FF; }
-.stTabs [data-baseweb="tab-list"] button { font-size: 1rem; font-weight: 600; }
-
-/* Chat messages */
+.stTabs [data-baseweb="tab-list"] button { font-size:1rem; font-weight:600; }
 .stChatMessage {
-    background: rgba(30, 30, 60, 0.7) !important;
-    border: 1px solid rgba(0, 217, 255, 0.15) !important;
+    background: rgba(25,25,55,0.75) !important;
+    border: 1px solid rgba(0,217,255,0.15) !important;
     border-radius: 14px !important;
-    padding: 14px !important;
     margin: 8px 0 !important;
 }
-[data-testid="stChatMessageContent"] { color: #E8E8F0 !important; font-size: 15px !important; line-height: 1.7 !important; }
-
-/* Chat input */
-[data-testid="stChatInput"] textarea {
-    background: rgba(20, 20, 50, 0.9) !important;
-    color: #E8E8F0 !important;
-    border: 1px solid rgba(0, 217, 255, 0.3) !important;
-    border-radius: 12px !important;
+[data-testid="stChatMessageContent"] {
+    color: #E8E8F0 !important; font-size:15px !important; line-height:1.75 !important;
 }
-
-footer { visibility: hidden; }
+footer { visibility:hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🎯 Career AI Assistant")
 st.markdown(
-    "<p style='text-align:center;color:#aaa;'>CV analysis · GitHub profiling · Job matching · AI Career Chat</p>",
+    "<p style='text-align:center;color:#aaa;'>Graph RAG · CV Analysis · GitHub Profiling · Job Matching</p>",
     unsafe_allow_html=True,
 )
 st.divider()
 
-# ── Session state ─────────────────────────────────────────────
-for key in ["cv_analysis", "github_analysis", "job_matches", "chat_messages"]:
-    if key not in st.session_state:
-        st.session_state[key] = None
+# ── Session state ──────────────────────────────────────────────────────────────
+_defaults = {
+    "cv_analysis":     None,
+    "github_analysis": None,
+    "job_matches":     None,
+    "chat_messages":   None,
+    "rag_collection":  None,
+    "rag_graph":       None,
+    "rag_stats":       None,
+}
+for k, v in _defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 if st.session_state.chat_messages is None:
-    st.session_state.chat_messages = [
-        {
-            "role": "assistant",
-            "content": (
-                "👋 Hi! I'm your **Career AI Assistant**.\n\n"
-                "I can help you with:\n"
-                "- 📝 Writing a professional cover letter\n"
-                "- 💬 Preparing for interviews\n"
-                "- 🎯 Career advice & skill gap analysis\n"
-                "- 📧 Emailing recruiters or clients\n"
-                "- 📄 Improving your CV summary\n\n"
-                "What would you like help with today?"
-            ),
-        }
-    ]
+    st.session_state.chat_messages = [{
+        "role": "assistant",
+        "content": (
+            "👋 Hi! I'm your **Career AI Assistant** powered by **Graph RAG**.\n\n"
+            "I can search through real job listings and documents to give you grounded answers.\n\n"
+            "**Build the RAG index first** (sidebar → 🔨 Build Index), then ask me:\n"
+            "- 🔍 *What Python jobs are available in Cairo?*\n"
+            "- 📝 *Write a cover letter for a senior data scientist role*\n"
+            "- 💬 *How do I prepare for a React developer interview?*\n"
+            "- 📧 *Draft an email to a recruiter at a fintech company*"
+        ),
+    }]
 
 groq_key = os.getenv("GROQ_API_KEY", "")
 if not groq_key:
     st.error("❌ GROQ_API_KEY not set. Add it to your `.env` file.")
     st.stop()
 
+
+# ── RAG loader (cached per session) ───────────────────────────────────────────
+@st.cache_resource(ttl=3600)
+def _load_rag():
+    """Load ChromaDB collection + knowledge graph into memory."""
+    try:
+        from rag_ingest import get_collection, load_graph, index_exists
+        if not index_exists():
+            return None, None
+        col   = get_collection()
+        graph = load_graph()
+        return col, graph
+    except Exception as e:
+        st.sidebar.warning(f"RAG load error: {e}")
+        return None, None
+
+
+# ── Tabs ───────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "💬 Career Chat",
     "📄 CV Analyzer",
@@ -94,163 +108,197 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Full Assessment",
 ])
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 1 – Career Chatbot (streaming, word-by-word)
-# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Career Chat (Graph RAG + streaming)
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
     st.header("💬 Career AI Chat")
-    st.markdown("Chat with your AI career assistant. Responses appear word by word.")
 
-    # ── Build context from other tabs if available ─────────────
+    # ── Load RAG index if available ────────────────────────────────────────────
+    if st.session_state.rag_collection is None:
+        col, graph = _load_rag()
+        if col and graph:
+            st.session_state.rag_collection = col
+            st.session_state.rag_graph      = graph
+
+    rag_ready = (
+        st.session_state.rag_collection is not None and
+        st.session_state.rag_graph      is not None
+    )
+
+    # ── Status banner ──────────────────────────────────────────────────────────
+    if rag_ready:
+        col_count = st.session_state.rag_collection.count()
+        node_count = st.session_state.rag_graph.number_of_nodes()
+        edge_count = st.session_state.rag_graph.number_of_edges()
+        st.success(
+            f"🕸️ **Graph RAG active** — "
+            f"{col_count:,} chunks in vector store · "
+            f"{node_count:,} graph nodes · "
+            f"{edge_count:,} graph edges"
+        )
+    else:
+        st.warning(
+            "⚠️ **Graph RAG index not built yet.** "
+            "Click **🔨 Build Index** in the sidebar to enable document-grounded answers. "
+            "Until then the chatbot uses general knowledge only."
+        )
+
+    # ── CV context injection ───────────────────────────────────────────────────
     context_parts = []
     if st.session_state.cv_analysis and st.session_state.cv_analysis.get("success"):
-        analysis = st.session_state.cv_analysis.get("analysis", {})
-        if isinstance(analysis, dict):
+        a = st.session_state.cv_analysis.get("analysis", {})
+        if isinstance(a, dict):
             context_parts.append(
-                f"The user's CV has been analyzed. Here's their profile:\n"
-                f"- Skills: {', '.join(analysis.get('skills', []))}\n"
-                f"- Technologies: {', '.join(analysis.get('technologies', []))}\n"
-                f"- Seniority: {analysis.get('seniority_level', 'unknown')}\n"
-                f"- Summary: {analysis.get('summary', '')}"
+                f"User CV profile — skills: {', '.join(a.get('skills',[]))}; "
+                f"technologies: {', '.join(a.get('technologies',[]))}; "
+                f"seniority: {a.get('seniority_level','?')}; "
+                f"summary: {a.get('summary','')}"
             )
-
     if st.session_state.github_analysis and st.session_state.github_analysis.get("success"):
-        profile  = st.session_state.github_analysis.get("profile", {})
-        gh_analysis = st.session_state.github_analysis.get("analysis", {})
+        p  = st.session_state.github_analysis.get("profile", {})
+        ga = st.session_state.github_analysis.get("analysis", {})
         context_parts.append(
-            f"The user's GitHub profile: username={profile.get('username','?')}, "
-            f"repos={profile.get('public_repos','?')}, "
-            f"top languages={list(profile.get('languages', {}).keys())[:5]}, "
-            f"career readiness={gh_analysis.get('career_readiness','?') if isinstance(gh_analysis, dict) else '?'}"
+            f"User GitHub — repos: {p.get('public_repos','?')}, "
+            f"top languages: {list(p.get('languages',{}).keys())[:4]}, "
+            f"readiness: {ga.get('career_readiness','?') if isinstance(ga,dict) else '?'}"
         )
 
-    if st.session_state.job_matches and st.session_state.job_matches.get("success"):
-        context_parts.append(
-            "The user has already run job matching. They are actively job hunting."
-        )
-
-    system_prompt = """You are a friendly, expert Career AI Assistant helping job seekers advance their careers.
-
-You can help with:
-- Writing cover letters, emails to recruiters, LinkedIn messages
-- Interview preparation and common Q&A
-- Career advice, skill gap analysis, salary negotiation
-- Improving CV summaries and professional profiles
-- Explaining job market trends
-
-Guidelines:
-- Be warm, encouraging, and professional
-- Give concrete, actionable advice
-- When writing emails or messages, format them cleanly and ready to send
-- Keep responses focused and not too long unless asked for detail
-- Use bullet points for lists
-- If the user wants to write to a client or recruiter, write the full message for them
-"""
-
-    if context_parts:
-        system_prompt += "\n\nContext about this user:\n" + "\n".join(context_parts)
-
-    # ── Chat controls ──────────────────────────────────────────
-    col1, col2, col3 = st.columns([1, 1, 4])
-    with col1:
+    # ── Controls row ───────────────────────────────────────────────────────────
+    c1, c2, c3 = st.columns([1, 1, 4])
+    with c1:
         if st.button("🗑️ Clear Chat", use_container_width=True):
-            st.session_state.chat_messages = [
-                {"role": "assistant", "content": "Chat cleared. How can I help you?"}
-            ]
+            st.session_state.chat_messages = [{
+                "role": "assistant",
+                "content": "Chat cleared! How can I help you?",
+            }]
             st.rerun()
-    with col2:
-        tone = st.selectbox("Tone", ["Professional", "Friendly", "Formal", "Concise"],
-                            label_visibility="collapsed")
+    with c2:
+        tone = st.selectbox(
+            "Tone", ["Professional", "Friendly", "Formal", "Concise"],
+            label_visibility="collapsed",
+        )
 
     st.divider()
 
-    # ── Render chat history ────────────────────────────────────
+    # ── Render history ─────────────────────────────────────────────────────────
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # ── Chat input + streaming ─────────────────────────────────
-    if prompt := st.chat_input("Ask anything... e.g. 'Write a cover letter for a Python developer role'"):
+    # ── Chat input ─────────────────────────────────────────────────────────────
+    if prompt := st.chat_input("Ask anything about jobs, career advice, or ask me to write something..."):
 
-        # Add user message
         st.session_state.chat_messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Build message history for API (last 10 turns to stay within context)
+        # ── Graph RAG retrieval ────────────────────────────────────────────────
+        rag_context = ""
+        rag_source_note = ""
+
+        if rag_ready:
+            try:
+                from rag_retriever import GraphRAGRetriever
+                retriever = GraphRAGRetriever(
+                    collection = st.session_state.rag_collection,
+                    graph      = st.session_state.rag_graph,
+                    k          = 6,
+                    graph_k    = 6,
+                    hop_depth  = 2,
+                )
+                rag_context = retriever.get_context_string(prompt, max_chars=4000)
+                if rag_context:
+                    rag_source_note = "\n\n*(Answer grounded in your job database via Graph RAG)*"
+            except Exception as e:
+                st.sidebar.warning(f"RAG retrieval warning: {e}")
+
+        # ── Build system prompt ────────────────────────────────────────────────
+        tone_map = {
+            "Professional": "Use a professional tone.",
+            "Friendly":     "Use a warm, friendly, encouraging tone.",
+            "Formal":       "Use a formal, polished business tone.",
+            "Concise":      "Be concise — short sentences, no filler.",
+        }
+
+        system = f"""You are a Career AI Assistant. You help job seekers with:
+- Writing cover letters, recruiter emails, LinkedIn messages
+- Interview preparation and Q&A practice
+- Career advice and skill gap analysis
+- Salary negotiation guidance
+- Searching and explaining job opportunities
+
+{f"User profile context: {chr(10).join(context_parts)}" if context_parts else ""}
+
+{f'''RETRIEVED JOB DATA (from Graph RAG search — use this to ground your answer):
+{rag_context}
+
+Important: Base your answer on the retrieved data above when relevant. If the data doesn't cover the question, use your general knowledge and say so.''' if rag_context else "No job database context available. Answer from general knowledge."}
+
+Tone: {tone_map.get(tone, "")}
+Format emails and messages cleanly, ready to send. Use bullet points for lists."""
+
+        # ── Stream response ────────────────────────────────────────────────────
         history = [
             {"role": m["role"], "content": m["content"]}
-            for m in st.session_state.chat_messages[-10:]
+            for m in st.session_state.chat_messages[-12:]
             if m["role"] in ("user", "assistant")
         ]
 
-        # Inject tone instruction
-        tone_instruction = {
-            "Professional": "Use a professional tone.",
-            "Friendly":     "Use a warm, friendly and encouraging tone.",
-            "Formal":       "Use a formal, polished tone suitable for business correspondence.",
-            "Concise":      "Be as concise as possible — short sentences, minimal fluff.",
-        }.get(tone, "")
-
-        full_system = system_prompt + f"\n\nTone instruction: {tone_instruction}"
-
-        # Stream response word-by-word
         with st.chat_message("assistant"):
-            response_placeholder = st.empty()
+            placeholder   = st.empty()
             full_response = ""
-
             try:
                 from groq import Groq
                 client = Groq(api_key=groq_key)
 
                 stream = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[{"role": "system", "content": full_system}] + history,
-                    temperature=0.75,
-                    max_tokens=1200,
-                    stream=True,                   # ← streaming enabled
+                    model       = "llama-3.3-70b-versatile",
+                    messages    = [{"role": "system", "content": system}] + history,
+                    temperature = 0.7,
+                    max_tokens  = 1400,
+                    stream      = True,          # ← word-by-word streaming
                 )
 
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content
                     if delta:
                         full_response += delta
-                        # Render markdown as it grows — creates the word-by-word effect
-                        response_placeholder.markdown(full_response + "▌")
+                        placeholder.markdown(full_response + "▌")   # blinking cursor
 
-                # Final render without cursor
-                response_placeholder.markdown(full_response)
+                placeholder.markdown(full_response + rag_source_note)
+                full_response += rag_source_note
 
             except Exception as e:
                 full_response = f"❌ Error: {e}"
-                response_placeholder.error(full_response)
+                placeholder.error(full_response)
 
-        # Save assistant reply
         st.session_state.chat_messages.append(
             {"role": "assistant", "content": full_response}
         )
 
-    # ── Quick prompt suggestions ───────────────────────────────
+    # ── Quick prompts ──────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("**💡 Quick prompts:**")
     suggestions = [
-        "Write a cover letter for a senior Python developer role",
-        "How do I answer 'Tell me about yourself' in an interview?",
-        "Write a LinkedIn message to a recruiter",
-        "What skills should I learn to become a data scientist?",
-        "Help me negotiate my salary offer",
-        "Write a follow-up email after an interview",
+        "What Python jobs are available?",
+        "Find remote data science jobs",
+        "What jobs are hiring in Cairo?",
+        "Write a cover letter for a backend developer role",
+        "How do I answer 'Tell me about yourself'?",
+        "Draft an email to a recruiter at a fintech company",
     ]
     cols = st.columns(3)
-    for i, suggestion in enumerate(suggestions):
-        if cols[i % 3].button(suggestion, key=f"suggest_{i}", use_container_width=True):
-            st.session_state.chat_messages.append({"role": "user", "content": suggestion})
+    for i, s in enumerate(suggestions):
+        if cols[i % 3].button(s, key=f"q_{i}", use_container_width=True):
+            st.session_state.chat_messages.append({"role": "user", "content": s})
             st.rerun()
 
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 2 – CV Analyzer
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — CV Analyzer
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.header("📄 CV Analyzer")
     col1, col2 = st.columns([3, 1])
@@ -258,9 +306,9 @@ with tab2:
         uploaded_file = st.file_uploader("Upload your CV (PDF)", type=["pdf"])
     with col2:
         st.write(""); st.write("")
-        go = st.button("🔍 Analyze CV", use_container_width=True)
+        go_cv = st.button("🔍 Analyze CV", use_container_width=True)
 
-    if go:
+    if go_cv:
         if not uploaded_file:
             st.warning("⚠️ Upload a PDF first.")
         else:
@@ -272,7 +320,7 @@ with tab2:
                     result = CVAnalyzer().analyze_cv(temp)
                 if result.get("success"):
                     st.session_state.cv_analysis = result
-                    st.success("✅ Done! The chatbot now knows your CV — go to 💬 Career Chat.")
+                    st.success("✅ CV analyzed! The chatbot now knows your profile.")
                 else:
                     st.error(result.get("error"))
             except Exception as e:
@@ -282,31 +330,30 @@ with tab2:
                     os.remove(temp)
 
     if st.session_state.cv_analysis:
-        analysis = st.session_state.cv_analysis.get("analysis", {})
-        if isinstance(analysis, dict):
+        a = st.session_state.cv_analysis.get("analysis", {})
+        if isinstance(a, dict):
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("**🛠️ Skills**")
-                for s in analysis.get("skills", []):
-                    st.markdown(f"- {s}")
+                for s in a.get("skills", []):      st.markdown(f"- {s}")
                 st.markdown("**💻 Technologies**")
-                for t in analysis.get("technologies", []):
-                    st.markdown(f"- {t}")
+                for t in a.get("technologies", []): st.markdown(f"- {t}")
             with c2:
                 st.markdown("**🎓 Education**")
-                for e in analysis.get("education", []):
+                for e in a.get("education", []):
                     st.markdown(f"- {e.get('degree','?')} @ {e.get('school','?')}")
                 st.markdown("**💼 Experience**")
-                for ex in analysis.get("experience", []):
+                for ex in a.get("experience", []):
                     st.markdown(f"- {ex.get('title','?')} at {ex.get('company','?')}")
-            st.markdown(f"**Seniority:** `{analysis.get('seniority_level','?')}`")
-            st.info(analysis.get("summary", ""))
+            st.markdown(f"**Seniority:** `{a.get('seniority_level','?')}`")
+            st.info(a.get("summary", ""))
         else:
-            st.code(str(analysis))
+            st.code(str(a))
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 3 – GitHub
-# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — GitHub
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab3:
     st.header("🐙 GitHub Profile Analysis")
     col1, col2 = st.columns([3, 1])
@@ -320,49 +367,48 @@ with tab3:
         if not username.strip():
             st.warning("⚠️ Enter a username.")
         else:
-            with st.spinner("Fetching profile..."):
+            with st.spinner("Fetching..."):
                 try:
                     result = GitHubAnalyzer().analyze_github_profile(username.strip())
                     if result.get("success"):
                         st.session_state.github_analysis = result
-                        st.success("✅ Done! The chatbot now knows your GitHub profile.")
+                        st.success("✅ Done! Chatbot knows your GitHub profile.")
                     else:
                         st.error(result.get("error"))
                 except Exception as e:
                     st.error(str(e))
 
     if st.session_state.github_analysis:
-        profile  = st.session_state.github_analysis.get("profile", {})
-        analysis = st.session_state.github_analysis.get("analysis", {})
+        p  = st.session_state.github_analysis.get("profile", {})
+        ga = st.session_state.github_analysis.get("analysis", {})
         c1, c2, c3 = st.columns(3)
-        c1.metric("Followers",    profile.get("followers", 0))
-        c2.metric("Public Repos", profile.get("public_repos", 0))
-        c3.metric("Following",    profile.get("following", 0))
-        if profile.get("languages"):
-            st.bar_chart(profile["languages"])
-        if isinstance(analysis, dict):
+        c1.metric("Followers",    p.get("followers", 0))
+        c2.metric("Public Repos", p.get("public_repos", 0))
+        c3.metric("Following",    p.get("following", 0))
+        if p.get("languages"):
+            st.bar_chart(p["languages"])
+        if isinstance(ga, dict):
             st.markdown(
-                f"**Strength:** `{analysis.get('profile_strength','?')}/10` | "
-                f"**Readiness:** `{analysis.get('career_readiness','?')}`"
+                f"**Strength:** `{ga.get('profile_strength','?')}/10`  |  "
+                f"**Readiness:** `{ga.get('career_readiness','?')}`"
             )
-            for r in analysis.get("recommendations", []):
-                st.markdown(f"- {r}")
+            for r in ga.get("recommendations", []): st.markdown(f"- {r}")
         else:
-            st.code(str(analysis))
+            st.code(str(ga))
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 4 – Job Matcher
-# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Job Matcher
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab4:
     st.header("💼 Job Matcher")
-    db_exists = os.path.exists("data/jobs_combined.csv") or os.path.exists("data/jobs.csv")
-    if not db_exists:
+    if not (os.path.exists("data/jobs_combined.csv") or os.path.exists("data/jobs.csv")):
         st.warning("⚠️ No job database. Use 🌐 Scrape Jobs first.")
 
     col1, col2 = st.columns(2)
     with col1:
         skills_input = st.text_area("Your Skills (one per line)",
-                                    placeholder="Python\nJavaScript\nReact", height=120)
+                                    placeholder="Python\nReact\nDocker", height=120)
         exp_years = st.number_input("Years of Experience", 0, 50, 2)
     with col2:
         seniority = st.selectbox("Seniority", ["Junior", "Mid-Level", "Senior"])
@@ -399,15 +445,16 @@ with tab4:
                     f"— {job.get('match_score','?')}%"
                 ):
                     st.markdown(f"**Why:** {job.get('reason','')}")
-                    st.markdown(f"**Required:** {', '.join(job.get('required_skills', []))}")
-                    st.markdown(f"**Nice to have:** {', '.join(job.get('nice_to_have', []))}")
+                    st.markdown(f"**Required:** {', '.join(job.get('required_skills',[]))}")
+                    st.markdown(f"**Nice to have:** {', '.join(job.get('nice_to_have',[]))}")
             st.info(matches.get("summary", ""))
         else:
             st.code(str(matches))
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 5 – Scrape Jobs
-# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Scrape Jobs
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab5:
     st.header("🌐 Scrape Live Jobs")
 
@@ -435,17 +482,16 @@ with tab5:
     with col_b:
         st.markdown("#### ❌ LinkedIn")
         st.error(
-            "Not supported — ToS violation, JS rendering, bot detection, "
-            "and legal risk (hiQ v LinkedIn, 2022).\n\n"
-            "✅ Use the official [LinkedIn Jobs API](https://developer.linkedin.com/product-catalog/jobs) instead."
+            "Not supported — ToS, JS rendering, bot detection, legal risk.\n\n"
+            "✅ Use the official [LinkedIn Jobs API](https://developer.linkedin.com/product-catalog/jobs)."
         )
 
     st.divider()
     c1, c2, c3, c4 = st.columns(4)
-    remoteok_limit = c1.slider("RemoteOK jobs",     20, 200, 100, 20, disabled=not use_remoteok)
-    arb_pages      = c2.slider("Arbeitnow pages",    1,  10,   3,    disabled=not use_arbeitnow)
-    muse_pages     = c3.slider("The Muse pages",     1,   5,   2,    disabled=not use_muse)
-    wuzzuf_pages   = c4.slider("Wuzzuf pages/kw",    1,   5,   2,    disabled=not use_wuzzuf)
+    remoteok_limit = c1.slider("RemoteOK",      20, 200, 100, 20, disabled=not use_remoteok)
+    arb_pages      = c2.slider("Arbeitnow pgs",  1,  10,   3,    disabled=not use_arbeitnow)
+    muse_pages     = c3.slider("Muse pgs",        1,   5,   2,    disabled=not use_muse)
+    wuzzuf_pages   = c4.slider("Wuzzuf pgs/kw",   1,   5,   2,    disabled=not use_wuzzuf)
 
     if use_wuzzuf:
         wuzzuf_kw_raw = st.text_area(
@@ -470,41 +516,37 @@ with tab5:
                 log_box.markdown("\n\n".join(f"`{l}`" for l in logs[-10:]))
 
             try:
-                from data_scraper import RemoteOKScraper, ArbeitnowScraper, TheMuseScraper, WuzzufScraper
+                from data_scraper import (RemoteOKScraper, ArbeitnowScraper,
+                                          TheMuseScraper, WuzzufScraper)
                 import pandas as pd
-
                 os.makedirs("data", exist_ok=True)
                 all_jobs: list = []
                 total = sum([use_remoteok, use_arbeitnow, use_muse, use_wuzzuf])
-                step = 0
+                step  = 0
 
                 if use_remoteok:
                     log("📡 RemoteOK...")
-                    progress.progress(int(100 * step / total), text="RemoteOK...")
+                    progress.progress(int(100 * step / total))
                     j = RemoteOKScraper().scrape(limit=remoteok_limit)
-                    all_jobs += j; step += 1
-                    log(f"   ✅ {len(j)} jobs")
+                    all_jobs += j; step += 1; log(f"   ✅ {len(j)} jobs")
 
                 if use_arbeitnow:
                     log("📡 Arbeitnow...")
-                    progress.progress(int(100 * step / total), text="Arbeitnow...")
+                    progress.progress(int(100 * step / total))
                     j = ArbeitnowScraper().scrape(pages=arb_pages)
-                    all_jobs += j; step += 1
-                    log(f"   ✅ {len(j)} jobs")
+                    all_jobs += j; step += 1; log(f"   ✅ {len(j)} jobs")
 
                 if use_muse:
                     log("📡 The Muse...")
-                    progress.progress(int(100 * step / total), text="The Muse...")
+                    progress.progress(int(100 * step / total))
                     j = TheMuseScraper().scrape(pages=muse_pages)
-                    all_jobs += j; step += 1
-                    log(f"   ✅ {len(j)} jobs")
+                    all_jobs += j; step += 1; log(f"   ✅ {len(j)} jobs")
 
                 if use_wuzzuf:
                     log(f"📡 Wuzzuf ({len(wuzzuf_keywords)} keywords)...")
-                    progress.progress(int(100 * step / total), text="Wuzzuf...")
+                    progress.progress(int(100 * step / total))
                     j = WuzzufScraper().scrape(keywords=wuzzuf_keywords, pages_per_keyword=wuzzuf_pages)
-                    all_jobs += j; step += 1
-                    log(f"   ✅ {len(j)} jobs")
+                    all_jobs += j; step += 1; log(f"   ✅ {len(j)} jobs")
 
                 existing_df = pd.DataFrame()
                 for path in ["data/jobs.csv", "docs/ai_jobs_market_2025_2026.csv"]:
@@ -517,15 +559,13 @@ with tab5:
                             pass
 
                 combined = pd.concat([existing_df, pd.DataFrame(all_jobs)], ignore_index=True)
-                before = len(combined)
-                combined.drop_duplicates(subset=["job_title", "company"], keep="first", inplace=True)
+                before   = len(combined)
+                combined.drop_duplicates(subset=["job_title","company"], keep="first", inplace=True)
                 log(f"   🗑️  {before - len(combined)} duplicates removed")
-
                 combined.to_csv("data/jobs_combined.csv", index=False)
                 progress.progress(100, text="Done!")
                 log(f"💾 {len(combined):,} jobs → data/jobs_combined.csv")
-
-                st.success(f"✅ **{len(combined):,} jobs** saved!")
+                st.success(f"✅ **{len(combined):,} jobs** saved! Now build the RAG index in the sidebar ↗")
 
                 if "source" in combined.columns:
                     st.bar_chart(combined["source"].value_counts())
@@ -533,18 +573,16 @@ with tab5:
                 display_cols = [c for c in ["job_title","company","location","remote_work","source"]
                                 if c in combined.columns]
                 st.dataframe(combined[display_cols].head(25), use_container_width=True)
-                st.download_button(
-                    "⬇️ Download jobs_combined.csv",
-                    combined.to_csv(index=False).encode(),
-                    "jobs_combined.csv", "text/csv", use_container_width=True,
-                )
+                st.download_button("⬇️ Download", combined.to_csv(index=False).encode(),
+                                   "jobs_combined.csv", "text/csv", use_container_width=True)
             except Exception as e:
                 st.error(f"❌ {e}")
                 progress.progress(100)
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 6 – Full Assessment
-# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — Full Assessment
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab6:
     st.header("📊 Full Career Assessment")
     has_data = any([st.session_state.cv_analysis,
@@ -560,8 +598,7 @@ with tab6:
                 st.json(a) if isinstance(a, dict) else st.code(str(a))
             if st.session_state.github_analysis:
                 st.markdown("### 🐙 GitHub")
-                p = {k: v for k, v in
-                     st.session_state.github_analysis.get("profile", {}).items()
+                p = {k: v for k, v in st.session_state.github_analysis.get("profile",{}).items()
                      if k != "success"}
                 st.json(p)
             if st.session_state.job_matches:
@@ -570,22 +607,69 @@ with tab6:
                 st.json(m) if isinstance(m, dict) else st.code(str(m))
             st.success("✅ Report ready!")
 
-# ── Sidebar ────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("🎯 Career AI")
     st.markdown("---")
-    st.success("✅ Groq API")        if groq_key                              else st.error("❌ No API key")
-    st.success("✅ CV analyzed")     if st.session_state.cv_analysis          else st.info("⬜ CV")
-    st.success("✅ GitHub analyzed") if st.session_state.github_analysis      else st.info("⬜ GitHub")
-    st.success("✅ Jobs matched")    if st.session_state.job_matches           else st.info("⬜ Jobs")
 
-    chat_count = len([m for m in (st.session_state.chat_messages or []) if m["role"] == "user"])
-    if chat_count:
-        st.success(f"✅ {chat_count} chat messages")
+    # ── Graph RAG panel ────────────────────────────────────────────────────────
+    st.subheader("🕸️ Graph RAG Index")
+
+    from rag_ingest import index_exists
+    idx_ready = index_exists()
+
+    if idx_ready:
+        st.success("✅ Index ready")
+        if st.session_state.rag_stats:
+            s = st.session_state.rag_stats
+            st.caption(
+                f"📦 {s.get('chunks',0):,} chunks\n"
+                f"🕸️ {s.get('graph_nodes',0):,} nodes · {s.get('graph_edges',0):,} edges"
+            )
     else:
-        st.info("⬜ No chats yet")
+        st.warning("⚠️ Not built yet")
+
+    if st.button("🔨 Build / Rebuild Index", use_container_width=True, type="primary"):
+        prog  = st.progress(0, text="Starting...")
+        sbar  = st.empty()
+
+        def _cb(pct, msg):
+            prog.progress(pct, text=msg)
+            sbar.caption(msg)
+
+        try:
+            from rag_ingest import build_index
+            stats = build_index(progress_callback=_cb)
+            st.session_state.rag_stats = stats
+
+            # Reload into session
+            st.cache_resource.clear()
+            from rag_ingest import get_collection, load_graph
+            st.session_state.rag_collection = get_collection()
+            st.session_state.rag_graph      = load_graph()
+
+            st.success(
+                f"✅ Built! {stats['chunks']:,} chunks · "
+                f"{stats['graph_nodes']:,} nodes · "
+                f"{stats['graph_edges']:,} edges"
+            )
+            sbar.empty()
+        except Exception as e:
+            st.error(f"❌ {e}")
+            prog.progress(100)
 
     st.markdown("---")
+
+    # ── Other status ───────────────────────────────────────────────────────────
+    st.subheader("📊 Status")
+    st.success("✅ Groq API")        if groq_key else st.error("❌ No API key")
+    st.success("✅ CV analyzed")     if st.session_state.cv_analysis     else st.info("⬜ CV")
+    st.success("✅ GitHub analyzed") if st.session_state.github_analysis else st.info("⬜ GitHub")
+    st.success("✅ Jobs matched")    if st.session_state.job_matches      else st.info("⬜ Jobs")
+
     db_f = ("data/jobs_combined.csv" if os.path.exists("data/jobs_combined.csv")
             else "data/jobs.csv"     if os.path.exists("data/jobs.csv") else None)
     if db_f:
@@ -595,14 +679,15 @@ with st.sidebar:
         except Exception:
             st.warning("⚠️ DB unreadable")
     else:
-        st.warning("⚠️ No DB — Scrape Jobs first")
+        st.warning("⚠️ No DB — Scrape first")
 
     st.markdown("---")
     if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.chat_messages = None
         st.rerun()
-    if st.button("🗑️ Clear All Results", use_container_width=True):
-        for k in ["cv_analysis", "github_analysis", "job_matches", "chat_messages"]:
+    if st.button("🗑️ Clear All", use_container_width=True):
+        for k in _defaults:
             st.session_state[k] = None
+        st.cache_resource.clear()
         st.rerun()
-    st.caption("Phase 1 ✅ | Powered by Groq")
+    st.caption("Graph RAG ✅ | Powered by Groq")
