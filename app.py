@@ -1,863 +1,742 @@
 """
 PathIQ — Career Intelligence Platform
-======================================
-Rebuilt UI: professional dark design, service-based chat tabs,
-human-like streaming responses, Graph RAG backend.
+UI: Claude / ChatGPT style. No prompt suggestions. Human-like responses.
 """
 
-import os
-import streamlit as st
-from dotenv import load_dotenv
-import json
-import csv
-import datetime
-import random
-import re
-import time
+import os, csv, json, re, random, datetime
 from pathlib import Path
+from dotenv import load_dotenv
 
 load_dotenv()
+import streamlit as st
 
-# ── Page config (must be first Streamlit call) ─────────────────────────────
 st.set_page_config(
-    page_title="PathIQ — Career Intelligence",
+    page_title="PathIQ",
     page_icon="✦",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-# ── Lazy imports (graceful degradation if deps missing) ─────────────────────
+# ── Optional imports ──────────────────────────────────────────────────────────
 try:
     from cv_analyzer import CVAnalyzer
-    CV_AVAILABLE = True
+    CV_OK = True
 except ImportError:
-    CV_AVAILABLE = False
+    CV_OK = False
 
 try:
     from github_analyzer import GitHubAnalyzer
-    GH_AVAILABLE = True
+    GH_OK = True
 except ImportError:
-    GH_AVAILABLE = False
+    GH_OK = False
 
 try:
     from job_matcher import JobMatcher
-    JM_AVAILABLE = True
+    JM_OK = True
 except ImportError:
-    JM_AVAILABLE = False
+    JM_OK = False
 
 try:
     from graph_builder import KnowledgeGraphBuilder, GRAPH_PATH
     from graph_retriever import GraphRetriever
     from langchain_community.vectorstores import Chroma
     from langchain_community.embeddings import HuggingFaceEmbeddings
-    from langchain_core.prompts import PromptTemplate
-    from langchain_community.document_loaders import PyPDFLoader
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    RAG_AVAILABLE = True
+    RAG_OK = True
 except ImportError:
-    RAG_AVAILABLE = False
+    RAG_OK = False
 
-# ── Constants ───────────────────────────────────────────────────────────────
-DB_DIR        = "db"
-EMBED_MODEL   = "sentence-transformers/all-mpnet-base-v2"
-CHUNK_SIZE    = 500
-CHUNK_OVERLAP = 100
+DB_DIR      = "db"
+EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
 
 SERVICES = {
-    "cv":     {"label": "CV Analyzer",      "icon": "📄", "color": "#7c6af5"},
-    "github": {"label": "Code Profile",     "icon": "💻", "color": "#2dd4c4"},
-    "jobs":   {"label": "Job Matcher",      "icon": "🎯", "color": "#f5a623"},
-    "assess": {"label": "Full Assessment",  "icon": "📊", "color": "#f56c6c"},
-    "rag":    {"label": "Knowledge Chat",   "icon": "🧠", "color": "#56d19e"},
+    "cv":     {"label": "CV Analyzer",     "icon": "📄"},
+    "github": {"label": "Code Profile",    "icon": "💻"},
+    "jobs":   {"label": "Job Matcher",     "icon": "🎯"},
+    "assess": {"label": "Full Assessment", "icon": "📊"},
+    "rag":    {"label": "Knowledge Chat",  "icon": "🧠"},
 }
 
-# ── Inject full custom UI CSS ────────────────────────────────────────────────
-def inject_css():
-    st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+SERVICE_META = {
+    "cv": {
+        "welcome": "Hey! I'm your CV Analyzer. Paste your CV text, upload a PDF, or just describe your background — I'll give you honest, specific feedback on what's working and exactly what to fix.",
+        "placeholder": "Ask me anything about your CV or career profile…",
+        "system": """You are PathIQ's CV coach — a direct, warm career expert who has reviewed thousands of CVs.
 
-/* ── Reset & base ── */
-*, *::before, *::after { box-sizing: border-box; }
-html, body, [data-testid="stAppViewContainer"],
-[data-testid="stApp"], .main { background: #0a0a0f !important; }
+Rules:
+- Never open with "Certainly!", "Great question!", "Of course!" — just answer directly
+- Talk like a smart, knowledgeable friend — not a corporate bot
+- Give SPECIFIC feedback: name the exact section, say exactly what to rewrite and why
+- If something is weak, say so. If it's strong, say that too. Be honest.
+- Use short paragraphs. Write like a human.
+- Use **bold** for key terms, bullet points only when listing 3+ things
+- End with ONE natural follow-up question to keep the conversation going
+- No filler, no corporate speak, no generic tips""",
+    },
+    "github": {
+        "welcome": "Hi! Share your GitHub username and I'll analyze your profile the way a senior engineering recruiter would — repos, commit patterns, language depth, documentation quality. Tell me what you'd like to know.",
+        "placeholder": "Share your GitHub username or ask about your developer profile…",
+        "system": """You are PathIQ's GitHub profile analyst — you think like a senior engineering recruiter.
+
+Rules:
+- No filler openers — get straight to the point
+- Be honest about weaknesses. Sugarcoating wastes everyone's time.
+- Explain WHY something matters, not just what to change
+- Give concrete examples: "instead of X, do Y"
+- Write like a smart colleague giving real feedback — not a report
+- End with one natural follow-up question""",
+    },
+    "jobs": {
+        "welcome": "Hey! Tell me about your skills and experience and I'll match you to the right roles, explain your fit, and show you exactly what gaps to close. What's your background?",
+        "placeholder": "Describe your skills, experience, or the role you're targeting…",
+        "system": """You are PathIQ's job matching specialist — a career strategist who knows the real tech job market inside out.
+
+Rules:
+- Be specific: name real companies, actual salary ranges, real role titles
+- Tell people what they might not want to hear if it's true — it's more useful
+- Give 3-5 focused role matches, not an overwhelming list
+- Write naturally, like a recruiter friend over coffee
+- End with one specific next-step question""",
+    },
+    "assess": {
+        "welcome": "I'm your Full Assessment engine. Give me everything — your background, GitHub, target roles — and I'll put together a complete picture of where you stand and your clearest path forward.",
+        "placeholder": "Tell me about your overall career situation…",
+        "system": """You are PathIQ's career intelligence engine — you synthesize the full picture and give people a clear map forward.
+
+Rules:
+- Be direct about the biggest lever to pull — don't bury it
+- Give timelines and specific steps, not vague direction
+- Write like a trusted advisor, not a management consultant
+- Structured but human — not a formal report
+- End with one clear next action""",
+    },
+    "rag": {
+        "welcome": "Hi! I'm connected to the Wasla knowledge base using Graph RAG — vector search combined with knowledge graph traversal for deeper, multi-hop answers. What would you like to know?",
+        "placeholder": "Ask anything about Wasla Solutions or the knowledge base…",
+        "system": """You are PathIQ's Knowledge Chat — connected to Wasla Solutions' document base via Graph RAG.
+
+Rules:
+- Only share information from the retrieved context — never invent facts
+- If you don't have the information, say so clearly and honestly
+- Explain technical concepts in plain language
+- Be specific — reference document details when relevant
+- Write naturally, not like a search result""",
+    },
+}
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body,
+[data-testid="stAppViewContainer"],
+[data-testid="stApp"] {
+    background: #212121 !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    color: #ececec !important;
+}
 
 /* Hide Streamlit chrome */
 #MainMenu, header, footer,
 [data-testid="stToolbar"],
 [data-testid="stDecoration"],
-[data-testid="stStatusWidget"]        { display: none !important; }
-[data-testid="collapsedControl"]      { display: none !important; }
-.block-container                      { padding: 0 !important; max-width: 100% !important; }
-section.main > div                    { padding: 0 !important; }
+[data-testid="stStatusWidget"],
+[data-testid="collapsedControl"],
+.stDeployButton { display: none !important; }
 
-/* ── Design tokens ── */
-:root {
-  --ink:  #0a0a0f; --ink2: #12121c; --ink3: #1a1a28;
-  --ink4: #222234; --ink5: #2e2e48;
-  --line:  rgba(255,255,255,0.06);
-  --line2: rgba(255,255,255,0.10);
-  --line3: rgba(255,255,255,0.16);
-  --t1: #f0f0fa; --t2: #9898b8; --t3: #55556a;
-  --violet: #7c6af5; --violet2: #6458e8;
-  --violet-dim: rgba(124,106,245,0.10);
-  --violet-border: rgba(124,106,245,0.25);
-  --teal: #2dd4c4; --sage: #56d19e;
-  --amber: #f5a623; --rose: #f56c6c;
-  --r: 10px; --rs: 6px; --rl: 14px;
-  --ff: 'Inter', system-ui, -apple-system, sans-serif;
-}
-
-/* ── Shell layout ── */
-.pathiq-shell {
-  display: flex; height: 100vh; overflow: hidden;
-  font-family: var(--ff); background: var(--ink);
-}
+.block-container { padding: 0 !important; max-width: 100% !important; }
+section.main > div { padding: 0 !important; }
+[data-testid="stVerticalBlock"] { gap: 0 !important; }
 
 /* ── Sidebar ── */
-.pathiq-sidebar {
-  width: 220px; min-width: 220px;
-  background: var(--ink2); border-right: 1px solid var(--line);
-  display: flex; flex-direction: column; overflow: hidden;
+[data-testid="stSidebar"] {
+    background: #171717 !important;
+    border-right: 1px solid rgba(255,255,255,0.07) !important;
 }
+[data-testid="stSidebar"] > div { padding: 0 !important; }
+[data-testid="stSidebarContent"] { padding: 0 !important; }
+
+[data-testid="stSidebar"] .stButton > button {
+    background: transparent !important;
+    border: none !important;
+    color: #b4b4c8 !important;
+    font-size: 13.5px !important;
+    font-weight: 400 !important;
+    padding: 9px 14px !important;
+    border-radius: 8px !important;
+    text-align: left !important;
+    width: 100% !important;
+    justify-content: flex-start !important;
+    transition: background 0.12s !important;
+    box-shadow: none !important;
+    transform: none !important;
+    letter-spacing: 0 !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: rgba(255,255,255,0.07) !important;
+    color: #fff !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+[data-testid="stSidebar"] .stButton > button:active { transform: none !important; }
+[data-testid="stSidebar"] .stButton > button:focus { box-shadow: none !important; outline: none !important; }
+[data-testid="stSidebar"] .stButton > button:disabled {
+    color: #3a3a50 !important;
+    opacity: 1 !important;
+}
+
+/* Sidebar layout */
 .sb-brand {
-  padding: 18px 16px 14px; border-bottom: 1px solid var(--line);
-  display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 20px 16px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
 }
-.brand-gem {
-  width: 30px; height: 30px; border-radius: 9px;
-  background: var(--violet); display: flex; align-items: center;
-  justify-content: center; flex-shrink: 0;
-  font-size: 14px; font-weight: 700; color: #fff;
+.sb-gem {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: #9b8afb;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: #fff; font-weight: 700; flex-shrink: 0;
 }
-.brand-name { font-size: 13px; font-weight: 600; color: var(--t1); }
-.brand-sub  { font-size: 10px; color: var(--violet); margin-top: 1px;
-              background: var(--violet-dim); padding: 1px 6px;
-              border-radius: 20px; border: 1px solid var(--violet-border);
-              display: inline-block; font-weight: 500; }
+.sb-name { font-size: 15px; font-weight: 600; color: #ececec; }
+.sb-tag  { font-size: 10px; color: #9b8afb; margin-top: 1px; }
 
-.sb-nav { flex: 1; overflow-y: auto; padding: 10px 8px; scrollbar-width: none; }
-.sb-nav::-webkit-scrollbar { display: none; }
-.sb-section { margin-bottom: 18px; }
-.sb-section-label {
-  font-size: 10px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: .07em; color: var(--t3); padding: 0 8px 7px;
+.sb-group {
+    font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.07em;
+    color: #3a3a52; padding: 16px 16px 5px;
 }
-.sb-btn {
-  display: flex; align-items: center; gap: 9px;
-  width: 100%; padding: 8px 10px; border-radius: var(--rs);
-  border: none; background: transparent; cursor: pointer;
-  color: var(--t2); font-size: 12.5px; font-family: var(--ff);
-  font-weight: 500; text-align: left; transition: all .15s;
+.sb-div {
+    height: 1px; background: rgba(255,255,255,0.05);
+    margin: 6px 12px;
 }
-.sb-btn:hover { background: var(--ink4); color: var(--t1); }
-.sb-btn.active {
-  background: var(--violet-dim); color: var(--violet);
-  border: 1px solid var(--violet-border);
+.sb-status {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 11px; color: #3a3a52;
+    padding: 12px 16px;
 }
-.sb-btn.disabled { opacity: .35; cursor: not-allowed; pointer-events: none; }
-.sb-icon {
-  width: 28px; height: 28px; border-radius: var(--rs);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 13px; flex-shrink: 0;
-  background: var(--ink4);
+.sb-pulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #4ade80;
+    animation: sbpulse 2.5s ease-in-out infinite;
 }
-.sb-btn.active .sb-icon { background: rgba(124,106,245,.18); }
-.sb-pill {
-  font-size: 9px; padding: 2px 6px; border-radius: 20px;
-  font-weight: 600; margin-left: auto;
-}
-.pill-live { background: rgba(45,212,196,.1); color: var(--teal);
-             border: 1px solid rgba(45,212,196,.2); }
-.pill-soon { background: var(--ink4); color: var(--t3);
-             border: 1px solid var(--line2); }
+@keyframes sbpulse { 0%,100%{opacity:1} 50%{opacity:.25} }
 
-.sb-foot {
-  padding: 12px; border-top: 1px solid var(--line);
+/* ── Welcome ── */
+.welcome {
+    max-width: 680px; margin: 80px auto 0;
+    padding: 0 24px; text-align: center;
 }
-.status-row {
-  display: flex; align-items: center; gap: 7px;
-  font-size: 11px; color: var(--t3); margin-bottom: 8px;
+.welcome-icon {
+    width: 50px; height: 50px; border-radius: 50%;
+    background: #9b8afb;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 20px; margin-bottom: 20px;
 }
-.pulse {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--sage); flex-shrink: 0;
-  animation: blink 2.4s ease-in-out infinite;
-}
-@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.welcome-title { font-size: 22px; font-weight: 500; color: #ececec; margin-bottom: 10px; }
+.welcome-body  { font-size: 15px; color: #737387; line-height: 1.7; max-width: 500px; margin: 0 auto; }
 
-/* ── Main panel ── */
-.pathiq-main {
-  flex: 1; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--ink);
+/* ── Messages ── */
+.msgs { max-width: 680px; margin: 0 auto; padding: 28px 24px 16px; }
+
+.msg-block { margin-bottom: 22px; animation: msgpop .2s ease; }
+@keyframes msgpop { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
+
+/* User */
+.user-row { display: flex; justify-content: flex-end; }
+.user-bub {
+    background: #2f2f2f;
+    color: #ececec;
+    border-radius: 18px 18px 4px 18px;
+    padding: 12px 18px;
+    font-size: 14.5px; line-height: 1.65;
+    max-width: 82%; word-wrap: break-word;
+    white-space: pre-wrap;
 }
 
-/* ── Top tab bar ── */
-.pathiq-tabs {
-  height: 46px; background: var(--ink2);
-  border-bottom: 1px solid var(--line);
-  display: flex; align-items: center;
-  padding: 0 16px; gap: 0; overflow-x: auto;
-  scrollbar-width: none; flex-shrink: 0;
+/* Bot — no bubble, like Claude */
+.bot-row { display: flex; gap: 13px; align-items: flex-start; }
+.bot-av {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: #9b8afb;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; color: #fff;
+    flex-shrink: 0; margin-top: 2px;
 }
-.pathiq-tabs::-webkit-scrollbar { display: none; }
-.tab-btn {
-  display: flex; align-items: center; gap: 6px;
-  padding: 0 14px; height: 46px; cursor: pointer;
-  border: none; background: transparent;
-  color: var(--t3); font-size: 12px; font-weight: 500;
-  font-family: var(--ff); white-space: nowrap;
-  border-bottom: 2px solid transparent;
-  transition: all .15s; flex-shrink: 0;
+.bot-body {
+    flex: 1; font-size: 14.5px; line-height: 1.78;
+    color: #e0e0f0; min-width: 0;
 }
-.tab-btn:hover  { color: var(--t2); }
-.tab-btn.active { color: var(--violet); border-bottom-color: var(--violet); }
-.tab-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--t3); flex-shrink: 0;
+.bot-body p            { margin-bottom: 12px; }
+.bot-body p:last-child { margin-bottom: 0; }
+.bot-body strong  { color: #fff; font-weight: 500; }
+.bot-body em      { color: #aeaec8; }
+.bot-body ul,
+.bot-body ol      { margin: 8px 0 14px 20px; color: #c8c8e0; }
+.bot-body li      { margin-bottom: 6px; line-height: 1.6; }
+.bot-body h3      { font-size: 15px; font-weight: 500; color: #fff; margin: 14px 0 8px; }
+.bot-body code    {
+    background: #252535; color: #c4b5fd;
+    padding: 2px 7px; border-radius: 5px;
+    font-size: 13px; font-family: 'Fira Code', monospace;
 }
-.tab-btn.active .tab-dot { background: var(--violet); }
-
-/* ── Chat feed ── */
-.pathiq-feed {
-  flex: 1; overflow-y: auto; padding: 20px 18px;
-  scrollbar-width: thin; scrollbar-color: var(--line2) transparent;
-}
-.pathiq-feed::-webkit-scrollbar { width: 3px; }
-.pathiq-feed::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 3px; }
-
-/* Service banner */
-.svc-banner {
-  background: var(--ink3); border: 1px solid var(--line);
-  border-radius: var(--rl); padding: 16px 18px; margin-bottom: 22px;
-  display: flex; gap: 12px; align-items: flex-start;
-}
-.svc-banner-icon {
-  width: 40px; height: 40px; border-radius: 10px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 18px; flex-shrink: 0;
-}
-.svc-banner-title { font-size: 14px; font-weight: 600; color: var(--t1); margin-bottom: 3px; }
-.svc-banner-desc  { font-size: 12px; color: var(--t3); line-height: 1.55; }
-.chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
-.qchip {
-  font-size: 11px; padding: 5px 11px; border-radius: 20px;
-  border: 1px solid var(--line2); color: var(--t2);
-  background: var(--ink4); cursor: pointer; transition: all .15s;
-  font-family: var(--ff);
-}
-.qchip:hover {
-  border-color: var(--violet-border); color: var(--violet);
-  background: var(--violet-dim);
+.bot-body pre {
+    background: #1a1a2a;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 10px; padding: 14px 16px;
+    overflow-x: auto; margin: 12px 0;
+    font-size: 13px; color: #d0d0e8;
 }
 
-/* Messages */
-.msg-row { display: flex; gap: 10px; margin-bottom: 16px; animation: popIn .22s ease; }
-@keyframes popIn { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
-.msg-row.user { flex-direction: row-reverse; }
-.av {
-  width: 28px; height: 28px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 3px;
+/* Typing */
+.typing-block { display: flex; gap: 13px; align-items: flex-start; margin-bottom: 22px; }
+.t-dots { display: flex; gap: 5px; align-items: center; padding-top: 7px; }
+.t-dot  {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #4a4a5a;
+    animation: tdot 1.3s ease-in-out infinite;
 }
-.av.bot { background: var(--violet); color: #fff; }
-.av.usr { background: var(--ink4); border: 1px solid var(--line2); color: var(--t2); }
-.bubble { max-width: 75%; }
-.bubble-inner {
-  padding: 11px 14px; border-radius: 14px;
-  font-size: 13px; line-height: 1.65; color: var(--t1);
-}
-.msg-row.bot .bubble-inner {
-  background: var(--ink3); border: 1px solid var(--line);
-  border-top-left-radius: 3px;
-}
-.msg-row.user .bubble-inner {
-  background: var(--violet2); border-top-right-radius: 3px; color: #fff;
-}
-.bubble-meta {
-  font-size: 10px; color: var(--t3); margin-top: 5px;
-  display: flex; align-items: center; gap: 5px;
-}
-.msg-row.user .bubble-meta { justify-content: flex-end; }
-.meta-sep { width: 3px; height: 3px; border-radius: 50%; background: var(--t3); }
+.t-dot:nth-child(2) { animation-delay: .2s; }
+.t-dot:nth-child(3) { animation-delay: .4s; }
+@keyframes tdot { 0%,60%,100%{opacity:.3;transform:scale(.85)} 30%{opacity:1;transform:scale(1.1)} }
 
-/* Typing dots */
-.typing-row { display: flex; gap: 10px; margin-bottom: 16px; }
-.typing-dots {
-  background: var(--ink3); border: 1px solid var(--line);
-  padding: 12px 16px; border-radius: 14px; border-top-left-radius: 3px;
-  display: flex; gap: 4px; align-items: center;
+/* ── Input ── */
+.inp-wrap { background: #212121; padding: 10px 0 18px; }
+.inp-inner { max-width: 680px; margin: 0 auto; padding: 0 24px; }
+.inp-shell {
+    background: #2f2f2f;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    padding: 6px 8px 6px 16px;
+    display: flex; align-items: flex-end; gap: 8px;
+    transition: border-color .2s;
 }
-.td {
-  width: 5px; height: 5px; border-radius: 50%;
-  background: var(--t3); animation: tdot 1.1s ease-in-out infinite;
-}
-.td:nth-child(2){animation-delay:.18s}
-.td:nth-child(3){animation-delay:.36s}
-@keyframes tdot{0%,60%,100%{transform:translateY(0);opacity:.4}30%{transform:translateY(-4px);opacity:1}}
+.inp-shell:focus-within { border-color: rgba(155,138,251,.4); }
 
-/* Suggestion row */
-.sugg-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; margin-bottom: 4px; }
-.sugg {
-  font-size: 11px; padding: 6px 12px; border-radius: 20px;
-  border: 1px solid var(--line2); color: var(--t2);
-  background: var(--ink3); cursor: pointer; transition: all .15s;
-  font-family: var(--ff);
-}
-.sugg:hover { border-color: var(--violet-border); color: var(--violet); background: var(--violet-dim); }
-
-/* ── Input area ── */
-.pathiq-input {
-  flex-shrink: 0; padding: 12px 18px;
-  background: var(--ink2); border-top: 1px solid var(--line);
-}
-.ctx-row {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 9px;
-}
-.ctx-label {
-  font-size: 10px; font-weight: 600; letter-spacing: .04em;
-  padding: 3px 9px; border-radius: 20px;
-  background: var(--violet-dim); color: var(--violet);
-  border: 1px solid var(--violet-border);
-}
-.ctx-model { font-size: 10px; color: var(--t3); }
-
-/* Override Streamlit form elements in input */
 .stTextArea textarea {
-  background: var(--ink3) !important;
-  border: 1px solid var(--line2) !important;
-  border-radius: var(--rl) !important;
-  color: var(--t1) !important;
-  font-size: 13px !important;
-  font-family: var(--ff) !important;
-  resize: none !important;
-  transition: border-color .15s !important;
+    background: transparent !important; border: none !important;
+    outline: none !important; box-shadow: none !important;
+    color: #ececec !important; font-size: 14.5px !important;
+    font-family: 'Inter', sans-serif !important;
+    resize: none !important; line-height: 1.6 !important;
+    padding: 10px 0 !important; min-height: 22px !important;
+    caret-color: #9b8afb !important;
 }
-.stTextArea textarea:focus {
-  border-color: var(--violet-border) !important;
-  box-shadow: none !important;
-}
+.stTextArea textarea::placeholder { color: #4a4a60 !important; }
+.stTextArea textarea:focus { box-shadow: none !important; border: none !important; }
+.stTextArea [data-baseweb="textarea"] { background: transparent !important; border: none !important; }
+.stTextArea { margin: 0 !important; }
+[data-testid="stTextArea"] { margin: 0 !important; }
+
+/* Send button */
 .stButton > button {
-  background: var(--violet) !important;
-  border: none !important; border-radius: 8px !important;
-  color: #fff !important; font-weight: 600 !important;
-  font-size: 13px !important; padding: 10px 20px !important;
-  transition: background .15s !important;
+    background: #9b8afb !important; border: none !important;
+    border-radius: 9px !important;
+    width: 34px !important; height: 34px !important;
+    padding: 0 !important; font-size: 15px !important;
+    color: #fff !important; flex-shrink: 0 !important;
+    min-width: unset !important; margin-bottom: 5px !important;
+    transition: background .15s !important;
+    box-shadow: none !important; transform: none !important;
 }
-.stButton > button:hover { background: var(--violet2) !important; }
+.stButton > button:hover { background: #8572f0 !important; box-shadow: none !important; transform: none !important; }
+.stButton > button:active { transform: scale(.97) !important; }
 
-/* Streamlit metrics / info boxes */
-.stMetric { background: var(--ink3) !important; border-radius: var(--r) !important;
-            border: 1px solid var(--line) !important; padding: 12px !important; }
-[data-testid="metric-container"] label { color: var(--t3) !important; font-size: 11px !important; }
-[data-testid="metric-container"] [data-testid="stMetricValue"] { color: var(--t1) !important; }
-
-div[data-testid="stTabs"] { display: none !important; }
+.inp-note { text-align: center; font-size: 11.5px; color: #333348; margin-top: 8px; }
 </style>
-""", unsafe_allow_html=True)
+"""
 
-
-# ── Session state bootstrap ──────────────────────────────────────────────────
-def init_state():
-    defaults = {
-        "active_service": "cv",
-        "conversations": {k: [] for k in SERVICES},
-        "cv_result": None,
-        "gh_result": None,
-        "job_result": None,
-        "llm": None,
-        "vectorstore": None,
-        "graph": None,
-        "auto_ingest_done": False,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-def ts():
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def now_ts():
     return datetime.datetime.now().strftime("%H:%M")
 
-
-def save_csv(q, a):
+def save_csv(service, q, a):
     path = "chat_history.csv"
     exists = os.path.isfile(path)
     try:
         with open(path, "a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if not exists:
-                w.writerow(["Service", "Question", "Answer", "Time", "Date"])
-            w.writerow([
-                st.session_state.active_service, q, a,
-                datetime.datetime.now().strftime("%H:%M:%S"),
-                datetime.datetime.now().strftime("%Y-%m-%d"),
-            ])
+                w.writerow(["Service","Question","Answer","Time","Date"])
+            w.writerow([service, q, a,
+                        datetime.datetime.now().strftime("%H:%M:%S"),
+                        datetime.datetime.now().strftime("%Y-%m-%d")])
     except Exception:
         pass
 
-
-def is_greeting(q: str) -> bool:
-    patterns = [r'\b(hi|hello|hey|greetings|howdy|yo|sup)\b',
-                r'how are you', r"what'?s up", r'good (morning|afternoon|evening)']
+def is_greeting(q):
     q = q.lower().strip()
-    if len(q.split()) <= 4:
-        for p in patterns:
-            if re.search(p, q):
-                return True
-    return False
-
-
-def greeting_reply() -> str:
-    return random.choice([
-        "Hey! Great to have you here. I'm PathIQ — your career intelligence assistant. What would you like to work on today?",
-        "Hello! I'm ready to help you level up your career. Which service would you like to start with — CV analysis, GitHub profile, or job matching?",
-        "Hi there! PathIQ at your service. Ask me anything about your career, CV, or job search.",
+    if len(q.split()) > 5:
+        return False
+    return any(re.search(p, q) for p in [
+        r'\b(hi|hello|hey|howdy|yo|sup)\b',
+        r'how are you', r"what'?s up",
+        r'good (morning|afternoon|evening)',
     ])
 
+def greeting_reply():
+    return random.choice([
+        "Hey! Good to have you here. What are you working on?",
+        "Hi! I'm PathIQ — ask me anything about your CV, GitHub, job search, or career path.",
+        "Hey there! What can I help you with today?",
+    ])
 
-# ── LLM (Groq) ───────────────────────────────────────────────────────────────
+def md_to_html(text):
+    # Code blocks first
+    text = re.sub(r'```\w*\n?(.*?)```',
+                  lambda m: f'<pre><code>{m.group(1).strip()}</code></pre>',
+                  text, flags=re.DOTALL)
+    # Inline code
+    text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
+    # Bold
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    # Italic
+    text = re.sub(r'\*([^*\n]+)\*', r'<em>\1</em>', text)
+    # H3
+    text = re.sub(r'^### (.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
+    # Bullet lists
+    lines = text.split('\n')
+    out, in_ul = [], False
+    for line in lines:
+        if re.match(r'^[-•]\s(.+)', line):
+            if not in_ul:
+                out.append('<ul>'); in_ul = True
+            out.append(f'<li>{re.sub(r"^[-•]\\s", "", line)}</li>')
+        else:
+            if in_ul:
+                out.append('</ul>'); in_ul = False
+            out.append(line)
+    if in_ul:
+        out.append('</ul>')
+    # Numbered lists
+    lines = '\n'.join(out).split('\n')
+    out, in_ol = [], False
+    for line in lines:
+        if re.match(r'^\d+\.\s(.+)', line):
+            if not in_ol:
+                out.append('<ol>'); in_ol = True
+            out.append(f'<li>{re.sub(r"^\\d+\\.\\s", "", line)}</li>')
+        else:
+            if in_ol:
+                out.append('</ol>'); in_ol = False
+            out.append(line)
+    if in_ol:
+        out.append('</ol>')
+    text = '\n'.join(out)
+    # Paragraphs
+    parts = re.split(r'\n{2,}', text)
+    html  = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith('<'):
+            html.append(p)
+        else:
+            html.append(f'<p>{p.replace(chr(10), " ")}</p>')
+    return '\n'.join(html)
+
+
+# ── Session state ─────────────────────────────────────────────────────────────
+def init_state():
+    for k, v in {
+        "active_service": "cv",
+        "conversations":  {k: [] for k in SERVICES},
+        "llm":            None,
+        "vectorstore":    None,
+        "graph":          None,
+        "cv_result":      None,
+        "gh_result":      None,
+    }.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+# ── LLM ───────────────────────────────────────────────────────────────────────
 @st.cache_resource(ttl=3600)
 def load_llm():
     try:
         from groq import Groq
     except ImportError:
         return None
-
     key = None
-    if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
-        key = st.secrets["GROQ_API_KEY"]
-    elif os.getenv("GROQ_API_KEY"):
-        key = os.getenv("GROQ_API_KEY")
-    if not key:
-        return None
+    try:    key = st.secrets.get("GROQ_API_KEY")
+    except: pass
+    if not key: key = os.getenv("GROQ_API_KEY")
+    if not key: return None
 
     client = Groq(api_key=key)
-    models = [
-        "llama-3.3-70b-versatile",
-        "deepseek-r1-distill-llama-70b",
-        "gemma2-9b-it",
-    ]
 
-    class GroqLLM:
-        def __init__(self, client, model):
-            self.client = client
-            self.model = model
-
+    class G:
+        def __init__(self, c, m): self.c, self.m = c, m
         def invoke(self, prompt, system=None):
-            sys_msg = system or (
-                "You are PathIQ, a world-class AI career intelligence assistant. "
-                "Be specific, warm, and structured. Use bullet points and bold "
-                "for key terms. Always end with a clear next-step question."
-            )
             try:
-                r = self.client.chat.completions.create(
-                    model=self.model,
+                r = self.c.chat.completions.create(
+                    model=self.m,
                     messages=[
-                        {"role": "system", "content": sys_msg},
-                        {"role": "user", "content": prompt},
+                        {"role":"system","content": system or "You are PathIQ, a helpful career assistant."},
+                        {"role":"user",  "content": prompt},
                     ],
-                    temperature=0.75,
-                    max_tokens=700,
-                    top_p=0.9,
+                    temperature=0.78, max_tokens=800, top_p=0.92,
                 )
                 return r.choices[0].message.content
             except Exception as e:
-                return f"I ran into a small issue: {e}. Please try again!"
+                return f"Something went wrong on my end: {e}. Give it another try."
 
-    for model in models:
+    for m in ["llama-3.3-70b-versatile","deepseek-r1-distill-llama-70b","gemma2-9b-it"]:
         try:
-            llm = GroqLLM(client, model)
-            test = llm.invoke("Reply with: ready")
-            if test and "Error" not in test:
+            llm = G(client, m)
+            if "Error" not in llm.invoke("say: ready"):
                 return llm
-        except Exception:
-            continue
+        except: continue
     return None
 
 
-# ── Vector store ─────────────────────────────────────────────────────────────
 @st.cache_resource(ttl=3600)
 def load_vectorstore():
-    if not RAG_AVAILABLE:
-        return None
+    if not RAG_OK: return None
     try:
-        emb = HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device": "cpu"})
-        if os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3")):
+        emb = HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device":"cpu"})
+        if os.path.exists(os.path.join(DB_DIR,"chroma.sqlite3")):
             return Chroma(embedding_function=emb, persist_directory=DB_DIR)
-    except Exception:
-        pass
+    except: pass
     return None
 
 
 @st.cache_resource(ttl=3600)
 def load_graph():
-    if not RAG_AVAILABLE:
-        return None
+    if not RAG_OK: return None
     try:
-        builder = KnowledgeGraphBuilder()
-        if builder.load():
-            return builder.G
-    except Exception:
-        pass
-    return None
+        b = KnowledgeGraphBuilder()
+        return b.G if b.load() else None
+    except: return None
 
 
-# ── Human-like streaming response ────────────────────────────────────────────
-def stream_response(placeholder, text: str):
-    """Stream text word-by-word into a Streamlit placeholder."""
-    words = text.split(" ")
-    displayed = ""
-    for i, word in enumerate(words):
-        displayed += ("" if i == 0 else " ") + word
-        placeholder.markdown(
-            f'<div class="bubble-inner" style="background:var(--ink3);border:1px solid var(--line);'
-            f'border-radius:14px;border-top-left-radius:3px;font-size:13px;line-height:1.65;'
-            f'color:var(--t1);padding:11px 14px">{displayed}▌</div>',
-            unsafe_allow_html=True,
-        )
-        # Variable delay: faster for common words, slight pause at punctuation
-        delay = 0.025
-        if word.endswith((".", "!", "?")):
-            delay = 0.12
-        elif word.endswith(","):
-            delay = 0.06
-        time.sleep(delay)
-    # Final render without cursor
-    placeholder.markdown(
-        f'<div class="bubble-inner" style="background:var(--ink3);border:1px solid var(--line);'
-        f'border-radius:14px;border-top-left-radius:3px;font-size:13px;line-height:1.65;'
-        f'color:var(--t1);padding:11px 14px">{displayed}</div>',
-        unsafe_allow_html=True,
-    )
-    return displayed
-
-
-# ── Render conversation ───────────────────────────────────────────────────────
-def render_messages(service_id: str):
-    msgs = st.session_state.conversations[service_id]
-    for m in msgs:
-        if m["role"] == "user":
-            st.markdown(
-                f'<div class="msg-row user">'
-                f'<div class="av usr">ME</div>'
-                f'<div class="bubble">'
-                f'<div class="bubble-inner" style="background:#6458e8;border-top-right-radius:3px;color:#fff">'
-                f'{m["content"]}</div>'
-                f'<div class="bubble-meta" style="justify-content:flex-end">{m["ts"]}</div>'
-                f'</div></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<div class="msg-row bot">'
-                f'<div class="av bot">P</div>'
-                f'<div class="bubble">'
-                f'<div class="bubble-inner">{m["content"]}</div>'
-                f'<div class="bubble-meta">PathIQ <span class="meta-sep"></span> {m["ts"]}</div>'
-                f'</div></div>',
-                unsafe_allow_html=True,
-            )
-
-
-# ── Service banners ───────────────────────────────────────────────────────────
-SERVICE_META = {
-    "cv": {
-        "title": "CV Analyzer",
-        "color": "#7c6af5",
-        "icon": "📄",
-        "desc": "Upload your CV and I'll extract your skill fingerprint, experience level, achievement gaps, and tell you exactly what to rewrite.",
-        "chips": ["Analyze my CV", "What skills am I missing?", "How senior am I?", "Rewrite my summary"],
-    },
-    "github": {
-        "title": "Code Profile",
-        "color": "#2dd4c4",
-        "icon": "💻",
-        "desc": "Share your GitHub username and I'll score your repositories, language diversity, and contribution quality — then show you how to level up.",
-        "chips": ["Analyze my GitHub", "Score my profile", "Best repos to pin", "Improve documentation"],
-    },
-    "jobs": {
-        "title": "Job Matcher",
-        "color": "#f5a623",
-        "icon": "🎯",
-        "desc": "Tell me your skills and experience. I'll match you against thousands of live postings and explain your fit score for each role.",
-        "chips": ["Find matching jobs", "I have 4 years Python", "Senior backend remote", "Highest-paying roles for me"],
-    },
-    "assess": {
-        "title": "Full Assessment",
-        "color": "#f56c6c",
-        "icon": "📊",
-        "desc": "I synthesize your CV, GitHub, and job market data into a structured PathIQ Career Intelligence Report with a clear 30-day action plan.",
-        "chips": ["Generate my full report", "Career gap analysis", "30-day action plan", "What should I do next?"],
-    },
-    "rag": {
-        "title": "Knowledge Chat",
-        "color": "#56d19e",
-        "icon": "🧠",
-        "desc": "Graph RAG hybrid retrieval — vector similarity + knowledge graph traversal — answers questions across your entire document base.",
-        "chips": ["What services does Wasla offer?", "How does Graph RAG work?", "API documentation", "Deployment guide"],
-    },
-}
-
-
-def render_banner(sid: str):
-    meta = SERVICE_META[sid]
-    chips_html = "".join(
-        f'<button class="qchip" onclick="window.parent.document.getElementById(\'pathiq_chip_{i}\').click()">'
-        f'{c}</button>'
-        for i, c in enumerate(meta["chips"])
-    )
+# ── Render ────────────────────────────────────────────────────────────────────
+def render_user(text):
+    safe = text.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace("\n","<br>")
     st.markdown(
-        f'<div class="svc-banner">'
-        f'<div class="svc-banner-icon" style="background:{meta["color"]}22">{meta["icon"]}</div>'
-        f'<div>'
-        f'<div class="svc-banner-title">{meta["title"]}</div>'
-        f'<div class="svc-banner-desc">{meta["desc"]}</div>'
+        f'<div class="msg-block"><div class="user-row">'
+        f'<div class="user-bub">{safe}</div>'
         f'</div></div>',
         unsafe_allow_html=True,
     )
-    # Render chips as Streamlit buttons in a horizontal row
-    cols = st.columns(len(meta["chips"]))
-    for i, (col, chip) in enumerate(zip(cols, meta["chips"])):
-        with col:
-            if st.button(chip, key=f"chip_{sid}_{i}_{chip[:8]}", use_container_width=True):
-                handle_input(chip, sid)
 
-
-# ── Core response logic per service ──────────────────────────────────────────
-def handle_input(user_msg: str, sid: str):
-    if not user_msg.strip():
-        return
-
-    conv = st.session_state.conversations[sid]
-    conv.append({"role": "user", "content": user_msg, "ts": ts()})
-
-    # Greeting shortcut
-    if is_greeting(user_msg) and len(conv) <= 2:
-        reply = greeting_reply()
-        conv.append({"role": "assistant", "content": reply, "ts": ts()})
-        save_csv(user_msg, reply)
-        st.rerun()
-        return
-
-    llm = st.session_state.get("llm") or load_llm()
-    if not llm:
-        st.session_state.llm = None
-        conv.append({
-            "role": "assistant",
-            "content": "I need a Groq API key to respond. Please add GROQ_API_KEY to your .env or Streamlit secrets.",
-            "ts": ts(),
-        })
-        st.rerun()
-        return
-
-    st.session_state.llm = llm
-
-    # Build service-specific system prompt
-    system_prompts = {
-        "cv": (
-            "You are PathIQ's CV Analyzer — a world-class career consultant. "
-            "Analyze CVs with precision. Be specific: name real skills, flag real gaps, "
-            "suggest concrete rewrites. Use bold for key points, bullet points for lists. "
-            "End every response with one sharp follow-up question."
-        ),
-        "github": (
-            "You are PathIQ's Code Profile analyzer. You assess GitHub profiles like a "
-            "senior engineering recruiter. Score profiles across: consistency, depth, "
-            "visibility, documentation quality. Give concrete improvement steps. "
-            "End with a specific actionable question."
-        ),
-        "jobs": (
-            "You are PathIQ's Job Matcher. Match users to roles based on their skills. "
-            "Give match percentages, explain why they fit, identify skill gaps. "
-            "Be specific about company types, salary ranges, and growth trajectories. "
-            "End with a targeted next-step question."
-        ),
-        "assess": (
-            "You are PathIQ's Full Assessment engine. Synthesize CV, GitHub, and market data "
-            "into a structured career intelligence report. Use sections: Profile Score, "
-            "CV Score, GitHub Score, Market Fit, 30-Day Action Plan. Be thorough and precise."
-        ),
-        "rag": (
-            "You are PathIQ's Knowledge Chat powered by Graph RAG. Answer questions from "
-            "the company knowledge base. Be precise, cite document context when available, "
-            "and clearly state when something isn't in the knowledge base."
-        ),
-    }
-
-    # For RAG service, use graph retrieval if available
-    if sid == "rag" and RAG_AVAILABLE:
-        vs = st.session_state.get("vectorstore") or load_vectorstore()
-        g  = st.session_state.get("graph")      or load_graph()
-        if vs and g:
-            try:
-                retriever = GraphRetriever(vectorstore=vs, graph=g, k=5, graph_k=5, hop_depth=2)
-                docs = retriever.get_relevant_documents(user_msg)
-                context = "\n\n".join(f"[Doc {i+1}]: {d.page_content}" for i, d in enumerate(docs))
-                prompt = f"Context from knowledge base:\n{context}\n\nUser question: {user_msg}"
-            except Exception:
-                prompt = user_msg
-        else:
-            prompt = user_msg
-    else:
-        # Build conversation context
-        history = "\n".join(
-            f"{'User' if m['role']=='user' else 'PathIQ'}: {m['content']}"
-            for m in conv[-6:]
-        )
-        prompt = f"Conversation so far:\n{history}\n\nRespond to the latest user message."
-
-    with st.spinner(""):
-        reply = llm.invoke(prompt, system=system_prompts.get(sid))
-
-    conv.append({"role": "assistant", "content": reply, "ts": ts()})
-    save_csv(user_msg, reply)
-    st.rerun()
-
-
-# ── Main app ─────────────────────────────────────────────────────────────────
-def main():
-    init_state()
-    inject_css()
-
-    # ── Sidebar ──
-    with st.sidebar:
-        st.markdown(
-            '<div class="sb-brand">'
-            '<div class="brand-gem">✦</div>'
-            '<div><div class="brand-name">PathIQ</div>'
-            '<div class="brand-sub">Career Intelligence</div></div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown('<div class="sb-section"><div class="sb-section-label">Core Services</div>', unsafe_allow_html=True)
-        for sid, meta in SERVICES.items():
-            active = "active" if st.session_state.active_service == sid else ""
-            if st.button(
-                f"{meta['icon']}  {meta['label']}",
-                key=f"sb_{sid}",
-                use_container_width=True,
-            ):
-                st.session_state.active_service = sid
-                st.rerun()
-
-        st.markdown("---")
-        st.markdown('<div class="sb-section-label" style="padding-left:8px">Coming — Phase 2</div>', unsafe_allow_html=True)
-        for label in ["🎤  Mock Interview", "🔗  LinkedIn Optimizer", "🗺️  Skill Roadmap"]:
-            st.button(label, key=f"ph2_{label}", disabled=True, use_container_width=True)
-
-        st.markdown("---")
-        st.markdown(
-            '<div class="status-row"><div class="pulse"></div> Graph RAG · LLaMA 3.3-70b</div>',
-            unsafe_allow_html=True,
-        )
-
-        if st.button("🗑  Clear conversation", key="clear_conv", use_container_width=True):
-            st.session_state.conversations[st.session_state.active_service] = []
-            st.rerun()
-
-        if os.path.exists("chat_history.csv"):
-            with open("chat_history.csv") as f:
-                st.download_button("⬇ Export chat history", f, "pathiq_history.csv",
-                                   use_container_width=True)
-
-    # ── Tab bar (rendered as HTML + Streamlit buttons) ──
-    sid = st.session_state.active_service
-    cols = st.columns(len(SERVICES))
-    for i, (s_id, meta) in enumerate(SERVICES.items()):
-        with cols[i]:
-            active_style = "border-bottom:2px solid #7c6af5;color:#7c6af5;" if s_id == sid else ""
-            if st.button(
-                f"{meta['icon']} {meta['label']}",
-                key=f"tab_{s_id}",
-                use_container_width=True,
-            ):
-                st.session_state.active_service = s_id
-                st.rerun()
-
-    st.markdown("<hr style='margin:0;border-color:rgba(255,255,255,0.06)'>", unsafe_allow_html=True)
-
-    # ── Service banner ──
-    render_banner(sid)
-
-    # ── Messages ──
-    render_messages(sid)
-
-    # ── CV file upload (only for CV service) ──
-    if sid == "cv":
-        with st.expander("📎 Upload CV (PDF)", expanded=False):
-            uploaded = st.file_uploader("Choose PDF", type=["pdf"], label_visibility="collapsed")
-            if uploaded and st.button("Analyze uploaded CV", key="analyze_cv"):
-                if CV_AVAILABLE:
-                    with st.spinner("Extracting CV data..."):
-                        try:
-                            tmp = f"tmp_{uploaded.name}"
-                            with open(tmp, "wb") as f:
-                                f.write(uploaded.getbuffer())
-                            analyzer = CVAnalyzer()
-                            result = analyzer.analyze_cv(tmp)
-                            os.remove(tmp)
-                            if result.get("success"):
-                                st.session_state.cv_result = result
-                                handle_input(
-                                    f"I've uploaded my CV. Here is the extracted data: {json.dumps(result.get('analysis', {}), indent=2)}. Please analyze it in depth.",
-                                    "cv",
-                                )
-                            else:
-                                st.error(f"Error: {result.get('error')}")
-                        except Exception as e:
-                            st.error(f"Upload error: {e}")
-                else:
-                    st.warning("CVAnalyzer module not available.")
-
-    # ── GitHub username input ──
-    if sid == "github":
-        with st.expander("🔍 Analyze a GitHub profile", expanded=False):
-            gh_user = st.text_input("GitHub username", placeholder="e.g. torvalds", label_visibility="collapsed")
-            if gh_user and st.button("Fetch & analyze", key="analyze_gh"):
-                if GH_AVAILABLE:
-                    with st.spinner(f"Fetching @{gh_user}..."):
-                        try:
-                            analyzer = GitHubAnalyzer()
-                            result = analyzer.analyze_github_profile(gh_user)
-                            if result.get("success"):
-                                st.session_state.gh_result = result
-                                handle_input(
-                                    f"Here is the GitHub profile data for @{gh_user}: {json.dumps(result, indent=2)}. Please give a full analysis.",
-                                    "github",
-                                )
-                            else:
-                                st.error(f"Error: {result.get('error')}")
-                        except Exception as e:
-                            st.error(f"GitHub error: {e}")
-                else:
-                    st.warning("GitHubAnalyzer module not available.")
-
-    # ── Input box ──
+def render_bot(text):
+    html = md_to_html(text)
     st.markdown(
-        f'<div class="ctx-row">'
-        f'<span class="ctx-label">{SERVICE_META[sid]["title"].upper()}</span>'
-        f'<span class="ctx-model">PathIQ · Groq Graph RAG</span>'
+        f'<div class="msg-block"><div class="bot-row">'
+        f'<div class="bot-av">P</div>'
+        f'<div class="bot-body">{html}</div>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+def render_typing():
+    st.markdown(
+        '<div class="typing-block">'
+        '<div class="bot-av">P</div>'
+        '<div class="t-dots">'
+        '<div class="t-dot"></div><div class="t-dot"></div><div class="t-dot"></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+def render_welcome(sid):
+    meta = SERVICE_META[sid]
+    svc  = SERVICES[sid]
+    st.markdown(
+        f'<div class="welcome">'
+        f'<div class="welcome-icon">✦</div>'
+        f'<div class="welcome-title">PathIQ — {svc["label"]}</div>'
+        f'<div class="welcome-body">{meta["welcome"]}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
-    col_input, col_btn = st.columns([8, 1])
-    with col_input:
+
+# ── Chat logic ────────────────────────────────────────────────────────────────
+def handle_send(user_msg, sid):
+    if not user_msg.strip():
+        return
+    conv = st.session_state.conversations[sid]
+    conv.append({"role":"user","content":user_msg,"ts":now_ts()})
+
+    if is_greeting(user_msg) and len(conv) <= 2:
+        reply = greeting_reply()
+        conv.append({"role":"assistant","content":reply,"ts":now_ts()})
+        save_csv(sid, user_msg, reply)
+        st.rerun()
+        return
+
+    llm = st.session_state.llm or load_llm()
+    if not llm:
+        reply = "I need a GROQ_API_KEY to respond — add it to your .env file or Streamlit secrets."
+        conv.append({"role":"assistant","content":reply,"ts":now_ts()})
+        st.rerun()
+        return
+    st.session_state.llm = llm
+
+    sys_prompt = SERVICE_META[sid]["system"]
+
+    if sid == "rag" and RAG_OK:
+        vs = st.session_state.vectorstore or load_vectorstore()
+        g  = st.session_state.graph or load_graph()
+        if vs and g:
+            try:
+                docs    = GraphRetriever(vectorstore=vs, graph=g, k=5, graph_k=5, hop_depth=2).get_relevant_documents(user_msg)
+                context = "\n\n".join(f"[Doc {i+1}]: {d.page_content}" for i,d in enumerate(docs))
+                prompt  = f"Retrieved context:\n{context}\n\nUser: {user_msg}"
+            except:
+                prompt = user_msg
+        else:
+            prompt = user_msg
+    else:
+        history = "\n".join(
+            f"{'User' if m['role']=='user' else 'PathIQ'}: {m['content']}"
+            for m in conv[-8:]
+        )
+        prompt = f"Conversation:\n{history}\n\nReply to the user's last message naturally and specifically."
+
+    with st.spinner(""):
+        reply = llm.invoke(prompt, system=sys_prompt)
+
+    conv.append({"role":"assistant","content":reply,"ts":now_ts()})
+    save_csv(sid, user_msg, reply)
+    st.rerun()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main():
+    init_state()
+    st.markdown(CSS, unsafe_allow_html=True)
+    sid  = st.session_state.active_service
+    conv = st.session_state.conversations[sid]
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown(
+            '<div class="sb-brand">'
+            '<div class="sb-gem">✦</div>'
+            '<div><div class="sb-name">PathIQ</div>'
+            '<div class="sb-tag">Career Intelligence</div></div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown('<div class="sb-group">Services</div>', unsafe_allow_html=True)
+        for s_id, meta in SERVICES.items():
+            if st.button(f"{meta['icon']}  {meta['label']}", key=f"sb_{s_id}", use_container_width=True):
+                st.session_state.active_service = s_id
+                st.rerun()
+
+        st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="sb-group">Phase 2</div>', unsafe_allow_html=True)
+        for icon, label in [("🎤","Mock Interview"),("🔗","LinkedIn Optimizer"),("🗺️","Skill Roadmap")]:
+            st.button(f"{icon}  {label}", key=f"ph2_{label}", disabled=True, use_container_width=True)
+
+        st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
+
+        if st.button("🗑   Clear chat", key="clear", use_container_width=True):
+            st.session_state.conversations[sid] = []
+            st.rerun()
+
+        if os.path.exists("chat_history.csv"):
+            with open("chat_history.csv", encoding="utf-8") as f:
+                st.download_button("⬇   Export history", f,
+                                   file_name="pathiq_history.csv",
+                                   use_container_width=True)
+
+        # CV upload
+        if sid == "cv":
+            st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="sb-group">Upload CV (PDF)</div>', unsafe_allow_html=True)
+            uploaded = st.file_uploader("PDF", type=["pdf"], label_visibility="collapsed")
+            if uploaded and st.button("Analyze PDF", key="analyze_cv", use_container_width=True):
+                if CV_OK:
+                    with st.spinner("Reading…"):
+                        try:
+                            tmp = f"tmp_{uploaded.name}"
+                            with open(tmp,"wb") as f: f.write(uploaded.getbuffer())
+                            result = CVAnalyzer().analyze_cv(tmp)
+                            os.remove(tmp)
+                            if result.get("success"):
+                                handle_send(
+                                    f"I uploaded my CV. Extracted data:\n{json.dumps(result.get('analysis',{}), indent=2)}\nGive me a full honest analysis.",
+                                    "cv",
+                                )
+                            else:
+                                st.error(result.get("error","Unknown error"))
+                        except Exception as e:
+                            st.error(str(e))
+                else:
+                    st.warning("cv_analyzer.py not found.")
+
+        # GitHub fetch
+        if sid == "github":
+            st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="sb-group">Analyze GitHub</div>', unsafe_allow_html=True)
+            gh_user = st.text_input("Username", placeholder="e.g. torvalds", label_visibility="collapsed")
+            if gh_user and st.button("Fetch profile", key="fetch_gh", use_container_width=True):
+                if GH_OK:
+                    with st.spinner(f"Fetching @{gh_user}…"):
+                        try:
+                            result = GitHubAnalyzer().analyze_github_profile(gh_user)
+                            if result.get("success"):
+                                handle_send(
+                                    f"GitHub @{gh_user}:\n{json.dumps(result, indent=2)}\nGive me a full profile analysis.",
+                                    "github",
+                                )
+                            else:
+                                st.error(result.get("error","Unknown error"))
+                        except Exception as e:
+                            st.error(str(e))
+                else:
+                    st.warning("github_analyzer.py not found.")
+
+        st.markdown(
+            '<div class="sb-status"><div class="sb-pulse"></div>Graph RAG · LLaMA 3.3-70b</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ── Chat area ─────────────────────────────────────────────────────────────
+    if not conv:
+        render_welcome(sid)
+    else:
+        st.markdown('<div class="msgs">', unsafe_allow_html=True)
+        for msg in conv:
+            if msg["role"] == "user":
+                render_user(msg["content"])
+            else:
+                render_bot(msg["content"])
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Input bar ─────────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="inp-wrap"><div class="inp-inner"><div class="inp-shell">',
+        unsafe_allow_html=True,
+    )
+    col_txt, col_btn = st.columns([12, 1])
+    with col_txt:
         user_input = st.text_area(
-            "message",
-            placeholder=f"Ask PathIQ about {SERVICE_META[sid]['title'].lower()}…",
-            key=f"input_{sid}",
-            height=70,
-            label_visibility="collapsed",
+            "msg", key=f"inp_{sid}",
+            placeholder=SERVICE_META[sid]["placeholder"],
+            height=52, label_visibility="collapsed",
         )
     with col_btn:
-        st.markdown("<div style='padding-top:20px'>", unsafe_allow_html=True)
-        if st.button("Send →", key=f"send_{sid}", use_container_width=True):
-            if user_input.strip():
-                handle_input(user_input, sid)
+        st.markdown("<div style='padding-top:10px'>", unsafe_allow_html=True)
+        send = st.button("↑", key=f"send_{sid}")
         st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown(
+        '</div>'
+        '<div class="inp-note">PathIQ can make mistakes. Verify important career decisions.</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if send and user_input.strip():
+        handle_send(user_input, sid)
 
 
 if __name__ == "__main__":
