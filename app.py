@@ -1,934 +1,985 @@
 """
-Career AI Assistant
-Auto-builds Graph RAG index on startup.
-Chatbot streams word-by-word, feels human.
+Career AI Assistant — Production App
+Every tab is a conversational service with word-by-word streaming.
+Graph RAG auto-builds on startup from scraped job data.
 """
 
-import os, time
+import os, time, json
 import streamlit as st
 from dotenv import load_dotenv
-from datetime import datetime
 
 load_dotenv()
 
+# ── Must be first Streamlit call ───────────────────────────────────────────────
 st.set_page_config(
-    page_title="🎯 Career AI Assistant",
+    page_title="Career AI",
     page_icon="🚀",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-from cv_analyzer   import CVAnalyzer
-from github_analyzer import GitHubAnalyzer
-from job_matcher   import JobMatcher
-
+# ── Professional dark UI ───────────────────────────────────────────────────────
 st.markdown("""
 <style>
-.stApp {
-    background: linear-gradient(135deg, #0a0a1a 0%, #0f0c29 40%, #1a1035 100%);
-    color: #E8E8F0;
-}
-h1 {
-    text-align: center; font-size: 2.6rem; font-weight: 800;
-    background: linear-gradient(135deg, #00D9FF, #0091FF);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-}
-h2, h3 { color: #00D9FF; }
-.stTabs [data-baseweb="tab-list"] button { font-size: 1rem; font-weight: 600; }
+/* ── Reset & base ─────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* Chat message bubbles */
-.chat-message {
-    display: flex;
-    margin-bottom: 1rem;
-    align-items: flex-start;
+.stApp {
+    background: #0d0d1a;
+    color: #e2e8f0;
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
 }
-.chat-message-user {
-    justify-content: flex-end;
+
+/* ── Hide Streamlit chrome ────────────────────────────────── */
+#MainMenu, footer, header,
+[data-testid="stToolbar"],
+[data-testid="stDecoration"],
+[data-testid="collapsedControl"] { display: none !important; }
+
+/* ── Sidebar ──────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: #0a0a14 !important;
+    border-right: 1px solid #1e2a4a !important;
+    padding-top: 0 !important;
 }
-.chat-message-assistant {
-    justify-content: flex-start;
+[data-testid="stSidebar"] * { color: #94a3b8 !important; }
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 { color: #38bdf8 !important; }
+
+/* ── Tab bar ──────────────────────────────────────────────── */
+.stTabs [data-baseweb="tab-list"] {
+    background: #111827 !important;
+    border-bottom: 1px solid #1e2a4a !important;
+    gap: 0 !important;
+    padding: 0 8px !important;
 }
-.chat-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: #1e1e3a;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.2rem;
-    margin: 0 8px;
-    flex-shrink: 0;
+.stTabs [data-baseweb="tab"] {
+    background: transparent !important;
+    color: #64748b !important;
+    font-size: 0.85rem !important;
+    font-weight: 500 !important;
+    padding: 12px 18px !important;
+    border-bottom: 2px solid transparent !important;
+    border-radius: 0 !important;
+    transition: all .2s !important;
 }
-.chat-bubble {
-    max-width: 80%;
-    padding: 10px 14px;
-    border-radius: 18px;
-    background: rgba(30, 30, 60, 0.9);
-    border: 1px solid rgba(0, 217, 255, 0.15);
-    font-size: 15px;
-    line-height: 1.5;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+.stTabs [aria-selected="true"] {
+    color: #38bdf8 !important;
+    border-bottom-color: #38bdf8 !important;
+    background: transparent !important;
 }
-.chat-bubble-user {
-    background: linear-gradient(135deg, #0055cc, #003399);
-    border: none;
-    color: white;
+.stTabs [data-baseweb="tab"]:hover { color: #94a3b8 !important; }
+
+/* ── Chat messages ─────────────────────────────────────────── */
+.stChatMessage {
+    background: transparent !important;
+    border: none !important;
+    padding: 8px 0 !important;
 }
-.chat-bubble-assistant {
-    background: rgba(20, 20, 50, 0.9);
+[data-testid="stChatMessageContent"] {
+    color: #e2e8f0 !important;
+    font-size: 0.93rem !important;
+    line-height: 1.75 !important;
 }
-.chat-time {
-    font-size: 0.7rem;
-    color: #aaa;
-    margin-top: 4px;
-    text-align: right;
+/* User bubble */
+[data-testid="stChatMessage"][data-testid*="user"] [data-testid="stChatMessageContent"] {
+    background: #1e3a5f !important;
+    border-radius: 18px 18px 4px 18px !important;
+    padding: 10px 16px !important;
 }
-.typing-indicator {
-    background: rgba(20, 20, 50, 0.9);
-    border-radius: 18px;
-    padding: 10px 14px;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: #00D9FF;
+/* Assistant bubble */
+[data-testid="stChatMessage"]:not([data-testid*="user"]) [data-testid="stChatMessageContent"] {
+    background: #161b2e !important;
+    border: 1px solid #1e2a4a !important;
+    border-radius: 18px 18px 18px 4px !important;
+    padding: 12px 16px !important;
 }
-.typing-dot {
-    width: 8px;
-    height: 8px;
-    background: #00D9FF;
-    border-radius: 50%;
-    animation: pulse 1.2s infinite;
+
+/* ── Chat input ────────────────────────────────────────────── */
+[data-testid="stChatInput"] {
+    background: #111827 !important;
+    border: 1px solid #1e2a4a !important;
+    border-radius: 14px !important;
+    padding: 4px 8px !important;
 }
-.typing-dot:nth-child(2) { animation-delay: 0.2s; }
-.typing-dot:nth-child(3) { animation-delay: 0.4s; }
-@keyframes pulse {
-    0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
-    30% { opacity: 1; transform: scale(1.2); }
+[data-testid="stChatInput"] textarea {
+    background: transparent !important;
+    color: #e2e8f0 !important;
+    font-size: 0.92rem !important;
+    border: none !important;
 }
-.chat-container {
-    max-height: 65vh;
-    overflow-y: auto;
-    padding-right: 10px;
-    margin-bottom: 1rem;
+[data-testid="stChatInput"] textarea::placeholder { color: #475569 !important; }
+
+/* ── Buttons ────────────────────────────────────────────────── */
+.stButton > button {
+    background: linear-gradient(135deg, #1d4ed8, #0ea5e9) !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 0.85rem !important;
+    padding: 8px 16px !important;
+    transition: all .2s !important;
 }
-footer { visibility: hidden; }
+.stButton > button:hover {
+    opacity: .88 !important;
+    transform: translateY(-1px) !important;
+}
+.stButton > button[kind="secondary"] {
+    background: #1e2a4a !important;
+    color: #94a3b8 !important;
+}
+
+/* ── Inputs / selects ───────────────────────────────────────── */
+.stTextInput > div > input,
+.stTextArea > div > textarea,
+.stSelectbox > div > div,
+.stNumberInput > div > div > input {
+    background: #111827 !important;
+    color: #e2e8f0 !important;
+    border: 1px solid #1e2a4a !important;
+    border-radius: 10px !important;
+    font-size: 0.9rem !important;
+}
+.stMultiSelect > div { background: #111827 !important; border: 1px solid #1e2a4a !important; border-radius: 10px !important; }
+
+/* ── Metrics ────────────────────────────────────────────────── */
+[data-testid="stMetric"] {
+    background: #111827 !important;
+    border: 1px solid #1e2a4a !important;
+    border-radius: 12px !important;
+    padding: 14px !important;
+}
+[data-testid="stMetricLabel"] { color: #64748b !important; font-size: 0.8rem !important; }
+[data-testid="stMetricValue"] { color: #38bdf8 !important; font-size: 1.4rem !important; font-weight: 700 !important; }
+
+/* ── Alerts ─────────────────────────────────────────────────── */
+.stSuccess { background: #052e16 !important; border: 1px solid #16a34a !important; border-radius: 10px !important; color: #86efac !important; }
+.stWarning { background: #1c1008 !important; border: 1px solid #d97706 !important; border-radius: 10px !important; color: #fcd34d !important; }
+.stError   { background: #1c0a0a !important; border: 1px solid #dc2626 !important; border-radius: 10px !important; color: #fca5a5 !important; }
+.stInfo    { background: #0c1a2e !important; border: 1px solid #1d4ed8 !important; border-radius: 10px !important; color: #93c5fd !important; }
+
+/* ── Progress ────────────────────────────────────────────────── */
+.stProgress > div > div { background: #38bdf8 !important; }
+.stProgress { background: #1e2a4a !important; border-radius: 8px !important; }
+
+/* ── File uploader ────────────────────────────────────────────── */
+[data-testid="stFileUploader"] {
+    background: #111827 !important;
+    border: 2px dashed #1e2a4a !important;
+    border-radius: 12px !important;
+    padding: 20px !important;
+}
+
+/* ── Expander ─────────────────────────────────────────────────── */
+.streamlit-expanderHeader {
+    background: #111827 !important;
+    border: 1px solid #1e2a4a !important;
+    border-radius: 10px !important;
+    color: #94a3b8 !important;
+}
+.streamlit-expanderContent { background: #0d1117 !important; border: 1px solid #1e2a4a !important; border-top: none !important; border-radius: 0 0 10px 10px !important; }
+
+/* ── Divider ──────────────────────────────────────────────────── */
+hr { border-color: #1e2a4a !important; }
+
+/* ── Scrollbar ────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0d0d1a; }
+::-webkit-scrollbar-thumb { background: #1e2a4a; border-radius: 3px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🎯 Career AI Assistant")
-st.markdown(
-    "<p style='text-align:center;color:#aaa;font-size:1rem;'>"
-    "Graph RAG · CV Analysis · GitHub · Job Matching · Live Scraping"
-    "</p>",
-    unsafe_allow_html=True,
-)
-st.divider()
+# ── Imports (after set_page_config) ───────────────────────────────────────────
+from cv_analyzer     import CVAnalyzer
+from github_analyzer import GitHubAnalyzer
+from job_matcher     import JobMatcher
+from constant        import GROQ_MODEL, GROQ_MODEL_FALLBACK, HISTORY_TURNS
 
-# ── Session state ─────────────────────────────────────────────────────────────
+GROQ_KEY = os.getenv("GROQ_API_KEY", "")
+if not GROQ_KEY:
+    st.error("❌  `GROQ_API_KEY` not set. Add it to your `.env` file.")
+    st.stop()
+
+# ── Session state ──────────────────────────────────────────────────────────────
+SERVICES = ["chat", "cv", "github", "jobs", "scraper"]
+
 _defaults = {
-    "cv_analysis": None, "github_analysis": None, "job_matches": None,
-    "chat_messages": None,
-    "rag_embeddings": None, "rag_chunks": None,
-    "rag_meta": None, "rag_graph": None, "rag_model": None,
-    "rag_stats": None, "rag_load_attempted": False,
+    **{f"msgs_{s}": None for s in SERVICES},
+    "cv_data":    None,   # analyzed CV dict
+    "gh_data":    None,   # analyzed GitHub dict
+    "rag_emb":    None,
+    "rag_chunks": None,
+    "rag_meta":   None,
+    "rag_graph":  None,
+    "rag_model":  None,
+    "rag_ready":  False,
+    "rag_attempted": False,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-groq_key = os.getenv("GROQ_API_KEY", "")
-if not groq_key:
-    st.error("❌ GROQ_API_KEY not set in `.env`")
-    st.stop()
 
-
-# ── Auto-load or auto-build RAG index ────────────────────────────────────────
-def _auto_setup_rag():
-    """
-    Called once per session.
-    1. If index exists and is fresh  → load it silently.
-    2. If data exists but index is stale/missing → build automatically.
-    3. If no data at all → skip (chatbot works without RAG).
-    """
-    if st.session_state.rag_load_attempted:
+# ── RAG auto-setup ─────────────────────────────────────────────────────────────
+def _setup_rag():
+    if st.session_state.rag_attempted:
         return
-    st.session_state.rag_load_attempted = True
+    st.session_state.rag_attempted = True
 
     from rag_ingest import index_exists, data_is_newer_than_index, build_index, load_index, JOB_CSV_PATHS
+    from sentence_transformers import SentenceTransformer
 
-    data_available = any(os.path.exists(p) for p in JOB_CSV_PATHS)
+    data_ok = any(os.path.exists(p) for p in JOB_CSV_PATHS)
 
-    # ── Case 1: index fresh, just load ───────────────────────────────────────
+    def _load():
+        emb, chunks, meta, graph = load_index()
+        model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        st.session_state.rag_emb    = emb
+        st.session_state.rag_chunks = chunks
+        st.session_state.rag_meta   = meta
+        st.session_state.rag_graph  = graph
+        st.session_state.rag_model  = model
+        st.session_state.rag_ready  = True
+
+    # Fresh index — just load
     if index_exists() and not data_is_newer_than_index():
-        try:
-            from sentence_transformers import SentenceTransformer
-            emb, chunks, meta, graph = load_index()
-            model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            st.session_state.rag_embeddings = emb
-            st.session_state.rag_chunks     = chunks
-            st.session_state.rag_meta       = meta
-            st.session_state.rag_graph      = graph
-            st.session_state.rag_model      = model
-            return
-        except Exception as e:
-            st.sidebar.warning(f"⚠️ RAG load: {e}")
+        try: _load(); return
+        except Exception: pass
 
-    # ── Case 2: data exists, build automatically ──────────────────────────────
-    if data_available:
-        bar  = st.sidebar.progress(0, text="🔨 Building RAG index automatically...")
+    # Stale or missing — build automatically
+    if data_ok:
+        bar  = st.sidebar.progress(0, text="⚙️ Building RAG index…")
         info = st.sidebar.empty()
-
         def _cb(pct, msg):
-            bar.progress(pct, text=msg)
-            info.caption(msg)
-
+            bar.progress(pct, text=msg); info.caption(msg)
         try:
-            stats = build_index(progress_callback=_cb)
-            st.session_state.rag_stats = stats
-
-            from sentence_transformers import SentenceTransformer
-            emb, chunks, meta, graph = load_index()
-            model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            st.session_state.rag_embeddings = emb
-            st.session_state.rag_chunks     = chunks
-            st.session_state.rag_meta       = meta
-            st.session_state.rag_graph      = graph
-            st.session_state.rag_model      = model
-
-            bar.progress(100, text="✅ RAG index ready!")
-            time.sleep(1)
-            bar.empty()
-            info.empty()
+            build_index(progress_callback=_cb)
+            _load()
+            bar.empty(); info.empty()
         except Exception as e:
-            bar.empty()
-            info.empty()
-            st.sidebar.warning(f"⚠️ Auto-build failed: {e}")
+            bar.empty(); info.empty()
+            st.sidebar.warning(f"RAG build: {e}")
 
-    # Case 3: no data → silently skip
+_setup_rag()
 
-
-_auto_setup_rag()
-
-rag_ready = (
-    st.session_state.rag_embeddings is not None and
-    st.session_state.rag_model      is not None
-)
-
-# ── Chat initialization (minimal greeting) ───────────────────────────────────
-if st.session_state.chat_messages is None:
-    st.session_state.chat_messages = [{
-        "role": "assistant",
-        "content": "👋 I'm your career assistant. Ask me anything or upload your CV below for feedback.",
-        "time": datetime.now().isoformat()
-    }]
-
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "💬 Career Chat",
-    "📄 CV Analyzer",
-    "🐙 GitHub Profile",
-    "💼 Job Matcher",
-    "🌐 Scrape Jobs",
-    "📊 Full Assessment",
-])
+rag_ready  = st.session_state.rag_ready
+job_count  = len(st.session_state.rag_chunks or [])
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Career Chat (Human‑like UI + CV upload button)
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab1:
-    st.header("💬 Career AI Chat")
-
-    # Status strip
-    if rag_ready:
-        n = len(st.session_state.rag_chunks or [])
-        g = st.session_state.rag_graph
-        st.success(
-            f"🕸️ **Graph RAG active** — {n:,} job listings · "
-            f"{g.number_of_nodes():,} knowledge nodes · "
-            f"{g.number_of_edges():,} connections"
-        )
-    else:
-        st.info("💡 No job data indexed yet. Scrape jobs and the index builds automatically.")
-
-    # Build user context from other tabs
-    ctx_parts = []
-    if st.session_state.cv_analysis and st.session_state.cv_analysis.get("success"):
-        a = st.session_state.cv_analysis.get("analysis", {})
-        if isinstance(a, dict):
-            ctx_parts.append(
-                f"User CV: skills={', '.join(a.get('skills',[]))}; "
-                f"tech={', '.join(a.get('technologies',[]))}; "
-                f"level={a.get('seniority_level','?')}; "
-                f"summary: {a.get('summary','')}"
+# ── LLM streaming helper ───────────────────────────────────────────────────────
+def _stream(system: str, history: list, placeholder) -> str:
+    from groq import Groq
+    client = Groq(api_key=GROQ_KEY)
+    full   = ""
+    for model in [GROQ_MODEL, GROQ_MODEL_FALLBACK]:
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system}] + history,
+                temperature=0.72, max_tokens=1400, stream=True,
             )
-    if st.session_state.github_analysis and st.session_state.github_analysis.get("success"):
-        p  = st.session_state.github_analysis.get("profile", {})
-        ga = st.session_state.github_analysis.get("analysis", {})
-        ctx_parts.append(
-            f"User GitHub: repos={p.get('public_repos','?')}, "
-            f"top langs={list(p.get('languages',{}).keys())[:4]}, "
-            f"readiness={ga.get('career_readiness','?') if isinstance(ga,dict) else '?'}"
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    full += delta
+                    placeholder.markdown(full + "▌")
+            placeholder.markdown(full)
+            return full
+        except Exception:
+            continue
+    full = "❌ Could not reach AI. Check your API key."
+    placeholder.error(full)
+    return full
+
+
+# ── RAG context helper ─────────────────────────────────────────────────────────
+def _rag_context(query: str) -> str:
+    if not rag_ready:
+        return ""
+    try:
+        from rag_retriever import GraphRAGRetriever
+        r = GraphRAGRetriever(
+            st.session_state.rag_emb, st.session_state.rag_chunks,
+            st.session_state.rag_meta, st.session_state.rag_graph,
+            st.session_state.rag_model,
         )
+        return r.get_context_string(query)
+    except Exception:
+        return ""
 
-    # Controls
-    cc1, cc2 = st.columns([1, 5])
-    with cc1:
-        if st.button("🗑️ Clear Chat", use_container_width=True):
-            st.session_state.chat_messages = [{
-                "role": "assistant",
-                "content": "👋 I'm your career assistant. Ask me anything or upload your CV below for feedback.",
-                "time": datetime.now().isoformat()
-            }]
-            st.rerun()
-    with cc2:
-        tone = st.radio(
-            "Tone", ["Professional", "Friendly", "Formal", "Concise"],
-            horizontal=True, label_visibility="collapsed"
+
+# ── Chat renderer (shared) ─────────────────────────────────────────────────────
+def render_chat(service: str, system_fn, placeholder_text: str,
+                suggestions: list | None = None):
+    """
+    Renders a full chat interface for a given service.
+    system_fn(query) → system prompt string
+    """
+    key = f"msgs_{service}"
+    if st.session_state[key] is None:
+        st.session_state[key] = []
+
+    # Render history
+    for msg in st.session_state[key]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Quick suggestion buttons
+    if suggestions and not st.session_state[key]:
+        st.markdown(
+            "<p style='color:#475569;font-size:0.82rem;margin:16px 0 8px;'>Try asking:</p>",
+            unsafe_allow_html=True,
         )
+        cols = st.columns(min(len(suggestions), 3))
+        for i, s in enumerate(suggestions):
+            if cols[i % 3].button(s, key=f"sug_{service}_{i}", use_container_width=True):
+                st.session_state[key].append({"role": "user", "content": s})
+                st.rerun()
 
-    st.divider()
-
-    # Chat container with scroll
-    chat_container = st.container()
-    with chat_container:
-        st.markdown('<div class="chat-container" id="chat-scroll">', unsafe_allow_html=True)
-        # Render existing messages
-        for msg in st.session_state.chat_messages:
-            role = msg["role"]
-            content = msg["content"]
-            timestamp = msg.get("time")
-            if timestamp:
-                try:
-                    dt = datetime.fromisoformat(timestamp)
-                    time_str = dt.strftime("%I:%M %p")
-                except:
-                    time_str = ""
-            else:
-                time_str = ""
-
-            if role == "user":
-                st.markdown(f'''
-                <div class="chat-message chat-message-user">
-                    <div style="flex-grow:1"></div>
-                    <div class="chat-bubble chat-bubble-user">
-                        {content}
-                        <div class="chat-time">{time_str}</div>
-                    </div>
-                    <div class="chat-avatar">👤</div>
-                </div>
-                ''', unsafe_allow_html=True)
-            else:
-                st.markdown(f'''
-                <div class="chat-message chat-message-assistant">
-                    <div class="chat-avatar">🤖</div>
-                    <div class="chat-bubble chat-bubble-assistant">
-                        {content}
-                        <div class="chat-time">{time_str}</div>
-                    </div>
-                </div>
-                ''', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # Auto-scroll JavaScript
-    st.markdown("""
-    <script>
-    var chatDiv = document.getElementById('chat-scroll');
-    if(chatDiv) chatDiv.scrollTop = chatDiv.scrollHeight;
-    </script>
-    """, unsafe_allow_html=True)
-
-    # ───────────────────────────── NEW: CV ANALYSIS BUTTON IN CHAT ─────────────────────────────
-    with st.expander("📄 Upload your CV for AI feedback", expanded=False):
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            cv_file = st.file_uploader("Choose PDF", type=["pdf"], key="chat_cv_uploader", label_visibility="collapsed")
-        with col2:
-            st.write("")
-            analyze_btn = st.button("🔍 Analyze CV & Get Opinion", use_container_width=True, type="primary")
-
-        if analyze_btn and cv_file is not None:
-            temp_path = f"temp_chat_{cv_file.name}"
-        try:
-            with open(temp_path, "wb") as f:
-                f.write(cv_file.getbuffer())
-            with st.spinner("Analyzing your CV..."):
-                result = CVAnalyzer().analyze_cv(temp_path)
-            if result.get("success"):
-                # Ensure analysis is a dict
-                analysis_data = result.get("analysis")
-                if not isinstance(analysis_data, dict):
-                    st.error(f"Analysis returned unexpected format: {type(analysis_data)}")
-                    analysis_data = {}
-                else:
-                    st.session_state.cv_analysis = result
-                    st.success("✅ CV analyzed! Asking assistant for feedback...")
-
-                    # Build a readable summary for the assistant
-                    skills = ", ".join(analysis_data.get("skills", [])[:10])
-                    tech = ", ".join(analysis_data.get("technologies", [])[:10])
-                    exp_summary = []
-                    for ex in analysis_data.get("experience", [])[:3]:
-                        exp_summary.append(f"- {ex.get('title', '')} at {ex.get('company', '')}")
-                    exp_text = "\n".join(exp_summary) if exp_summary else "None"
-                    edu_summary = []
-                    for ed in analysis_data.get("education", [])[:2]:
-                        edu_summary.append(f"- {ed.get('degree', '')} from {ed.get('school', '')}")
-                    edu_text = "\n".join(edu_summary) if edu_summary else "None"
-
-                    analysis_prompt = f"""I just analyzed my CV. Here are the results:
-
-    **Skills:** {skills}
-    **Technologies:** {tech}
-    **Seniority Level:** {analysis_data.get('seniority_level', 'Not specified')}
-    **Experience:** 
-    {exp_text}
-    **Education:**
-    {edu_text}
-    **Summary:** {analysis_data.get('summary', '')}
-
-    Please give me your honest, professional opinion about my CV. What are its strengths? What could be improved? Any specific suggestions to make it stand out for job applications?"""
-
-                    # Append as a user message (so assistant replies)
-                    st.session_state.chat_messages.append({
-                        "role": "user",
-                        "content": analysis_prompt,
-                        "time": datetime.now().isoformat()
-                    })
-                    st.rerun()
-            else:
-                st.error(result.get("error", "Analysis failed"))
-        except Exception as e:
-            st.error(f"Error: {e}")
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            elif analyze_btn and not cv_file:
-                st.warning("Please upload a PDF file first.")
-
-    st.divider()
-
-    # ── Chat input ────────────────────────────────────────────────────────────
-    if prompt := st.chat_input("Ask me anything about jobs, your career, or say 'write me a cover letter'..."):
-
-        # Add user message
-        user_time = datetime.now().isoformat()
-        st.session_state.chat_messages.append({"role": "user", "content": prompt, "time": user_time})
-        # Re-render user message immediately
-        with chat_container:
-            st.markdown(f'''
-            <div class="chat-message chat-message-user">
-                <div style="flex-grow:1"></div>
-                <div class="chat-bubble chat-bubble-user">
-                    {prompt}
-                    <div class="chat-time">{datetime.now().strftime("%I:%M %p")}</div>
-                </div>
-                <div class="chat-avatar">👤</div>
-            </div>
-            ''', unsafe_allow_html=True)
-
-        # ── Graph RAG retrieval ────────────────────────────────────────────────
-        rag_context = ""
-        if rag_ready:
-            try:
-                from rag_retriever import GraphRAGRetriever
-                retriever = GraphRAGRetriever(
-                    embeddings = st.session_state.rag_embeddings,
-                    chunks     = st.session_state.rag_chunks,
-                    meta       = st.session_state.rag_meta,
-                    graph      = st.session_state.rag_graph,
-                    model      = st.session_state.rag_model,
-                    k=7, graph_k=6, hop_depth=2,
-                )
-                rag_context = retriever.get_context_string(prompt, max_chars=4500)
-            except Exception as e:
-                st.sidebar.warning(f"Retrieval note: {e}")
-
-        # ── System prompt (enhanced for CV feedback) ──────────────────────────
-        tone_guide = {
-            "Professional": "Write in a confident, professional tone. Avoid filler phrases.",
-            "Friendly":     "Be warm, conversational, and encouraging — like a helpful friend.",
-            "Formal":       "Use formal business English. No contractions. Polished.",
-            "Concise":      "Be extremely concise. Short sentences. No padding. Get to the point.",
-        }.get(tone, "")
-
-        user_ctx = f"\n\nUser profile from other tabs:\n{chr(10).join(ctx_parts)}" if ctx_parts else ""
-
-        rag_block = (
-            f"\n\nREAL JOB DATA (retrieved via Graph RAG — use this if relevant to the user's question):\n{rag_context}\n\n"
-            "If the user asks for specific jobs, mention titles and companies from this data. "
-            "If the data doesn't cover the question, say so and answer from general knowledge. "
-            "Do NOT list job data unless the user explicitly asks for it."
-        ) if rag_context else (
-            "\n\nNo job database is available right now. Answer from general career knowledge."
-        )
-
-        system = f"""You are a Career AI Assistant — a friendly, knowledgeable career coach.
-
-Personality:
-- You talk like a real human expert, not a chatbot. No "Certainly!" or "Of course!" — just answer naturally.
-- You give specific, actionable advice, not generic platitudes.
-- When writing emails or cover letters, produce the full text, ready to send.
-- You remember context from earlier in the conversation.
-- You occasionally ask a short follow-up question to help better.
-- Do NOT start every conversation by listing job stats or salaries. Only mention job data if it directly answers the user's question.
-
-**CV Feedback:** If the user shares a CV analysis (skills, experience, etc.), give a detailed, honest review. Mention strengths, weaknesses, formatting suggestions, keyword optimization for ATS, and specific improvements. Be constructive and encouraging.
-
-{user_ctx}
-
-Current tone: {tone_guide}
-
-{rag_block}"""
+    # Chat input
+    if prompt := st.chat_input(placeholder_text):
+        st.session_state[key].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
         history = [
             {"role": m["role"], "content": m["content"]}
-            for m in st.session_state.chat_messages[-14:]
+            for m in st.session_state[key][-HISTORY_TURNS:]
             if m["role"] in ("user", "assistant")
         ]
 
-        # ── Streaming response with typing indicator ─────────────────────────────
-        with chat_container:
-            # Show typing indicator
-            typing_placeholder = st.empty()
-            typing_placeholder.markdown('''
-            <div class="chat-message chat-message-assistant">
-                <div class="chat-avatar">🤖</div>
-                <div class="typing-indicator">
-                    <span>Assistant is typing</span>
-                    <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
-                </div>
-            </div>
-            ''', unsafe_allow_html=True)
+        with st.chat_message("assistant"):
+            ph  = st.empty()
+            sys = system_fn(prompt)
+            reply = _stream(sys, history, ph)
 
-            # Placeholder for actual response
-            response_placeholder = st.empty()
-            full_response = ""
-
-            try:
-                from groq import Groq
-                client = Groq(api_key=groq_key)
-
-                stream = client.chat.completions.create(
-                    model       = "llama-3.3-70b-versatile",
-                    messages    = [{"role": "system", "content": system}] + history,
-                    temperature = 0.72,
-                    max_tokens  = 1400,
-                    stream      = True,
-                )
-
-                # Remove typing indicator
-                typing_placeholder.empty()
-
-                # Stream word by word
-                for chunk in stream:
-                    delta = chunk.choices[0].delta.content
-                    if delta:
-                        full_response += delta
-                        response_placeholder.markdown(f'''
-                        <div class="chat-message chat-message-assistant">
-                            <div class="chat-avatar">🤖</div>
-                            <div class="chat-bubble chat-bubble-assistant">
-                                {full_response}▌
-                                <div class="chat-time">{datetime.now().strftime("%I:%M %p")}</div>
-                            </div>
-                        </div>
-                        ''', unsafe_allow_html=True)
-
-                # Final response without cursor
-                response_placeholder.markdown(f'''
-                <div class="chat-message chat-message-assistant">
-                    <div class="chat-avatar">🤖</div>
-                    <div class="chat-bubble chat-bubble-assistant">
-                        {full_response}
-                        <div class="chat-time">{datetime.now().strftime("%I:%M %p")}</div>
-                    </div>
-                </div>
-                ''', unsafe_allow_html=True)
-
-            except Exception as e:
-                response_placeholder.error(f"❌ Error: {e}")
-                full_response = f"Error: {e}"
-
-        # Save assistant message
-        st.session_state.chat_messages.append({"role": "assistant", "content": full_response, "time": datetime.now().isoformat()})
+        st.session_state[key].append({"role": "assistant", "content": reply})
         st.rerun()
 
-    # Quick prompts
-    st.markdown("---")
-    st.markdown("**💡 Try asking:**")
-    suggestions = [
-        "What Python jobs are available right now?",
-        "Find remote data science jobs",
-        "What tech companies are hiring in Cairo?",
-        "Write a cover letter for a senior backend developer role",
-        "How do I answer 'Why should we hire you?'",
-        "Draft a follow-up email after an interview",
-    ]
-    cols = st.columns(3)
-    for i, s in enumerate(suggestions):
-        if cols[i % 3].button(s, key=f"q_{i}", use_container_width=True):
-            st.session_state.chat_messages.append({"role": "user", "content": s, "time": datetime.now().isoformat()})
-            st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HEADER
+# ══════════════════════════════════════════════════════════════════════════════
+col_logo, col_title, col_status = st.columns([1, 6, 3])
+with col_logo:
+    st.markdown(
+        "<div style='font-size:2.2rem;padding-top:8px;'>🚀</div>",
+        unsafe_allow_html=True,
+    )
+with col_title:
+    st.markdown(
+        "<h1 style='font-size:1.6rem;font-weight:800;"
+        "background:linear-gradient(135deg,#38bdf8,#818cf8);"
+        "-webkit-background-clip:text;-webkit-text-fill-color:transparent;"
+        "margin:8px 0 2px;'>Career AI Assistant</h1>"
+        "<p style='color:#475569;font-size:0.82rem;margin:0;'>"
+        "Graph RAG · CV Analysis · GitHub · Job Matching · Live Scraping</p>",
+        unsafe_allow_html=True,
+    )
+with col_status:
+    if rag_ready:
+        st.markdown(
+            f"<div style='text-align:right;padding-top:10px;'>"
+            f"<span style='background:#052e16;color:#86efac;border:1px solid #16a34a;"
+            f"border-radius:20px;padding:4px 12px;font-size:0.78rem;font-weight:600;'>"
+            f"🕸️ RAG Live · {job_count:,} jobs</span></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<div style='text-align:right;padding-top:10px;'>"
+            "<span style='background:#1c1008;color:#fcd34d;border:1px solid #d97706;"
+            "border-radius:20px;padding:4px 12px;font-size:0.78rem;font-weight:600;'>"
+            "⚠️ RAG offline</span></div>",
+            unsafe_allow_html=True,
+        )
+
+st.markdown("<hr style='margin:8px 0 0;'>", unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TABS
+# ══════════════════════════════════════════════════════════════════════════════
+t_chat, t_cv, t_gh, t_jobs, t_scrape = st.tabs([
+    "💬  Career Chat",
+    "📄  CV Analyzer",
+    "🐙  GitHub Profiler",
+    "💼  Job Matcher",
+    "🌐  Job Scraper",
+])
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — CV Analyzer (unchanged)
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.header("📄 CV Analyzer")
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        up = st.file_uploader("Upload your CV (PDF)", type=["pdf"])
-    with c2:
-        st.write(""); st.write("")
-        go_cv = st.button("🔍 Analyze", use_container_width=True)
-
-    if go_cv:
-        if not up:
-            st.warning("⚠️ Upload a PDF first.")
-        else:
-            temp = f"temp_{up.name}"
-            try:
-                with open(temp, "wb") as f: f.write(up.getbuffer())
-                with st.spinner("Analyzing your CV..."):
-                    result = CVAnalyzer().analyze_cv(temp)
-                if result.get("success"):
-                    st.session_state.cv_analysis = result
-                    st.success("✅ Done! The chatbot now knows your CV profile.")
-                else:
-                    st.error(result.get("error"))
-            except Exception as e:
-                st.error(str(e))
-            finally:
-                if os.path.exists(temp): os.remove(temp)
-
-    if st.session_state.cv_analysis:
-        a = st.session_state.cv_analysis.get("analysis", {})
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Career Chat  (Graph RAG grounded)
+# ══════════════════════════════════════════════════════════════════════════════
+with t_chat:
+    # Build user context string from other services
+    ctx = []
+    if st.session_state.cv_data:
+        a = st.session_state.cv_data.get("analysis", {})
         if isinstance(a, dict):
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**🛠️ Skills**")
-                for s in a.get("skills",      []): st.markdown(f"- {s}")
-                st.markdown("**💻 Technologies**")
-                for t in a.get("technologies", []): st.markdown(f"- {t}")
-            with c2:
-                st.markdown("**🎓 Education**")
-                for e in a.get("education",   []):
-                    st.markdown(f"- {e.get('degree','?')} @ {e.get('school','?')}")
-                st.markdown("**💼 Experience**")
-                for ex in a.get("experience", []):
-                    st.markdown(f"- {ex.get('title','?')} at {ex.get('company','?')}")
-            st.markdown(f"**Seniority:** `{a.get('seniority_level','?')}`")
-            st.info(a.get("summary", ""))
-        else:
-            st.code(str(a))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — GitHub (unchanged)
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.header("🐙 GitHub Profile Analysis")
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        uname = st.text_input("GitHub Username", placeholder="e.g. torvalds")
-    with c2:
-        st.write(""); st.write("")
-        go_gh = st.button("🔍 Analyze", use_container_width=True, key="gh_btn")
-
-    if go_gh:
-        if not uname.strip():
-            st.warning("⚠️ Enter a username.")
-        else:
-            with st.spinner("Fetching profile..."):
-                try:
-                    r = GitHubAnalyzer().analyze_github_profile(uname.strip())
-                    if r.get("success"):
-                        st.session_state.github_analysis = r
-                        st.success("✅ Done! Chatbot knows your GitHub profile.")
-                    else:
-                        st.error(r.get("error"))
-                except Exception as e:
-                    st.error(str(e))
-
-    if st.session_state.github_analysis:
-        p  = st.session_state.github_analysis.get("profile", {})
-        ga = st.session_state.github_analysis.get("analysis", {})
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Followers",    p.get("followers",    0))
-        c2.metric("Public Repos", p.get("public_repos", 0))
-        c3.metric("Following",    p.get("following",    0))
-        if p.get("languages"):
-            st.bar_chart(p["languages"])
-        if isinstance(ga, dict):
-            st.markdown(
-                f"**Strength:** `{ga.get('profile_strength','?')}/10`  |  "
-                f"**Readiness:** `{ga.get('career_readiness','?')}`"
+            ctx.append(
+                f"User CV: {a.get('name','')} | "
+                f"level={a.get('seniority_level','?')} | "
+                f"years={a.get('years_experience','?')} | "
+                f"score={a.get('overall_score','?')}/100 | "
+                f"skills={', '.join(a.get('skills',{}).get('languages',[]))}"
             )
-            for r in ga.get("recommendations", []): st.markdown(f"- {r}")
+    if st.session_state.gh_data:
+        p  = st.session_state.gh_data.get("profile",  {})
+        ga = st.session_state.gh_data.get("analysis", {})
+        ctx.append(
+            f"GitHub: {p.get('username','?')} | "
+            f"repos={p.get('public_repos','?')} | "
+            f"score={ga.get('overall_score','?') if isinstance(ga,dict) else '?'}/100 | "
+            f"readiness={ga.get('career_readiness','?') if isinstance(ga,dict) else '?'}"
+        )
+
+    def _chat_system(query):
+        rag = _rag_context(query)
+        user_ctx = f"\n\nUser context: {' | '.join(ctx)}" if ctx else ""
+        rag_block = (
+            f"\n\nREAL JOB DATA (Graph RAG):\n{rag}\n\n"
+            "Ground your answer in this data. Mention specific job titles and companies when relevant."
+        ) if rag else "\n\nNo job database loaded yet."
+
+        return (
+            "You are a senior career advisor — direct, specific, and human.\n"
+            "Rules: Never start with 'Certainly' or 'Of course'. No filler openers.\n"
+            "Give concrete advice. When writing cover letters or emails, write the full text.\n"
+            "Use bullet points only when listing 3+ items. Keep paragraphs short.\n"
+            f"{user_ctx}{rag_block}"
+        )
+
+    render_chat(
+        service          = "chat",
+        system_fn        = _chat_system,
+        placeholder_text = "Ask about jobs, career advice, or say 'write me a cover letter'…",
+        suggestions      = [
+            "What Python jobs are available right now?",
+            "Which companies are hiring remotely in Egypt?",
+            "Write a cover letter for a senior backend role",
+            "How do I negotiate a higher salary?",
+            "What skills should a data scientist learn in 2025?",
+            "Draft a LinkedIn message to a recruiter",
+        ],
+    )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — Job Matcher (unchanged)
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab4:
-    st.header("💼 Job Matcher")
-    if not (os.path.exists("data/jobs_combined.csv") or os.path.exists("data/jobs.csv")):
-        st.warning("⚠️ No job database. Use 🌐 Scrape Jobs first.")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        skills_in = st.text_area("Skills (one per line)",
-                                  placeholder="Python\nReact\nDocker", height=110)
-        exp = st.number_input("Years of Experience", 0, 50, 2)
-    with c2:
-        sen   = st.selectbox("Seniority", ["Junior", "Mid-Level", "Senior"])
-        roles = st.multiselect("Interested Roles", [
-            "Full Stack Developer","Backend Engineer","Frontend Developer",
-            "Data Scientist","ML Engineer","DevOps Engineer","Product Manager",
-        ])
-
-    if st.button("🔍 Find Jobs", use_container_width=True):
-        skills = [s.strip() for s in skills_in.splitlines() if s.strip()]
-        if not skills:
-            st.warning("⚠️ Enter at least one skill.")
-        else:
-            with st.spinner("Matching..."):
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — CV Analyzer  (chat-driven)
+# ══════════════════════════════════════════════════════════════════════════════
+with t_cv:
+    col_up, col_info = st.columns([1, 1])
+    with col_up:
+        uploaded = st.file_uploader("Upload your CV (PDF)", type=["pdf"], label_visibility="collapsed")
+        if uploaded:
+            if st.button("🔍 Analyze CV", use_container_width=True):
+                temp = f"temp_{uploaded.name}"
                 try:
-                    r = JobMatcher().match_jobs({
-                        "skills": skills, "experience_years": exp,
-                        "seniority_level": sen.lower(), "interested_roles": roles,
-                    })
-                    if r.get("success"):
-                        st.session_state.job_matches = r
-                        st.success("✅ Done!")
+                    with open(temp, "wb") as f: f.write(uploaded.getbuffer())
+                    with st.spinner("Reading your CV…"):
+                        result = CVAnalyzer().analyze_cv(temp)
+                    if result.get("success"):
+                        st.session_state.cv_data = result
+                        a = result["analysis"]
+                        # Push summary into chat history
+                        intro = (
+                            f"I've analyzed your CV. Here's what I found:\n\n"
+                            f"**Overall Score:** {a.get('overall_score','?')}/100\n"
+                            f"**Level:** {a.get('seniority_level','?').title()}\n"
+                            f"**Experience:** {a.get('years_experience','?')} years\n\n"
+                            f"**Top Skills:** {', '.join(a.get('skills',{}).get('languages',[]))}\n\n"
+                            f"**Summary:** {a.get('summary','')}\n\n"
+                            "What would you like to dig into? I can rewrite your summary, "
+                            "identify skill gaps, find matching jobs, or draft a cover letter."
+                        )
+                        st.session_state.msgs_cv = [{"role": "assistant", "content": intro}]
+                        st.rerun()
                     else:
-                        st.warning(r.get("error"))
+                        st.error(result.get("error"))
                 except Exception as e:
                     st.error(str(e))
+                finally:
+                    if os.path.exists(temp): os.remove(temp)
 
-    if st.session_state.job_matches:
-        m = st.session_state.job_matches.get("matches", {})
-        if isinstance(m, dict):
-            for job in m.get("jobs", []):
-                with st.expander(
-                    f"**{job.get('job_title','?')}** @ {job.get('company','?')} "
-                    f"— {job.get('match_score','?')}%"
-                ):
-                    st.markdown(f"**Why:** {job.get('reason','')}")
-                    st.markdown(f"**Required:** {', '.join(job.get('required_skills',[]))}")
-                    st.markdown(f"**Nice to have:** {', '.join(job.get('nice_to_have',[]))}")
-            st.info(m.get("summary", ""))
+    with col_info:
+        if st.session_state.cv_data:
+            a = st.session_state.cv_data.get("analysis", {})
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Score",   f"{a.get('overall_score','?')}/100")
+            c2.metric("Level",   a.get("seniority_level","?").title())
+            c3.metric("Years",   a.get("years_experience","?"))
+            # Impact scores
+            exp = a.get("experience", [])
+            if exp:
+                st.markdown(
+                    "<p style='color:#475569;font-size:0.8rem;margin:12px 0 4px;'>Role impact scores:</p>",
+                    unsafe_allow_html=True,
+                )
+                for role in exp:
+                    score = role.get("impact_score", 5)
+                    bar_w = int(score * 10)
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:10px;margin:3px 0;'>"
+                        f"<span style='color:#94a3b8;font-size:0.78rem;width:160px;white-space:nowrap;"
+                        f"overflow:hidden;text-overflow:ellipsis;'>{role.get('title','?')[:25]}</span>"
+                        f"<div style='flex:1;background:#1e2a4a;border-radius:4px;height:8px;'>"
+                        f"<div style='width:{bar_w}%;background:#38bdf8;border-radius:4px;height:8px;'></div></div>"
+                        f"<span style='color:#38bdf8;font-size:0.78rem;'>{score}/10</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
         else:
-            st.code(str(m))
+            st.markdown(
+                "<div style='padding:40px;text-align:center;color:#475569;'>"
+                "<div style='font-size:2.5rem;'>📄</div>"
+                "<p style='margin-top:8px;'>Upload your CV to get a full analysis,<br>"
+                "then chat about it below.</p></div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<hr style='margin:12px 0;'>", unsafe_allow_html=True)
+
+    # CV chat
+    def _cv_system(query):
+        cv_ctx = ""
+        if st.session_state.cv_data:
+            a = st.session_state.cv_data.get("analysis", {})
+            cv_ctx = (
+                f"\n\nCV DATA:\n{json.dumps(a, indent=2)[:2000]}\n\n"
+                "Use this CV data to give specific, personalized answers."
+            )
+        return (
+            "You are a career coach specializing in CV improvement. Be direct and specific.\n"
+            "Never say 'Certainly' or 'Great question'. Just answer.\n"
+            "When rewriting CV sections, show the full rewritten text in a code block.\n"
+            f"{cv_ctx}"
+        )
+
+    render_chat(
+        service          = "cv",
+        system_fn        = _cv_system,
+        placeholder_text = "Ask about your CV, request rewrites, or explore career paths…",
+        suggestions      = [
+            "Rewrite my professional summary",
+            "What are my biggest skill gaps?",
+            "What roles am I best suited for?",
+            "How can I improve my overall score?",
+        ],
+    )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — Scrape Jobs (unchanged)
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab5:
-    st.header("🌐 Scrape Live Jobs")
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — GitHub Profiler  (chat-driven)
+# ══════════════════════════════════════════════════════════════════════════════
+with t_gh:
+    col_in, col_stats = st.columns([1, 1])
+    with col_in:
+        uname = st.text_input("GitHub username", placeholder="e.g. torvalds", label_visibility="collapsed")
+        if st.button("🔍 Analyze Profile", use_container_width=True):
+            if not uname.strip():
+                st.warning("Enter a username.")
+            else:
+                with st.spinner("Fetching GitHub data…"):
+                    try:
+                        result = GitHubAnalyzer().analyze_github_profile(uname.strip())
+                        if result.get("success"):
+                            st.session_state.gh_data = result
+                            p  = result["profile"]
+                            ga = result["analysis"]
+                            intro = (
+                                f"Here's the analysis for **@{p.get('username','?')}**:\n\n"
+                                f"**Overall Score:** {ga.get('overall_score','?')}/100\n"
+                                f"**Career Readiness:** {ga.get('career_readiness','?').title()}\n"
+                                f"**Salary Band:** {ga.get('salary_band_usd','?')}\n\n"
+                                f"**Recruiter Verdict:** {ga.get('recruiter_verdict','')}\n\n"
+                                "What would you like to know more about? I can suggest "
+                                "improvements, compare to job requirements, or help write a GitHub bio."
+                            )
+                            st.session_state.msgs_github = [{"role": "assistant", "content": intro}]
+                            st.rerun()
+                        else:
+                            st.error(result.get("error"))
+                    except Exception as e:
+                        st.error(str(e))
 
-    db_path = ("data/jobs_combined.csv" if os.path.exists("data/jobs_combined.csv") else
-               "data/jobs.csv"          if os.path.exists("data/jobs.csv") else None)
+    with col_stats:
+        if st.session_state.gh_data:
+            p  = st.session_state.gh_data.get("profile",  {})
+            ga = st.session_state.gh_data.get("analysis", {})
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Followers",  p.get("followers",   0))
+            c2.metric("Repos",      p.get("public_repos",0))
+            c3.metric("Score",      f"{ga.get('overall_score','?')}/100")
+            # 5-dimension radar (progress bars)
+            if isinstance(ga, dict) and "scores" in ga:
+                dims = ga["scores"]
+                st.markdown(
+                    "<p style='color:#475569;font-size:0.8rem;margin:12px 0 4px;'>Dimension scores:</p>",
+                    unsafe_allow_html=True,
+                )
+                for dim, val in dims.items():
+                    bar_w = int(int(val) * 10) if str(val).isdigit() else 50
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:10px;margin:3px 0;'>"
+                        f"<span style='color:#94a3b8;font-size:0.78rem;width:110px;'>{dim.title()}</span>"
+                        f"<div style='flex:1;background:#1e2a4a;border-radius:4px;height:8px;'>"
+                        f"<div style='width:{bar_w}%;background:#818cf8;border-radius:4px;height:8px;'></div></div>"
+                        f"<span style='color:#818cf8;font-size:0.78rem;'>{val}/10</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+            # Language chart
+            langs = p.get("languages", {})
+            if langs:
+                st.markdown(
+                    "<p style='color:#475569;font-size:0.8rem;margin:12px 0 4px;'>Top languages:</p>",
+                    unsafe_allow_html=True,
+                )
+                top = sorted(langs.items(), key=lambda x: x[1], reverse=True)[:6]
+                total_repos = sum(v for _, v in top) or 1
+                for lang, cnt in top:
+                    pct = int(cnt / total_repos * 100)
+                    st.markdown(
+                        f"<div style='display:flex;align-items:center;gap:10px;margin:3px 0;'>"
+                        f"<span style='color:#94a3b8;font-size:0.78rem;width:90px;'>{lang}</span>"
+                        f"<div style='flex:1;background:#1e2a4a;border-radius:4px;height:8px;'>"
+                        f"<div style='width:{pct}%;background:#0ea5e9;border-radius:4px;height:8px;'></div></div>"
+                        f"<span style='color:#0ea5e9;font-size:0.78rem;'>{cnt} repos</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.markdown(
+                "<div style='padding:40px;text-align:center;color:#475569;'>"
+                "<div style='font-size:2.5rem;'>🐙</div>"
+                "<p style='margin-top:8px;'>Enter a GitHub username to analyze<br>the profile, then chat about it.</p>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<hr style='margin:12px 0;'>", unsafe_allow_html=True)
+
+    def _gh_system(query):
+        gh_ctx = ""
+        if st.session_state.gh_data:
+            p  = st.session_state.gh_data.get("profile",  {})
+            ga = st.session_state.gh_data.get("analysis", {})
+            gh_ctx = (
+                f"\n\nGITHUB DATA:\n{json.dumps({'profile':p,'analysis':ga}, indent=2)[:2000]}\n\n"
+                "Use this to give specific, data-driven advice."
+            )
+        return (
+            "You are a senior engineering mentor reviewing a GitHub profile.\n"
+            "Be direct, specific, and actionable. No filler. Reference actual repo data.\n"
+            f"{gh_ctx}"
+        )
+
+    render_chat(
+        service          = "github",
+        system_fn        = _gh_system,
+        placeholder_text = "Ask about the GitHub profile, get improvement tips…",
+        suggestions      = [
+            "How can I improve my profile score?",
+            "Write a better GitHub bio for me",
+            "What projects would make me more hireable?",
+            "Compare this profile to what recruiters look for",
+        ],
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Job Matcher  (chat-driven)
+# ══════════════════════════════════════════════════════════════════════════════
+with t_jobs:
+    # Quick profile form
+    with st.expander("⚙️ Set your profile (used for matching)", expanded=not bool(st.session_state.msgs_jobs)):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            skills_raw = st.text_area("Skills (one per line)", height=90,
+                                      placeholder="Python\nReact\nDocker")
+        with c2:
+            exp_yr  = st.number_input("Years experience", 0, 40, 2)
+            seniority = st.selectbox("Seniority", ["Junior","Mid-Level","Senior","Lead"])
+        with c3:
+            roles = st.multiselect("Target roles", [
+                "Full Stack Developer","Backend Engineer","Frontend Developer",
+                "Data Scientist","ML Engineer","DevOps Engineer","Product Manager",
+                "Mobile Developer","QA Engineer",
+            ])
+        if st.button("🔍 Match Jobs", use_container_width=True):
+            skills = [s.strip() for s in skills_raw.splitlines() if s.strip()]
+            if not skills:
+                st.warning("Add at least one skill.")
+            else:
+                profile = {"skills": skills, "experience_years": exp_yr,
+                           "seniority_level": seniority.lower(), "interested_roles": roles}
+                with st.spinner("Searching job database…"):
+                    try:
+                        result = JobMatcher().match_jobs(profile)
+                        if result.get("success"):
+                            m = result["matches"]
+                            jobs_list = m.get("jobs", []) if isinstance(m, dict) else []
+                            intro_parts = [
+                                f"Found **{len(jobs_list)} matches** for your profile.\n"
+                            ]
+                            for j in jobs_list[:3]:
+                                intro_parts.append(
+                                    f"**{j.get('job_title','?')}** at {j.get('company','?')} "
+                                    f"— Fit: {j.get('fit_score','?')}% | Priority: {j.get('apply_priority','?').upper()}\n"
+                                    f"_{j.get('why_fit','')}_\n"
+                                )
+                            if isinstance(m, dict):
+                                intro_parts.append(f"\n{m.get('summary','')}")
+                            intro_parts.append("\nAsk me to write an application email, explain a gap, or find more specific roles.")
+                            intro = "\n".join(intro_parts)
+                            st.session_state.msgs_jobs = [{"role": "assistant", "content": intro}]
+                            st.rerun()
+                        else:
+                            st.warning(result.get("error"))
+                    except Exception as e:
+                        st.error(str(e))
+
+    def _jobs_system(query):
+        rag = _rag_context(query)
+        rag_block = (f"\n\nJOB DATABASE (Graph RAG):\n{rag}"
+                     if rag else "\n\nNo job database loaded.")
+        cv_ctx = ""
+        if st.session_state.cv_data:
+            a = st.session_state.cv_data.get("analysis", {})
+            cv_ctx = (f"\n\nUser CV: seniority={a.get('seniority_level','?')}, "
+                      f"skills={', '.join(a.get('skills',{}).get('languages',[]))}")
+        return (
+            "You are a job search strategist. Give specific, actionable job hunting advice.\n"
+            "When the user asks about jobs, reference real listings from the database.\n"
+            "No filler openers. Be direct.\n"
+            f"{cv_ctx}{rag_block}"
+        )
+
+    render_chat(
+        service          = "jobs",
+        system_fn        = _jobs_system,
+        placeholder_text = "Ask about specific jobs, companies, or say 'write me an application email'…",
+        suggestions      = [
+            "What remote jobs pay over $80k?",
+            "Find Python jobs in Cairo",
+            "Write an email applying to a fintech startup",
+            "What companies are hiring senior developers?",
+        ],
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Job Scraper  (chat-driven + manual controls)
+# ══════════════════════════════════════════════════════════════════════════════
+with t_scrape:
+    # DB status strip
+    db_path = next((p for p in ["data/jobs_combined.csv","data/jobs.csv"] if os.path.exists(p)), None)
     if db_path:
         try:
             import pandas as pd
             df_c = pd.read_csv(db_path)
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("Jobs in DB", f"{len(df_c):,}")
-            c2.metric("Sources", df_c["source"].nunique() if "source" in df_c.columns else "—")
-            c3.metric("File", db_path)
-            st.success("✅ After scraping, the RAG index rebuilds automatically on next startup.")
+            c2.metric("Sources",    df_c["source"].nunique() if "source" in df_c.columns else "—")
+            c3.metric("File",       db_path.split("/")[-1])
+            c4.metric("RAG",        "✅ Active" if rag_ready else "⚠️ Offline")
         except Exception:
             pass
+        st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
 
-    st.divider()
-    ca, cb = st.columns(2)
-    with ca:
-        st.markdown("#### ✅ Sources")
-        use_ro  = st.checkbox("🌍 RemoteOK",  value=True)
-        use_arb = st.checkbox("🇩🇪 Arbeitnow", value=True)
-        use_mu  = st.checkbox("🇺🇸 The Muse",  value=True)
-        use_wu  = st.checkbox("🇪🇬 Wuzzuf",    value=True)
-    with cb:
-        st.markdown("#### ❌ LinkedIn")
-        st.error(
-            "Not supported — ToS, JS rendering, bot detection & legal risk.\n\n"
-            "✅ [LinkedIn Jobs API](https://developer.linkedin.com/product-catalog/jobs) for official access."
-        )
+    # Source controls (collapsed by default)
+    with st.expander("⚙️ Scraper settings", expanded=False):
+        ca, cb = st.columns(2)
+        with ca:
+            use_ro  = st.checkbox("🌍 RemoteOK",  value=True)
+            use_arb = st.checkbox("🇩🇪 Arbeitnow", value=True)
+            use_mu  = st.checkbox("🇺🇸 The Muse",  value=True)
+            use_wu  = st.checkbox("🇪🇬 Wuzzuf",    value=True)
+        with cb:
+            ro_lim = st.slider("RemoteOK jobs", 20, 200, 100, 20, disabled=not use_ro)
+            arb_pg = st.slider("Arbeitnow pages", 1, 10, 3, disabled=not use_arb)
+            mu_pg  = st.slider("Muse pages", 1, 5, 2, disabled=not use_mu)
+            wu_pg  = st.slider("Wuzzuf pages/keyword", 1, 5, 2, disabled=not use_wu)
 
-    st.divider()
-    cc1, cc2, cc3, cc4 = st.columns(4)
-    ro_lim  = cc1.slider("RemoteOK",     20, 200, 100, 20, disabled=not use_ro)
-    arb_pg  = cc2.slider("Arbeitnow pg",  1,  10,   3,    disabled=not use_arb)
-    mu_pg   = cc3.slider("Muse pages",    1,   5,   2,    disabled=not use_mu)
-    wu_pg   = cc4.slider("Wuzzuf pg/kw",  1,   5,   2,    disabled=not use_wu)
-
-    if use_wu:
         wu_kw_raw = st.text_area(
-            "Wuzzuf keywords (comma-separated)",
-            value="software engineer, python developer, data scientist, frontend developer, backend developer, full stack developer, devops",
-            height=65,
+            "Wuzzuf keywords", height=55, disabled=not use_wu,
+            value="software engineer, python developer, data scientist, frontend developer, backend developer, devops",
         )
         wu_kw = [k.strip() for k in wu_kw_raw.split(",") if k.strip()]
-    else:
-        wu_kw = []
 
-    if st.button("🚀 Scrape Now", use_container_width=True, type="primary"):
-        if not any([use_ro, use_arb, use_mu, use_wu]):
-            st.warning("Select at least one source.")
-        else:
-            prog = st.progress(0, text="Starting...")
-            lb   = st.empty()
-            logs: list = []
+        if st.button("🚀 Start Scraping", use_container_width=True, type="primary"):
+            if not any([use_ro, use_arb, use_mu, use_wu]):
+                st.warning("Select at least one source.")
+            else:
+                prog = st.progress(0, text="Starting…")
+                lb   = st.empty(); logs: list = []
+                def log(msg):
+                    logs.append(msg)
+                    lb.markdown("\n".join(f"`{l}`" for l in logs[-8:]))
+                try:
+                    from data_scraper import (RemoteOKScraper, ArbeitnowScraper,
+                                              TheMuseScraper, WuzzufScraper)
+                    import pandas as pd
+                    os.makedirs("data", exist_ok=True)
+                    all_j: list = []
+                    tot = sum([use_ro,use_arb,use_mu,use_wu]); step = 0
+                    if use_ro:
+                        log("📡 RemoteOK…"); prog.progress(int(100*step/tot))
+                        j = RemoteOKScraper().scrape(limit=ro_lim); all_j+=j; step+=1
+                        log(f"   ✅ {len(j)} jobs")
+                    if use_arb:
+                        log("📡 Arbeitnow…"); prog.progress(int(100*step/tot))
+                        j = ArbeitnowScraper().scrape(pages=arb_pg); all_j+=j; step+=1
+                        log(f"   ✅ {len(j)} jobs")
+                    if use_mu:
+                        log("📡 The Muse…"); prog.progress(int(100*step/tot))
+                        j = TheMuseScraper().scrape(pages=mu_pg); all_j+=j; step+=1
+                        log(f"   ✅ {len(j)} jobs")
+                    if use_wu:
+                        log(f"📡 Wuzzuf ({len(wu_kw)} kw)…"); prog.progress(int(100*step/tot))
+                        j = WuzzufScraper().scrape(keywords=wu_kw, pages_per_keyword=wu_pg)
+                        all_j+=j; step+=1; log(f"   ✅ {len(j)} jobs")
+                    existing = pd.DataFrame()
+                    for p2 in ["data/jobs.csv","docs/ai_jobs_market_2025_2026.csv"]:
+                        if os.path.exists(p2):
+                            try: existing=pd.read_csv(p2); log(f"   📂 {len(existing)} existing"); break
+                            except Exception: pass
+                    combined = pd.concat([existing,pd.DataFrame(all_j)],ignore_index=True)
+                    before   = len(combined)
+                    combined.drop_duplicates(subset=["job_title","company"],keep="first",inplace=True)
+                    log(f"   🗑️ {before-len(combined)} dupes removed")
+                    combined.to_csv("data/jobs_combined.csv",index=False)
+                    prog.progress(100,text="Done!")
+                    log(f"💾 {len(combined):,} jobs → data/jobs_combined.csv")
+                    msg = (
+                        f"✅ Scraped **{len(all_j):,} new jobs** from "
+                        f"{sum([use_ro,use_arb,use_mu,use_wu])} sources. "
+                        f"**{len(combined):,} total** in database.\n\n"
+                        "The RAG index will rebuild automatically on the next app restart, "
+                        "or click **🔄 Rebuild RAG** in the sidebar right now."
+                    )
+                    st.session_state.msgs_scraper = [{"role":"assistant","content":msg}]
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ {e}"); prog.progress(100)
 
-            def log(msg):
-                logs.append(msg)
-                lb.markdown("\n\n".join(f"`{l}`" for l in logs[-10:]))
-
+    def _scraper_system(query):
+        ctx_str = ""
+        if db_path:
             try:
-                from data_scraper import RemoteOKScraper, ArbeitnowScraper, TheMuseScraper, WuzzufScraper
                 import pandas as pd
-                os.makedirs("data", exist_ok=True)
-                all_j: list = []
-                tot = sum([use_ro, use_arb, use_mu, use_wu])
-                step = 0
-
-                if use_ro:
-                    log("📡 RemoteOK..."); prog.progress(int(100*step/tot))
-                    j = RemoteOKScraper().scrape(limit=ro_lim)
-                    all_j += j; step += 1; log(f"   ✅ {len(j)} jobs")
-                if use_arb:
-                    log("📡 Arbeitnow..."); prog.progress(int(100*step/tot))
-                    j = ArbeitnowScraper().scrape(pages=arb_pg)
-                    all_j += j; step += 1; log(f"   ✅ {len(j)} jobs")
-                if use_mu:
-                    log("📡 The Muse..."); prog.progress(int(100*step/tot))
-                    j = TheMuseScraper().scrape(pages=mu_pg)
-                    all_j += j; step += 1; log(f"   ✅ {len(j)} jobs")
-                if use_wu:
-                    log(f"📡 Wuzzuf ({len(wu_kw)} keywords)..."); prog.progress(int(100*step/tot))
-                    j = WuzzufScraper().scrape(keywords=wu_kw, pages_per_keyword=wu_pg)
-                    all_j += j; step += 1; log(f"   ✅ {len(j)} jobs")
-
-                existing = pd.DataFrame()
-                for p2 in ["data/jobs.csv", "docs/ai_jobs_market_2025_2026.csv"]:
-                    if os.path.exists(p2):
-                        try: existing = pd.read_csv(p2); log(f"   📂 {len(existing)} existing"); break
-                        except Exception: pass
-
-                combined = pd.concat([existing, pd.DataFrame(all_j)], ignore_index=True)
-                before   = len(combined)
-                combined.drop_duplicates(subset=["job_title","company"], keep="first", inplace=True)
-                log(f"   🗑️ {before-len(combined)} duplicates removed")
-                combined.to_csv("data/jobs_combined.csv", index=False)
-                prog.progress(100, text="Done!")
-                log(f"💾 {len(combined):,} jobs saved — RAG index will rebuild on next app load")
-
-                st.success(
-                    f"✅ **{len(combined):,} jobs** saved. "
-                    "**Restart the app** (or press R) and the RAG index will rebuild automatically."
+                df2 = pd.read_csv(db_path)
+                srcs = df2["source"].value_counts().to_dict() if "source" in df2.columns else {}
+                ctx_str = (
+                    f"\n\nDatabase stats: {len(df2):,} jobs | "
+                    f"sources: {srcs} | "
+                    f"RAG: {'active' if rag_ready else 'offline'}"
                 )
-                if "source" in combined.columns:
-                    st.bar_chart(combined["source"].value_counts())
-                display_cols = [c for c in ["job_title","company","location","remote_work","source"] if c in combined.columns]
-                st.dataframe(combined[display_cols].head(25), use_container_width=True)
-                st.download_button("⬇️ Download CSV", combined.to_csv(index=False).encode(),
-                                   "jobs_combined.csv", "text/csv", use_container_width=True)
-            except Exception as e:
-                st.error(f"❌ {e}"); prog.progress(100)
+            except Exception:
+                pass
+        return (
+            "You are a data engineering assistant helping manage a job scraping pipeline.\n"
+            "Answer questions about the job database, scraping sources, or how to get more relevant data.\n"
+            "Be concise and technical.\n"
+            f"{ctx_str}"
+        )
+
+    render_chat(
+        service          = "scraper",
+        system_fn        = _scraper_system,
+        placeholder_text = "Ask about the job database or scraping…",
+        suggestions      = [
+            "How many jobs do we have per source?",
+            "Why might Wuzzuf return fewer results than expected?",
+            "How often should I re-scrape?",
+        ],
+    )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — Full Assessment (unchanged)
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab6:
-    st.header("📊 Full Career Assessment")
-    has = any([st.session_state.cv_analysis, st.session_state.github_analysis, st.session_state.job_matches])
-    if not has:
-        st.info("Complete at least one analysis in the other tabs first.")
-    else:
-        if st.button("📋 Generate Report", use_container_width=True):
-            if st.session_state.cv_analysis:
-                st.markdown("### 📄 CV")
-                a = st.session_state.cv_analysis.get("analysis", {})
-                st.json(a) if isinstance(a, dict) else st.code(str(a))
-            if st.session_state.github_analysis:
-                st.markdown("### 🐙 GitHub")
-                p = {k: v for k, v in st.session_state.github_analysis.get("profile",{}).items() if k != "success"}
-                st.json(p)
-            if st.session_state.job_matches:
-                st.markdown("### 💼 Matches")
-                m = st.session_state.job_matches.get("matches", {})
-                st.json(m) if isinstance(m, dict) else st.code(str(m))
-            st.success("✅ Done!")
-
-
-# ── Sidebar (unchanged) ───────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.title("🎯 Career AI")
-    st.markdown("---")
+    st.markdown(
+        "<h2 style='font-size:1rem;margin:16px 0 8px;'>⚙️ Controls</h2>",
+        unsafe_allow_html=True,
+    )
 
-    # RAG status
-    st.subheader("🕸️ Graph RAG")
+    # RAG panel
+    st.markdown(
+        "<p style='font-size:0.8rem;color:#64748b;margin:8px 0 4px;'>🕸️ Graph RAG Index</p>",
+        unsafe_allow_html=True,
+    )
     if rag_ready:
-        n = len(st.session_state.rag_chunks or [])
         g = st.session_state.rag_graph
-        st.success(f"✅ Active — {n:,} chunks")
-        st.caption(f"🕸️ {g.number_of_nodes():,} nodes · {g.number_of_edges():,} edges")
+        st.markdown(
+            f"<div style='font-size:0.78rem;color:#86efac;'>"
+            f"✅ {job_count:,} chunks · {g.number_of_nodes():,} nodes · {g.number_of_edges():,} edges"
+            f"</div>", unsafe_allow_html=True,
+        )
     else:
-        st.warning("⚠️ Not loaded")
-        st.caption("Scrape jobs → restart app → auto-builds")
+        st.markdown(
+            "<div style='font-size:0.78rem;color:#fcd34d;'>⚠️ Not loaded</div>",
+            unsafe_allow_html=True,
+        )
 
-    # Manual rebuild button (for after scraping without restart)
-    if st.button("🔄 Rebuild Index Now", use_container_width=True):
+    if st.button("🔄 Rebuild RAG Now", use_container_width=True):
         from rag_ingest import build_index, load_index
+        from sentence_transformers import SentenceTransformer
         bar  = st.progress(0)
         info = st.empty()
         def _cb(pct, msg): bar.progress(pct, text=msg); info.caption(msg)
         try:
-            stats = build_index(progress_callback=_cb)
-            from sentence_transformers import SentenceTransformer
+            build_index(progress_callback=_cb)
             emb, chunks, meta, graph = load_index()
             model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            st.session_state.rag_embeddings = emb
-            st.session_state.rag_chunks     = chunks
-            st.session_state.rag_meta       = meta
-            st.session_state.rag_graph      = graph
-            st.session_state.rag_model      = model
-            st.session_state.rag_stats      = stats
+            st.session_state.rag_emb    = emb
+            st.session_state.rag_chunks = chunks
+            st.session_state.rag_meta   = meta
+            st.session_state.rag_graph  = graph
+            st.session_state.rag_model  = model
+            st.session_state.rag_ready  = True
             bar.empty(); info.empty()
-            st.success(f"✅ {stats['chunks']:,} chunks · {stats['graph_nodes']:,} nodes")
             st.rerun()
         except Exception as e:
             st.error(f"❌ {e}")
 
-    st.markdown("---")
-    st.subheader("📊 Status")
-    st.success("✅ Groq API")        if groq_key                              else st.error("❌ No key")
-    st.success("✅ CV analyzed")     if st.session_state.cv_analysis          else st.info("⬜ CV")
-    st.success("✅ GitHub analyzed") if st.session_state.github_analysis      else st.info("⬜ GitHub")
-    st.success("✅ Jobs matched")    if st.session_state.job_matches           else st.info("⬜ Jobs")
+    st.markdown("<hr style='margin:12px 0;border-color:#1e2a4a;'>", unsafe_allow_html=True)
 
-    db_f = ("data/jobs_combined.csv" if os.path.exists("data/jobs_combined.csv")
-            else "data/jobs.csv"     if os.path.exists("data/jobs.csv") else None)
-    if db_f:
-        try:
-            import pandas as pd
-            st.success(f"✅ {len(pd.read_csv(db_f)):,} jobs in DB")
-        except Exception:
-            st.warning("⚠️ DB unreadable")
-    else:
-        st.warning("⚠️ No job DB yet")
+    # Status
+    st.markdown(
+        "<p style='font-size:0.8rem;color:#64748b;margin:8px 0 4px;'>📊 Session</p>",
+        unsafe_allow_html=True,
+    )
+    def _dot(ok, label):
+        color = "#86efac" if ok else "#475569"
+        st.markdown(
+            f"<div style='font-size:0.78rem;color:{color};margin:2px 0;'>"
+            f"{'●' if ok else '○'} {label}</div>",
+            unsafe_allow_html=True,
+        )
+    _dot(bool(GROQ_KEY),                        "Groq API")
+    _dot(rag_ready,                              "RAG Index")
+    _dot(bool(st.session_state.cv_data),         "CV Analyzed")
+    _dot(bool(st.session_state.gh_data),         "GitHub Profiled")
+    _dot(bool(db_path),                          "Job DB")
 
-    st.markdown("---")
-    if st.button("🗑️ Clear Chat", use_container_width=True):
-        st.session_state.chat_messages = None
+    st.markdown("<hr style='margin:12px 0;border-color:#1e2a4a;'>", unsafe_allow_html=True)
+
+    # Clear buttons
+    if st.button("🗑️ Clear All Chats", use_container_width=True):
+        for s in SERVICES:
+            st.session_state[f"msgs_{s}"] = None
         st.rerun()
-    if st.button("🗑️ Clear All", use_container_width=True):
-        for k in _defaults: st.session_state[k] = None
+    if st.button("🗑️ Clear Everything", use_container_width=True):
+        for k in _defaults:
+            st.session_state[k] = None
         st.rerun()
-    st.caption("Graph RAG ✅ | Powered by Groq")
+
+    st.markdown(
+        "<p style='font-size:0.72rem;color:#334155;margin-top:20px;text-align:center;'>"
+        "Career AI · Graph RAG · Groq</p>",
+        unsafe_allow_html=True,
+    )

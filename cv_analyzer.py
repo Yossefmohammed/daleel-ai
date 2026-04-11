@@ -1,63 +1,101 @@
-"""
-CV Analyzer Module
-Analyzes PDF CVs and extracts skills, experience, education, technologies.
-"""
-
-import os
-import json
-from pypdf import PdfReader
+"""cv_analyzer.py — rich structured CV analysis with impact scores."""
+import os, json, re
 from groq import Groq
+from constant import GROQ_MODEL, GROQ_MODEL_FALLBACK, CV_TEXT_LIMIT
 
+def _extract_text(pdf_path: str) -> str:
+    for extractor in [_fitz, _pdfplumber, _pypdf]:
+        try:
+            text = extractor(pdf_path)
+            if text and text.strip() and not text.startswith("ERROR"):
+                return text
+        except Exception:
+            pass
+    return "ERROR: Could not extract PDF text."
+
+def _fitz(p):
+    import fitz
+    doc = fitz.open(p)
+    t   = "\n".join(page.get_text() for page in doc)
+    doc.close()
+    return t
+
+def _pdfplumber(p):
+    import pdfplumber
+    with pdfplumber.open(p) as pdf:
+        return "\n".join(pg.extract_text() or "" for pg in pdf.pages)
+
+def _pypdf(p):
+    from pypdf import PdfReader
+    return "\n".join(pg.extract_text() or "" for pg in PdfReader(p).pages)
+
+def _parse_json(raw: str) -> dict:
+    raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`")
+    try:    return json.loads(raw)
+    except Exception: pass
+    m = re.search(r'\{[\s\S]+\}', raw)
+    if m:
+        try: return json.loads(m.group())
+        except Exception: pass
+    return {}
+
+SCHEMA = """{
+  "name": "candidate name or empty",
+  "overall_score": <1-100 integer>,
+  "seniority_level": "junior|mid|senior|lead|principal",
+  "years_experience": <number>,
+  "skills": {
+    "languages":    ["list"],
+    "frameworks":   ["list"],
+    "databases":    ["list"],
+    "cloud_devops": ["list"],
+    "soft_skills":  ["list"]
+  },
+  "experience": [
+    {
+      "title":        "job title",
+      "company":      "company",
+      "duration":     "e.g. 2 years",
+      "impact_score": <1-10 integer>,
+      "highlights":   ["key achievement"]
+    }
+  ],
+  "education": [{"degree":"","field":"","school":"","year":""}],
+  "skill_gaps":            ["skills missing for next level"],
+  "rewrite_suggestions":   ["concrete CV improvements, max 4"],
+  "market_fit_roles":      ["3-5 suited roles"],
+  "summary": "2-sentence honest professional summary"
+}"""
 
 class CVAnalyzer:
     def __init__(self):
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY not found in environment variables")
-        self.client = Groq(api_key=api_key)
-        self.model = "llama-3.3-70b-versatile"
-
-    def extract_text_from_pdf(self, pdf_path: str) -> str:
-        try:
-            reader = PdfReader(pdf_path)
-            return "\n".join(page.extract_text() or "" for page in reader.pages)
-        except Exception as e:
-            return f"Error reading PDF: {e}"
+        key = os.getenv("GROQ_API_KEY", "")
+        if not key:
+            raise ValueError("GROQ_API_KEY not set")
+        self.client = Groq(api_key=key)
 
     def analyze_cv(self, pdf_path: str) -> dict:
-        cv_text = self.extract_text_from_pdf(pdf_path)
-        if cv_text.startswith("Error"):
-            return {"success": False, "error": cv_text}
+        text = _extract_text(pdf_path)
+        if text.startswith("ERROR"):
+            return {"success": False, "error": text}
 
-        prompt = f"""Analyze this CV and return ONLY a valid JSON object with exactly these keys:
-{{
-  "skills": ["list of technical and soft skills"],
-  "experience": [{{"title": "job title", "company": "company name", "duration": "e.g. 2 years"}}],
-  "education": [{{"degree": "degree", "field": "field of study", "school": "institution name"}}],
-  "technologies": ["programming languages, frameworks, tools"],
-  "seniority_level": "junior or mid or senior",
-  "summary": "2-3 sentence professional summary"
-}}
+        prompt = (
+            "You are an expert technical recruiter. Analyze this CV.\n"
+            "Return ONLY a valid JSON object — no markdown, no prose.\n\n"
+            f"CV TEXT:\n{text[:CV_TEXT_LIMIT]}\n\n"
+            f"JSON SCHEMA (fill every field):\n{SCHEMA}"
+        )
 
-CV Content:
-{cv_text[:3000]}
-
-Return ONLY the JSON object, no markdown, no extra text."""
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=1000,
-            )
-            raw = response.choices[0].message.content.strip()
-            # Try to parse as JSON for structured display
+        for model in [GROQ_MODEL, GROQ_MODEL_FALLBACK]:
             try:
-                parsed = json.loads(raw)
-                return {"success": True, "analysis": parsed}
-            except json.JSONDecodeError:
-                # Return raw string if JSON parse fails
-                return {"success": True, "analysis": raw}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+                r = self.client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.15, max_tokens=1400,
+                )
+                parsed = _parse_json(r.choices[0].message.content)
+                if parsed:
+                    return {"success": True, "analysis": parsed}
+            except Exception:
+                continue
+        return {"success": False, "error": "All models failed."}
