@@ -301,49 +301,24 @@ section.main > div { padding: 0 !important; }
 .t-dot:nth-child(3) { animation-delay: .4s; }
 @keyframes tdot { 0%,60%,100%{opacity:.3;transform:scale(.85)} 30%{opacity:1;transform:scale(1.1)} }
 
-/* ── Input ── */
-.inp-wrap { background: #212121; padding: 10px 0 18px; }
-.inp-inner { max-width: 680px; margin: 0 auto; padding: 0 24px; }
-.inp-shell {
-    background: #2f2f2f;
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 14px;
-    padding: 6px 8px 6px 16px;
-    display: flex; align-items: flex-end; gap: 8px;
-    transition: border-color .2s;
+/* ── Input (using st.chat_input, minimal overrides) ── */
+.stChatInput {
+    padding-bottom: 18px !important;
 }
-.inp-shell:focus-within { border-color: rgba(155,138,251,.4); }
-
-.stTextArea textarea {
-    background: transparent !important; border: none !important;
-    outline: none !important; box-shadow: none !important;
-    color: #ececec !important; font-size: 14.5px !important;
+.stChatInput > div {
+    background: #2f2f2f !important;
+    border: 1px solid rgba(255,255,255,0.1) !important;
+    border-radius: 14px !important;
+}
+.stChatInput textarea {
+    background: transparent !important;
+    color: #ececec !important;
     font-family: 'Inter', sans-serif !important;
-    resize: none !important; line-height: 1.6 !important;
-    padding: 10px 0 !important; min-height: 22px !important;
-    caret-color: #9b8afb !important;
+    font-size: 14.5px !important;
 }
-.stTextArea textarea::placeholder { color: #4a4a60 !important; }
-.stTextArea textarea:focus { box-shadow: none !important; border: none !important; }
-.stTextArea [data-baseweb="textarea"] { background: transparent !important; border: none !important; }
-.stTextArea { margin: 0 !important; }
-[data-testid="stTextArea"] { margin: 0 !important; }
-
-/* Send button */
-.stButton > button {
-    background: #9b8afb !important; border: none !important;
-    border-radius: 9px !important;
-    width: 34px !important; height: 34px !important;
-    padding: 0 !important; font-size: 15px !important;
-    color: #fff !important; flex-shrink: 0 !important;
-    min-width: unset !important; margin-bottom: 5px !important;
-    transition: background .15s !important;
-    box-shadow: none !important; transform: none !important;
+.stChatInput textarea::placeholder {
+    color: #4a4a60 !important;
 }
-.stButton > button:hover { background: #8572f0 !important; box-shadow: none !important; transform: none !important; }
-.stButton > button:active { transform: scale(.97) !important; }
-
-.inp-note { text-align: center; font-size: 11.5px; color: #333348; margin-top: 8px; }
 </style>
 """
 
@@ -396,16 +371,15 @@ def md_to_html(text):
     # H3
     text = re.sub(r'^### (.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
 
-    # Bullet lists
+    # Bullet lists (allow optional space after bullet)
     lines = text.split('\n')
     out, in_ul = [], False
     for line in lines:
-        if re.match(r'^[-•]\s(.+)', line):
+        if re.match(r'^[-•]\s?', line):
             if not in_ul:
                 out.append('<ul>')
                 in_ul = True
-            # 🔁 Fix: move substitution outside f-string
-            cleaned = re.sub(r'^[-•]\s', '', line)
+            cleaned = re.sub(r'^[-•]\s?', '', line)
             out.append(f'<li>{cleaned}</li>')
         else:
             if in_ul:
@@ -419,11 +393,10 @@ def md_to_html(text):
     lines = '\n'.join(out).split('\n')
     out, in_ol = [], False
     for line in lines:
-        if re.match(r'^\d+\.\s(.+)', line):
+        if re.match(r'^\d+\.\s', line):
             if not in_ol:
                 out.append('<ol>')
                 in_ol = True
-            # 🔁 Fix: move substitution outside f-string
             cleaned = re.sub(r'^\d+\.\s', '', line)
             out.append(f'<li>{cleaned}</li>')
         else:
@@ -545,16 +518,6 @@ def render_bot(text):
         unsafe_allow_html=True,
     )
 
-def render_typing():
-    st.markdown(
-        '<div class="typing-block">'
-        '<div class="bot-av">P</div>'
-        '<div class="t-dots">'
-        '<div class="t-dot"></div><div class="t-dot"></div><div class="t-dot"></div>'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
-
 def render_welcome(sid):
     meta = SERVICE_META[sid]
     svc  = SERVICES[sid]
@@ -575,21 +538,20 @@ def handle_send(user_msg, sid):
     conv = st.session_state.conversations[sid]
     conv.append({"role":"user","content":user_msg,"ts":now_ts()})
 
+    # Greeting shortcut
     if is_greeting(user_msg) and len(conv) <= 2:
         reply = greeting_reply()
         conv.append({"role":"assistant","content":reply,"ts":now_ts()})
         save_csv(sid, user_msg, reply)
-        st.rerun()
         return
 
     llm = st.session_state.llm or load_llm()
     if not llm:
         reply = "I need a GROQ_API_KEY to respond — add it to your .env file or Streamlit secrets."
         conv.append({"role":"assistant","content":reply,"ts":now_ts()})
-        st.rerun()
         return
-    st.session_state.llm = llm
 
+    st.session_state.llm = llm
     sys_prompt = SERVICE_META[sid]["system"]
 
     if sid == "rag" and RAG_OK:
@@ -616,7 +578,6 @@ def handle_send(user_msg, sid):
 
     conv.append({"role":"assistant","content":reply,"ts":now_ts()})
     save_csv(sid, user_msg, reply)
-    st.rerun()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -628,6 +589,11 @@ def main():
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
+        # API key warning
+        api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+        if not api_key:
+            st.error("⚠️ **GROQ_API_KEY missing**\n\nAdd to `.env` or Streamlit secrets.")
+
         st.markdown(
             '<div class="sb-brand">'
             '<div class="sb-gem">✦</div>'
@@ -674,10 +640,12 @@ def main():
                             result = CVAnalyzer().analyze_cv(tmp)
                             os.remove(tmp)
                             if result.get("success"):
+                                # This will trigger a send without needing user to type
                                 handle_send(
                                     f"I uploaded my CV. Extracted data:\n{json.dumps(result.get('analysis',{}), indent=2)}\nGive me a full honest analysis.",
                                     "cv",
                                 )
+                                st.rerun()
                             else:
                                 st.error(result.get("error","Unknown error"))
                         except Exception as e:
@@ -700,6 +668,7 @@ def main():
                                     f"GitHub @{gh_user}:\n{json.dumps(result, indent=2)}\nGive me a full profile analysis.",
                                     "github",
                                 )
+                                st.rerun()
                             else:
                                 st.error(result.get("error","Unknown error"))
                         except Exception as e:
@@ -724,31 +693,11 @@ def main():
                 render_bot(msg["content"])
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Input bar ─────────────────────────────────────────────────────────────
-    st.markdown(
-        '<div class="inp-wrap"><div class="inp-inner"><div class="inp-shell">',
-        unsafe_allow_html=True,
-    )
-    col_txt, col_btn = st.columns([12, 1])
-    with col_txt:
-        user_input = st.text_area(
-            "msg", key=f"inp_{sid}",
-            placeholder=SERVICE_META[sid]["placeholder"],
-            height=52, label_visibility="collapsed",
-        )
-    with col_btn:
-        st.markdown("<div style='padding-top:10px'>", unsafe_allow_html=True)
-        send = st.button("↑", key=f"send_{sid}")
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown(
-        '</div>'
-        '<div class="inp-note">PathIQ can make mistakes. Verify important career decisions.</div>'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
-
-    if send and user_input.strip():
+    # ── Chat input (Enter to send, auto‑clear) ─────────────────────────────────
+    user_input = st.chat_input(placeholder=SERVICE_META[sid]["placeholder"])
+    if user_input and user_input.strip():
         handle_send(user_input, sid)
+        st.rerun()
 
 
 if __name__ == "__main__":
