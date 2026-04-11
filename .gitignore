@@ -1,13 +1,35 @@
+# Environment
 .env
-.env.*
+.streamlit/secrets.toml
+
+# Database (auto-generated)
+db/
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-venv/
+
+# Temp files
+temp_*.pdf
+tmp_*.pdf
+
+# Data (large files)
+data/jobs.csv
+
+# Python
 .venv/
-.streamlit/secrets.toml
-chroma_db/
+venv/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
 .vscode/
 .idea/
-*.log
+
+# Chat logs (optional to exclude)
+# chat_history.csv
+# feedback.csv

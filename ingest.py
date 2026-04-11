@@ -1,119 +1,165 @@
 """
-ingest.py  (Graph RAG version)
-==============================
-Loads PDFs → splits into chunks → creates:
-  1. ChromaDB vector store  (unchanged, in ./db/)
-  2. Knowledge graph        (new,       in ./db/knowledge_graph.json)
+ingest.py — PathIQ Document Ingestion Pipeline
+===============================================
+Processes PDFs in docs/ folder, builds ChromaDB vector store
+and knowledge graph. Run once before starting the app.
 
-Run standalone:
+Usage:
     python ingest.py
+    python ingest.py --docs-dir /path/to/pdfs --chunk-size 600
 """
 
 import os
+import sys
 import time
+import argparse
 from pathlib import Path
 
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-
-from graph_builder import KnowledgeGraphBuilder
-
-
-# ── Config ─────────────────────────────────────────────────────────────────────
-
-DOCS_DIR   = "docs"
-DB_DIR     = "db"
-CHUNK_SIZE = 500
+# ── Config ───────────────────────────────────────────────────────────────────
+DB_DIR        = "db"
+DOCS_DIR      = "docs"
+EMBED_MODEL   = "sentence-transformers/all-mpnet-base-v2"
+CHUNK_SIZE    = 500
 CHUNK_OVERLAP = 100
-EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+def print_step(msg: str, icon: str = "→"):
+    print(f"\n{icon}  {msg}", flush=True)
 
-def ingest(progress_callback=None):
-    """
-    Full ingestion pipeline. Returns (n_chunks, graph_stats) or raises.
 
-    progress_callback(stage: str, pct: int) is called if provided.
-    Stages: 'loading', 'splitting', 'embedding', 'graph', 'done'
-    """
+def print_ok(msg: str):
+    print(f"   ✓  {msg}", flush=True)
 
-    def _cb(stage, pct):
-        if progress_callback:
-            progress_callback(stage, pct)
 
-    # 1. Discover PDFs
-    _cb("loading", 0)
-    docs_path = Path(DOCS_DIR)
+def print_err(msg: str):
+    print(f"   ✗  {msg}", flush=True)
+
+
+def run_ingestion(docs_dir: str = DOCS_DIR, chunk_size: int = CHUNK_SIZE):
+    start = time.time()
+
+    print("\n" + "═" * 55)
+    print("  PathIQ — Document Ingestion Pipeline")
+    print("═" * 55)
+
+    # ── Check imports ────────────────────────────────────────
+    print_step("Checking dependencies…")
+    try:
+        from langchain_community.document_loaders import PyPDFLoader
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        from langchain_community.vectorstores import Chroma
+        from langchain_community.embeddings import HuggingFaceEmbeddings
+        from graph_builder import KnowledgeGraphBuilder, GRAPH_PATH
+        print_ok("All dependencies available")
+    except ImportError as e:
+        print_err(f"Missing dependency: {e}")
+        print("\n  Run: pip install -r requirements.txt")
+        sys.exit(1)
+
+    # ── Scan for PDFs ────────────────────────────────────────
+    print_step(f"Scanning {docs_dir}/ for PDFs…")
+    docs_path = Path(docs_dir)
     docs_path.mkdir(exist_ok=True)
     pdf_files = list(docs_path.glob("**/*.pdf"))
+
     if not pdf_files:
-        raise FileNotFoundError(f"No PDF files found in '{DOCS_DIR}' folder.")
+        print_err(f"No PDF files found in {docs_dir}/")
+        print("\n  Add PDF files to the docs/ folder and re-run.")
+        sys.exit(1)
 
-    # 2. Load
-    all_documents = []
+    print_ok(f"Found {len(pdf_files)} PDF(s): {[f.name for f in pdf_files]}")
+
+    # ── Load PDFs ────────────────────────────────────────────
+    print_step("Loading and parsing PDFs…")
+    all_docs = []
     for i, pdf in enumerate(pdf_files):
-        loader = PyPDFLoader(str(pdf))
-        all_documents.extend(loader.load())
-        _cb("loading", int(20 * (i + 1) / len(pdf_files)))
+        try:
+            loader = PyPDFLoader(str(pdf))
+            pages  = loader.load()
+            all_docs.extend(pages)
+            print_ok(f"{pdf.name} → {len(pages)} pages")
+        except Exception as e:
+            print_err(f"Failed to load {pdf.name}: {e}")
 
-    _cb("splitting", 20)
+    if not all_docs:
+        print_err("No content extracted from PDFs")
+        sys.exit(1)
 
-    # 3. Split
+    # ── Chunk ────────────────────────────────────────────────
+    print_step(f"Splitting into chunks (size={chunk_size}, overlap={CHUNK_OVERLAP})…")
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
+        chunk_size=chunk_size,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", ". ", " ", ""],
     )
-    chunks = splitter.split_documents(all_documents)
+    chunks = splitter.split_documents(all_docs)
 
-    _cb("embedding", 40)
+    # Tag each chunk with an ID for graph retrieval
+    for i, chunk in enumerate(chunks):
+        chunk.metadata["chunk_id"] = f"chunk_{i}"
 
-    # 4. Embeddings + ChromaDB
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBED_MODEL, model_kwargs={"device": "cpu"}
-    )
-    db_path = Path(DB_DIR)
-    db_path.mkdir(exist_ok=True)
+    print_ok(f"{len(chunks)} chunks created")
 
-    db = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=str(db_path),
-    )
-    db.persist()
-
-    _cb("graph", 70)
-
-    # 5. Knowledge graph
-    builder = KnowledgeGraphBuilder()
-
-    def _graph_progress(done, total):
-        pct = 70 + int(25 * done / total)
-        _cb("graph", pct)
-
-    builder.build_from_documents(chunks, progress_callback=_graph_progress)
-
-    _cb("done", 100)
-
-    return len(chunks), builder.stats()
-
-
-# ── CLI entry point ────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    print("📚 Starting Graph RAG ingestion…")
-    t0 = time.time()
-
-    def cli_progress(stage, pct):
-        print(f"  [{pct:3d}%] {stage}")
+    # ── Embeddings + ChromaDB ────────────────────────────────
+    print_step(f"Building embeddings ({EMBED_MODEL})…")
+    print("  (This may take a few minutes on first run — model downloads ~420MB)")
 
     try:
-        n_chunks, stats = ingest(progress_callback=cli_progress)
-        elapsed = time.time() - t0
-        print(f"\n✅ Done in {elapsed:.1f}s")
-        print(f"   Chunks : {n_chunks}")
-        print(f"   Nodes  : {stats['nodes']}")
-        print(f"   Edges  : {stats['edges']}")
+        embeddings = HuggingFaceEmbeddings(
+            model_name=EMBED_MODEL,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print_err(f"Embedding model error: {e}")
+        sys.exit(1)
+
+    print_step("Storing in ChromaDB vector store…")
+    try:
+        Path(DB_DIR).mkdir(exist_ok=True)
+        db = Chroma.from_documents(
+            documents=chunks,
+            embedding=embeddings,
+            persist_directory=DB_DIR,
+            collection_metadata={"hnsw:space": "cosine"},
+        )
+        db.persist()
+        print_ok(f"ChromaDB: {len(chunks)} chunks stored in {DB_DIR}/")
+    except Exception as e:
+        print_err(f"ChromaDB error: {e}")
+        sys.exit(1)
+
+    # ── Knowledge graph ──────────────────────────────────────
+    print_step("Building knowledge graph…")
+    try:
+        builder = KnowledgeGraphBuilder()
+
+        processed = [0]
+        def progress(done, total):
+            if done % max(1, total // 10) == 0:
+                pct = round(done / total * 100)
+                print(f"  {pct}% ({done}/{total} chunks)", end="\r", flush=True)
+            processed[0] = done
+
+        builder.build_from_documents(chunks, progress_callback=progress)
+        stats = builder.stats()
+        print()
+        print_ok(f"Graph: {stats['nodes']} nodes, {stats['edges']} edges → {GRAPH_PATH}")
+    except Exception as e:
+        print_err(f"Graph build error: {e}")
+        print("  Vector store is ready — graph expansion disabled.")
+
+    # ── Done ─────────────────────────────────────────────────
+    elapsed = round(time.time() - start, 1)
+    print("\n" + "═" * 55)
+    print(f"  Ingestion complete in {elapsed}s")
+    print("  Run: streamlit run app.py")
+    print("═" * 55 + "\n")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PathIQ Document Ingestion")
+    parser.add_argument("--docs-dir",   default=DOCS_DIR,     help="PDF directory")
+    parser.add_argument("--chunk-size", default=CHUNK_SIZE, type=int, help="Chunk size")
+    args = parser.parse_args()
+    run_ingestion(docs_dir=args.docs_dir, chunk_size=args.chunk_size)

@@ -1,985 +1,864 @@
 """
-Career AI Assistant — Production App
-Every tab is a conversational service with word-by-word streaming.
-Graph RAG auto-builds on startup from scraped job data.
+PathIQ — Career Intelligence Platform
+======================================
+Rebuilt UI: professional dark design, service-based chat tabs,
+human-like streaming responses, Graph RAG backend.
 """
 
-import os, time, json
+import os
 import streamlit as st
 from dotenv import load_dotenv
+import json
+import csv
+import datetime
+import random
+import re
+import time
+from pathlib import Path
 
 load_dotenv()
 
-# ── Must be first Streamlit call ───────────────────────────────────────────────
+# ── Page config (must be first Streamlit call) ─────────────────────────────
 st.set_page_config(
-    page_title="Career AI",
-    page_icon="🚀",
+    page_title="PathIQ — Career Intelligence",
+    page_icon="✦",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# ── Professional dark UI ───────────────────────────────────────────────────────
-st.markdown("""
-<style>
-/* ── Reset & base ─────────────────────────────────────────── */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+# ── Lazy imports (graceful degradation if deps missing) ─────────────────────
+try:
+    from cv_analyzer import CVAnalyzer
+    CV_AVAILABLE = True
+except ImportError:
+    CV_AVAILABLE = False
 
-.stApp {
-    background: #0d0d1a;
-    color: #e2e8f0;
-    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+try:
+    from github_analyzer import GitHubAnalyzer
+    GH_AVAILABLE = True
+except ImportError:
+    GH_AVAILABLE = False
+
+try:
+    from job_matcher import JobMatcher
+    JM_AVAILABLE = True
+except ImportError:
+    JM_AVAILABLE = False
+
+try:
+    from graph_builder import KnowledgeGraphBuilder, GRAPH_PATH
+    from graph_retriever import GraphRetriever
+    from langchain_community.vectorstores import Chroma
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from langchain_core.prompts import PromptTemplate
+    from langchain_community.document_loaders import PyPDFLoader
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
+
+# ── Constants ───────────────────────────────────────────────────────────────
+DB_DIR        = "db"
+EMBED_MODEL   = "sentence-transformers/all-mpnet-base-v2"
+CHUNK_SIZE    = 500
+CHUNK_OVERLAP = 100
+
+SERVICES = {
+    "cv":     {"label": "CV Analyzer",      "icon": "📄", "color": "#7c6af5"},
+    "github": {"label": "Code Profile",     "icon": "💻", "color": "#2dd4c4"},
+    "jobs":   {"label": "Job Matcher",      "icon": "🎯", "color": "#f5a623"},
+    "assess": {"label": "Full Assessment",  "icon": "📊", "color": "#f56c6c"},
+    "rag":    {"label": "Knowledge Chat",   "icon": "🧠", "color": "#56d19e"},
 }
 
-/* ── Hide Streamlit chrome ────────────────────────────────── */
-#MainMenu, footer, header,
+# ── Inject full custom UI CSS ────────────────────────────────────────────────
+def inject_css():
+    st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+/* ── Reset & base ── */
+*, *::before, *::after { box-sizing: border-box; }
+html, body, [data-testid="stAppViewContainer"],
+[data-testid="stApp"], .main { background: #0a0a0f !important; }
+
+/* Hide Streamlit chrome */
+#MainMenu, header, footer,
 [data-testid="stToolbar"],
 [data-testid="stDecoration"],
-[data-testid="collapsedControl"] { display: none !important; }
+[data-testid="stStatusWidget"]        { display: none !important; }
+[data-testid="collapsedControl"]      { display: none !important; }
+.block-container                      { padding: 0 !important; max-width: 100% !important; }
+section.main > div                    { padding: 0 !important; }
 
-/* ── Sidebar ──────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-    background: #0a0a14 !important;
-    border-right: 1px solid #1e2a4a !important;
-    padding-top: 0 !important;
-}
-[data-testid="stSidebar"] * { color: #94a3b8 !important; }
-[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 { color: #38bdf8 !important; }
-
-/* ── Tab bar ──────────────────────────────────────────────── */
-.stTabs [data-baseweb="tab-list"] {
-    background: #111827 !important;
-    border-bottom: 1px solid #1e2a4a !important;
-    gap: 0 !important;
-    padding: 0 8px !important;
-}
-.stTabs [data-baseweb="tab"] {
-    background: transparent !important;
-    color: #64748b !important;
-    font-size: 0.85rem !important;
-    font-weight: 500 !important;
-    padding: 12px 18px !important;
-    border-bottom: 2px solid transparent !important;
-    border-radius: 0 !important;
-    transition: all .2s !important;
-}
-.stTabs [aria-selected="true"] {
-    color: #38bdf8 !important;
-    border-bottom-color: #38bdf8 !important;
-    background: transparent !important;
-}
-.stTabs [data-baseweb="tab"]:hover { color: #94a3b8 !important; }
-
-/* ── Chat messages ─────────────────────────────────────────── */
-.stChatMessage {
-    background: transparent !important;
-    border: none !important;
-    padding: 8px 0 !important;
-}
-[data-testid="stChatMessageContent"] {
-    color: #e2e8f0 !important;
-    font-size: 0.93rem !important;
-    line-height: 1.75 !important;
-}
-/* User bubble */
-[data-testid="stChatMessage"][data-testid*="user"] [data-testid="stChatMessageContent"] {
-    background: #1e3a5f !important;
-    border-radius: 18px 18px 4px 18px !important;
-    padding: 10px 16px !important;
-}
-/* Assistant bubble */
-[data-testid="stChatMessage"]:not([data-testid*="user"]) [data-testid="stChatMessageContent"] {
-    background: #161b2e !important;
-    border: 1px solid #1e2a4a !important;
-    border-radius: 18px 18px 18px 4px !important;
-    padding: 12px 16px !important;
+/* ── Design tokens ── */
+:root {
+  --ink:  #0a0a0f; --ink2: #12121c; --ink3: #1a1a28;
+  --ink4: #222234; --ink5: #2e2e48;
+  --line:  rgba(255,255,255,0.06);
+  --line2: rgba(255,255,255,0.10);
+  --line3: rgba(255,255,255,0.16);
+  --t1: #f0f0fa; --t2: #9898b8; --t3: #55556a;
+  --violet: #7c6af5; --violet2: #6458e8;
+  --violet-dim: rgba(124,106,245,0.10);
+  --violet-border: rgba(124,106,245,0.25);
+  --teal: #2dd4c4; --sage: #56d19e;
+  --amber: #f5a623; --rose: #f56c6c;
+  --r: 10px; --rs: 6px; --rl: 14px;
+  --ff: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-/* ── Chat input ────────────────────────────────────────────── */
-[data-testid="stChatInput"] {
-    background: #111827 !important;
-    border: 1px solid #1e2a4a !important;
-    border-radius: 14px !important;
-    padding: 4px 8px !important;
+/* ── Shell layout ── */
+.pathiq-shell {
+  display: flex; height: 100vh; overflow: hidden;
+  font-family: var(--ff); background: var(--ink);
 }
-[data-testid="stChatInput"] textarea {
-    background: transparent !important;
-    color: #e2e8f0 !important;
-    font-size: 0.92rem !important;
-    border: none !important;
-}
-[data-testid="stChatInput"] textarea::placeholder { color: #475569 !important; }
 
-/* ── Buttons ────────────────────────────────────────────────── */
+/* ── Sidebar ── */
+.pathiq-sidebar {
+  width: 220px; min-width: 220px;
+  background: var(--ink2); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.sb-brand {
+  padding: 18px 16px 14px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 10px;
+}
+.brand-gem {
+  width: 30px; height: 30px; border-radius: 9px;
+  background: var(--violet); display: flex; align-items: center;
+  justify-content: center; flex-shrink: 0;
+  font-size: 14px; font-weight: 700; color: #fff;
+}
+.brand-name { font-size: 13px; font-weight: 600; color: var(--t1); }
+.brand-sub  { font-size: 10px; color: var(--violet); margin-top: 1px;
+              background: var(--violet-dim); padding: 1px 6px;
+              border-radius: 20px; border: 1px solid var(--violet-border);
+              display: inline-block; font-weight: 500; }
+
+.sb-nav { flex: 1; overflow-y: auto; padding: 10px 8px; scrollbar-width: none; }
+.sb-nav::-webkit-scrollbar { display: none; }
+.sb-section { margin-bottom: 18px; }
+.sb-section-label {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--t3); padding: 0 8px 7px;
+}
+.sb-btn {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; padding: 8px 10px; border-radius: var(--rs);
+  border: none; background: transparent; cursor: pointer;
+  color: var(--t2); font-size: 12.5px; font-family: var(--ff);
+  font-weight: 500; text-align: left; transition: all .15s;
+}
+.sb-btn:hover { background: var(--ink4); color: var(--t1); }
+.sb-btn.active {
+  background: var(--violet-dim); color: var(--violet);
+  border: 1px solid var(--violet-border);
+}
+.sb-btn.disabled { opacity: .35; cursor: not-allowed; pointer-events: none; }
+.sb-icon {
+  width: 28px; height: 28px; border-radius: var(--rs);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; flex-shrink: 0;
+  background: var(--ink4);
+}
+.sb-btn.active .sb-icon { background: rgba(124,106,245,.18); }
+.sb-pill {
+  font-size: 9px; padding: 2px 6px; border-radius: 20px;
+  font-weight: 600; margin-left: auto;
+}
+.pill-live { background: rgba(45,212,196,.1); color: var(--teal);
+             border: 1px solid rgba(45,212,196,.2); }
+.pill-soon { background: var(--ink4); color: var(--t3);
+             border: 1px solid var(--line2); }
+
+.sb-foot {
+  padding: 12px; border-top: 1px solid var(--line);
+}
+.status-row {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; color: var(--t3); margin-bottom: 8px;
+}
+.pulse {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--sage); flex-shrink: 0;
+  animation: blink 2.4s ease-in-out infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* ── Main panel ── */
+.pathiq-main {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--ink);
+}
+
+/* ── Top tab bar ── */
+.pathiq-tabs {
+  height: 46px; background: var(--ink2);
+  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center;
+  padding: 0 16px; gap: 0; overflow-x: auto;
+  scrollbar-width: none; flex-shrink: 0;
+}
+.pathiq-tabs::-webkit-scrollbar { display: none; }
+.tab-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 14px; height: 46px; cursor: pointer;
+  border: none; background: transparent;
+  color: var(--t3); font-size: 12px; font-weight: 500;
+  font-family: var(--ff); white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: all .15s; flex-shrink: 0;
+}
+.tab-btn:hover  { color: var(--t2); }
+.tab-btn.active { color: var(--violet); border-bottom-color: var(--violet); }
+.tab-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--t3); flex-shrink: 0;
+}
+.tab-btn.active .tab-dot { background: var(--violet); }
+
+/* ── Chat feed ── */
+.pathiq-feed {
+  flex: 1; overflow-y: auto; padding: 20px 18px;
+  scrollbar-width: thin; scrollbar-color: var(--line2) transparent;
+}
+.pathiq-feed::-webkit-scrollbar { width: 3px; }
+.pathiq-feed::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 3px; }
+
+/* Service banner */
+.svc-banner {
+  background: var(--ink3); border: 1px solid var(--line);
+  border-radius: var(--rl); padding: 16px 18px; margin-bottom: 22px;
+  display: flex; gap: 12px; align-items: flex-start;
+}
+.svc-banner-icon {
+  width: 40px; height: 40px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; flex-shrink: 0;
+}
+.svc-banner-title { font-size: 14px; font-weight: 600; color: var(--t1); margin-bottom: 3px; }
+.svc-banner-desc  { font-size: 12px; color: var(--t3); line-height: 1.55; }
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.qchip {
+  font-size: 11px; padding: 5px 11px; border-radius: 20px;
+  border: 1px solid var(--line2); color: var(--t2);
+  background: var(--ink4); cursor: pointer; transition: all .15s;
+  font-family: var(--ff);
+}
+.qchip:hover {
+  border-color: var(--violet-border); color: var(--violet);
+  background: var(--violet-dim);
+}
+
+/* Messages */
+.msg-row { display: flex; gap: 10px; margin-bottom: 16px; animation: popIn .22s ease; }
+@keyframes popIn { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
+.msg-row.user { flex-direction: row-reverse; }
+.av {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 3px;
+}
+.av.bot { background: var(--violet); color: #fff; }
+.av.usr { background: var(--ink4); border: 1px solid var(--line2); color: var(--t2); }
+.bubble { max-width: 75%; }
+.bubble-inner {
+  padding: 11px 14px; border-radius: 14px;
+  font-size: 13px; line-height: 1.65; color: var(--t1);
+}
+.msg-row.bot .bubble-inner {
+  background: var(--ink3); border: 1px solid var(--line);
+  border-top-left-radius: 3px;
+}
+.msg-row.user .bubble-inner {
+  background: var(--violet2); border-top-right-radius: 3px; color: #fff;
+}
+.bubble-meta {
+  font-size: 10px; color: var(--t3); margin-top: 5px;
+  display: flex; align-items: center; gap: 5px;
+}
+.msg-row.user .bubble-meta { justify-content: flex-end; }
+.meta-sep { width: 3px; height: 3px; border-radius: 50%; background: var(--t3); }
+
+/* Typing dots */
+.typing-row { display: flex; gap: 10px; margin-bottom: 16px; }
+.typing-dots {
+  background: var(--ink3); border: 1px solid var(--line);
+  padding: 12px 16px; border-radius: 14px; border-top-left-radius: 3px;
+  display: flex; gap: 4px; align-items: center;
+}
+.td {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--t3); animation: tdot 1.1s ease-in-out infinite;
+}
+.td:nth-child(2){animation-delay:.18s}
+.td:nth-child(3){animation-delay:.36s}
+@keyframes tdot{0%,60%,100%{transform:translateY(0);opacity:.4}30%{transform:translateY(-4px);opacity:1}}
+
+/* Suggestion row */
+.sugg-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; margin-bottom: 4px; }
+.sugg {
+  font-size: 11px; padding: 6px 12px; border-radius: 20px;
+  border: 1px solid var(--line2); color: var(--t2);
+  background: var(--ink3); cursor: pointer; transition: all .15s;
+  font-family: var(--ff);
+}
+.sugg:hover { border-color: var(--violet-border); color: var(--violet); background: var(--violet-dim); }
+
+/* ── Input area ── */
+.pathiq-input {
+  flex-shrink: 0; padding: 12px 18px;
+  background: var(--ink2); border-top: 1px solid var(--line);
+}
+.ctx-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 9px;
+}
+.ctx-label {
+  font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  padding: 3px 9px; border-radius: 20px;
+  background: var(--violet-dim); color: var(--violet);
+  border: 1px solid var(--violet-border);
+}
+.ctx-model { font-size: 10px; color: var(--t3); }
+
+/* Override Streamlit form elements in input */
+.stTextArea textarea {
+  background: var(--ink3) !important;
+  border: 1px solid var(--line2) !important;
+  border-radius: var(--rl) !important;
+  color: var(--t1) !important;
+  font-size: 13px !important;
+  font-family: var(--ff) !important;
+  resize: none !important;
+  transition: border-color .15s !important;
+}
+.stTextArea textarea:focus {
+  border-color: var(--violet-border) !important;
+  box-shadow: none !important;
+}
 .stButton > button {
-    background: linear-gradient(135deg, #1d4ed8, #0ea5e9) !important;
-    color: #fff !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-weight: 600 !important;
-    font-size: 0.85rem !important;
-    padding: 8px 16px !important;
-    transition: all .2s !important;
+  background: var(--violet) !important;
+  border: none !important; border-radius: 8px !important;
+  color: #fff !important; font-weight: 600 !important;
+  font-size: 13px !important; padding: 10px 20px !important;
+  transition: background .15s !important;
 }
-.stButton > button:hover {
-    opacity: .88 !important;
-    transform: translateY(-1px) !important;
-}
-.stButton > button[kind="secondary"] {
-    background: #1e2a4a !important;
-    color: #94a3b8 !important;
-}
+.stButton > button:hover { background: var(--violet2) !important; }
 
-/* ── Inputs / selects ───────────────────────────────────────── */
-.stTextInput > div > input,
-.stTextArea > div > textarea,
-.stSelectbox > div > div,
-.stNumberInput > div > div > input {
-    background: #111827 !important;
-    color: #e2e8f0 !important;
-    border: 1px solid #1e2a4a !important;
-    border-radius: 10px !important;
-    font-size: 0.9rem !important;
-}
-.stMultiSelect > div { background: #111827 !important; border: 1px solid #1e2a4a !important; border-radius: 10px !important; }
+/* Streamlit metrics / info boxes */
+.stMetric { background: var(--ink3) !important; border-radius: var(--r) !important;
+            border: 1px solid var(--line) !important; padding: 12px !important; }
+[data-testid="metric-container"] label { color: var(--t3) !important; font-size: 11px !important; }
+[data-testid="metric-container"] [data-testid="stMetricValue"] { color: var(--t1) !important; }
 
-/* ── Metrics ────────────────────────────────────────────────── */
-[data-testid="stMetric"] {
-    background: #111827 !important;
-    border: 1px solid #1e2a4a !important;
-    border-radius: 12px !important;
-    padding: 14px !important;
-}
-[data-testid="stMetricLabel"] { color: #64748b !important; font-size: 0.8rem !important; }
-[data-testid="stMetricValue"] { color: #38bdf8 !important; font-size: 1.4rem !important; font-weight: 700 !important; }
-
-/* ── Alerts ─────────────────────────────────────────────────── */
-.stSuccess { background: #052e16 !important; border: 1px solid #16a34a !important; border-radius: 10px !important; color: #86efac !important; }
-.stWarning { background: #1c1008 !important; border: 1px solid #d97706 !important; border-radius: 10px !important; color: #fcd34d !important; }
-.stError   { background: #1c0a0a !important; border: 1px solid #dc2626 !important; border-radius: 10px !important; color: #fca5a5 !important; }
-.stInfo    { background: #0c1a2e !important; border: 1px solid #1d4ed8 !important; border-radius: 10px !important; color: #93c5fd !important; }
-
-/* ── Progress ────────────────────────────────────────────────── */
-.stProgress > div > div { background: #38bdf8 !important; }
-.stProgress { background: #1e2a4a !important; border-radius: 8px !important; }
-
-/* ── File uploader ────────────────────────────────────────────── */
-[data-testid="stFileUploader"] {
-    background: #111827 !important;
-    border: 2px dashed #1e2a4a !important;
-    border-radius: 12px !important;
-    padding: 20px !important;
-}
-
-/* ── Expander ─────────────────────────────────────────────────── */
-.streamlit-expanderHeader {
-    background: #111827 !important;
-    border: 1px solid #1e2a4a !important;
-    border-radius: 10px !important;
-    color: #94a3b8 !important;
-}
-.streamlit-expanderContent { background: #0d1117 !important; border: 1px solid #1e2a4a !important; border-top: none !important; border-radius: 0 0 10px 10px !important; }
-
-/* ── Divider ──────────────────────────────────────────────────── */
-hr { border-color: #1e2a4a !important; }
-
-/* ── Scrollbar ────────────────────────────────────────────────── */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #0d0d1a; }
-::-webkit-scrollbar-thumb { background: #1e2a4a; border-radius: 3px; }
+div[data-testid="stTabs"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Imports (after set_page_config) ───────────────────────────────────────────
-from cv_analyzer     import CVAnalyzer
-from github_analyzer import GitHubAnalyzer
-from job_matcher     import JobMatcher
-from constant        import GROQ_MODEL, GROQ_MODEL_FALLBACK, HISTORY_TURNS
 
-GROQ_KEY = os.getenv("GROQ_API_KEY", "")
-if not GROQ_KEY:
-    st.error("❌  `GROQ_API_KEY` not set. Add it to your `.env` file.")
-    st.stop()
-
-# ── Session state ──────────────────────────────────────────────────────────────
-SERVICES = ["chat", "cv", "github", "jobs", "scraper"]
-
-_defaults = {
-    **{f"msgs_{s}": None for s in SERVICES},
-    "cv_data":    None,   # analyzed CV dict
-    "gh_data":    None,   # analyzed GitHub dict
-    "rag_emb":    None,
-    "rag_chunks": None,
-    "rag_meta":   None,
-    "rag_graph":  None,
-    "rag_model":  None,
-    "rag_ready":  False,
-    "rag_attempted": False,
-}
-for k, v in _defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+# ── Session state bootstrap ──────────────────────────────────────────────────
+def init_state():
+    defaults = {
+        "active_service": "cv",
+        "conversations": {k: [] for k in SERVICES},
+        "cv_result": None,
+        "gh_result": None,
+        "job_result": None,
+        "llm": None,
+        "vectorstore": None,
+        "graph": None,
+        "auto_ingest_done": False,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
-# ── RAG auto-setup ─────────────────────────────────────────────────────────────
-def _setup_rag():
-    if st.session_state.rag_attempted:
-        return
-    st.session_state.rag_attempted = True
-
-    from rag_ingest import index_exists, data_is_newer_than_index, build_index, load_index, JOB_CSV_PATHS
-    from sentence_transformers import SentenceTransformer
-
-    data_ok = any(os.path.exists(p) for p in JOB_CSV_PATHS)
-
-    def _load():
-        emb, chunks, meta, graph = load_index()
-        model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-        st.session_state.rag_emb    = emb
-        st.session_state.rag_chunks = chunks
-        st.session_state.rag_meta   = meta
-        st.session_state.rag_graph  = graph
-        st.session_state.rag_model  = model
-        st.session_state.rag_ready  = True
-
-    # Fresh index — just load
-    if index_exists() and not data_is_newer_than_index():
-        try: _load(); return
-        except Exception: pass
-
-    # Stale or missing — build automatically
-    if data_ok:
-        bar  = st.sidebar.progress(0, text="⚙️ Building RAG index…")
-        info = st.sidebar.empty()
-        def _cb(pct, msg):
-            bar.progress(pct, text=msg); info.caption(msg)
-        try:
-            build_index(progress_callback=_cb)
-            _load()
-            bar.empty(); info.empty()
-        except Exception as e:
-            bar.empty(); info.empty()
-            st.sidebar.warning(f"RAG build: {e}")
-
-_setup_rag()
-
-rag_ready  = st.session_state.rag_ready
-job_count  = len(st.session_state.rag_chunks or [])
+# ── Helpers ──────────────────────────────────────────────────────────────────
+def ts():
+    return datetime.datetime.now().strftime("%H:%M")
 
 
-# ── LLM streaming helper ───────────────────────────────────────────────────────
-def _stream(system: str, history: list, placeholder) -> str:
-    from groq import Groq
-    client = Groq(api_key=GROQ_KEY)
-    full   = ""
-    for model in [GROQ_MODEL, GROQ_MODEL_FALLBACK]:
-        try:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": system}] + history,
-                temperature=0.72, max_tokens=1400, stream=True,
+def save_csv(q, a):
+    path = "chat_history.csv"
+    exists = os.path.isfile(path)
+    try:
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if not exists:
+                w.writerow(["Service", "Question", "Answer", "Time", "Date"])
+            w.writerow([
+                st.session_state.active_service, q, a,
+                datetime.datetime.now().strftime("%H:%M:%S"),
+                datetime.datetime.now().strftime("%Y-%m-%d"),
+            ])
+    except Exception:
+        pass
+
+
+def is_greeting(q: str) -> bool:
+    patterns = [r'\b(hi|hello|hey|greetings|howdy|yo|sup)\b',
+                r'how are you', r"what'?s up", r'good (morning|afternoon|evening)']
+    q = q.lower().strip()
+    if len(q.split()) <= 4:
+        for p in patterns:
+            if re.search(p, q):
+                return True
+    return False
+
+
+def greeting_reply() -> str:
+    return random.choice([
+        "Hey! Great to have you here. I'm PathIQ — your career intelligence assistant. What would you like to work on today?",
+        "Hello! I'm ready to help you level up your career. Which service would you like to start with — CV analysis, GitHub profile, or job matching?",
+        "Hi there! PathIQ at your service. Ask me anything about your career, CV, or job search.",
+    ])
+
+
+# ── LLM (Groq) ───────────────────────────────────────────────────────────────
+@st.cache_resource(ttl=3600)
+def load_llm():
+    try:
+        from groq import Groq
+    except ImportError:
+        return None
+
+    key = None
+    if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
+        key = st.secrets["GROQ_API_KEY"]
+    elif os.getenv("GROQ_API_KEY"):
+        key = os.getenv("GROQ_API_KEY")
+    if not key:
+        return None
+
+    client = Groq(api_key=key)
+    models = [
+        "llama-3.3-70b-versatile",
+        "deepseek-r1-distill-llama-70b",
+        "gemma2-9b-it",
+    ]
+
+    class GroqLLM:
+        def __init__(self, client, model):
+            self.client = client
+            self.model = model
+
+        def invoke(self, prompt, system=None):
+            sys_msg = system or (
+                "You are PathIQ, a world-class AI career intelligence assistant. "
+                "Be specific, warm, and structured. Use bullet points and bold "
+                "for key terms. Always end with a clear next-step question."
             )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    full += delta
-                    placeholder.markdown(full + "▌")
-            placeholder.markdown(full)
-            return full
+            try:
+                r = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": sys_msg},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.75,
+                    max_tokens=700,
+                    top_p=0.9,
+                )
+                return r.choices[0].message.content
+            except Exception as e:
+                return f"I ran into a small issue: {e}. Please try again!"
+
+    for model in models:
+        try:
+            llm = GroqLLM(client, model)
+            test = llm.invoke("Reply with: ready")
+            if test and "Error" not in test:
+                return llm
         except Exception:
             continue
-    full = "❌ Could not reach AI. Check your API key."
-    placeholder.error(full)
-    return full
+    return None
 
 
-# ── RAG context helper ─────────────────────────────────────────────────────────
-def _rag_context(query: str) -> str:
-    if not rag_ready:
-        return ""
+# ── Vector store ─────────────────────────────────────────────────────────────
+@st.cache_resource(ttl=3600)
+def load_vectorstore():
+    if not RAG_AVAILABLE:
+        return None
     try:
-        from rag_retriever import GraphRAGRetriever
-        r = GraphRAGRetriever(
-            st.session_state.rag_emb, st.session_state.rag_chunks,
-            st.session_state.rag_meta, st.session_state.rag_graph,
-            st.session_state.rag_model,
-        )
-        return r.get_context_string(query)
+        emb = HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device": "cpu"})
+        if os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3")):
+            return Chroma(embedding_function=emb, persist_directory=DB_DIR)
     except Exception:
-        return ""
+        pass
+    return None
 
 
-# ── Chat renderer (shared) ─────────────────────────────────────────────────────
-def render_chat(service: str, system_fn, placeholder_text: str,
-                suggestions: list | None = None):
-    """
-    Renders a full chat interface for a given service.
-    system_fn(query) → system prompt string
-    """
-    key = f"msgs_{service}"
-    if st.session_state[key] is None:
-        st.session_state[key] = []
+@st.cache_resource(ttl=3600)
+def load_graph():
+    if not RAG_AVAILABLE:
+        return None
+    try:
+        builder = KnowledgeGraphBuilder()
+        if builder.load():
+            return builder.G
+    except Exception:
+        pass
+    return None
 
-    # Render history
-    for msg in st.session_state[key]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
 
-    # Quick suggestion buttons
-    if suggestions and not st.session_state[key]:
-        st.markdown(
-            "<p style='color:#475569;font-size:0.82rem;margin:16px 0 8px;'>Try asking:</p>",
+# ── Human-like streaming response ────────────────────────────────────────────
+def stream_response(placeholder, text: str):
+    """Stream text word-by-word into a Streamlit placeholder."""
+    words = text.split(" ")
+    displayed = ""
+    for i, word in enumerate(words):
+        displayed += ("" if i == 0 else " ") + word
+        placeholder.markdown(
+            f'<div class="bubble-inner" style="background:var(--ink3);border:1px solid var(--line);'
+            f'border-radius:14px;border-top-left-radius:3px;font-size:13px;line-height:1.65;'
+            f'color:var(--t1);padding:11px 14px">{displayed}▌</div>',
             unsafe_allow_html=True,
         )
-        cols = st.columns(min(len(suggestions), 3))
-        for i, s in enumerate(suggestions):
-            if cols[i % 3].button(s, key=f"sug_{service}_{i}", use_container_width=True):
-                st.session_state[key].append({"role": "user", "content": s})
+        # Variable delay: faster for common words, slight pause at punctuation
+        delay = 0.025
+        if word.endswith((".", "!", "?")):
+            delay = 0.12
+        elif word.endswith(","):
+            delay = 0.06
+        time.sleep(delay)
+    # Final render without cursor
+    placeholder.markdown(
+        f'<div class="bubble-inner" style="background:var(--ink3);border:1px solid var(--line);'
+        f'border-radius:14px;border-top-left-radius:3px;font-size:13px;line-height:1.65;'
+        f'color:var(--t1);padding:11px 14px">{displayed}</div>',
+        unsafe_allow_html=True,
+    )
+    return displayed
+
+
+# ── Render conversation ───────────────────────────────────────────────────────
+def render_messages(service_id: str):
+    msgs = st.session_state.conversations[service_id]
+    for m in msgs:
+        if m["role"] == "user":
+            st.markdown(
+                f'<div class="msg-row user">'
+                f'<div class="av usr">ME</div>'
+                f'<div class="bubble">'
+                f'<div class="bubble-inner" style="background:#6458e8;border-top-right-radius:3px;color:#fff">'
+                f'{m["content"]}</div>'
+                f'<div class="bubble-meta" style="justify-content:flex-end">{m["ts"]}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div class="msg-row bot">'
+                f'<div class="av bot">P</div>'
+                f'<div class="bubble">'
+                f'<div class="bubble-inner">{m["content"]}</div>'
+                f'<div class="bubble-meta">PathIQ <span class="meta-sep"></span> {m["ts"]}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+
+
+# ── Service banners ───────────────────────────────────────────────────────────
+SERVICE_META = {
+    "cv": {
+        "title": "CV Analyzer",
+        "color": "#7c6af5",
+        "icon": "📄",
+        "desc": "Upload your CV and I'll extract your skill fingerprint, experience level, achievement gaps, and tell you exactly what to rewrite.",
+        "chips": ["Analyze my CV", "What skills am I missing?", "How senior am I?", "Rewrite my summary"],
+    },
+    "github": {
+        "title": "Code Profile",
+        "color": "#2dd4c4",
+        "icon": "💻",
+        "desc": "Share your GitHub username and I'll score your repositories, language diversity, and contribution quality — then show you how to level up.",
+        "chips": ["Analyze my GitHub", "Score my profile", "Best repos to pin", "Improve documentation"],
+    },
+    "jobs": {
+        "title": "Job Matcher",
+        "color": "#f5a623",
+        "icon": "🎯",
+        "desc": "Tell me your skills and experience. I'll match you against thousands of live postings and explain your fit score for each role.",
+        "chips": ["Find matching jobs", "I have 4 years Python", "Senior backend remote", "Highest-paying roles for me"],
+    },
+    "assess": {
+        "title": "Full Assessment",
+        "color": "#f56c6c",
+        "icon": "📊",
+        "desc": "I synthesize your CV, GitHub, and job market data into a structured PathIQ Career Intelligence Report with a clear 30-day action plan.",
+        "chips": ["Generate my full report", "Career gap analysis", "30-day action plan", "What should I do next?"],
+    },
+    "rag": {
+        "title": "Knowledge Chat",
+        "color": "#56d19e",
+        "icon": "🧠",
+        "desc": "Graph RAG hybrid retrieval — vector similarity + knowledge graph traversal — answers questions across your entire document base.",
+        "chips": ["What services does Wasla offer?", "How does Graph RAG work?", "API documentation", "Deployment guide"],
+    },
+}
+
+
+def render_banner(sid: str):
+    meta = SERVICE_META[sid]
+    chips_html = "".join(
+        f'<button class="qchip" onclick="window.parent.document.getElementById(\'pathiq_chip_{i}\').click()">'
+        f'{c}</button>'
+        for i, c in enumerate(meta["chips"])
+    )
+    st.markdown(
+        f'<div class="svc-banner">'
+        f'<div class="svc-banner-icon" style="background:{meta["color"]}22">{meta["icon"]}</div>'
+        f'<div>'
+        f'<div class="svc-banner-title">{meta["title"]}</div>'
+        f'<div class="svc-banner-desc">{meta["desc"]}</div>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+    # Render chips as Streamlit buttons in a horizontal row
+    cols = st.columns(len(meta["chips"]))
+    for i, (col, chip) in enumerate(zip(cols, meta["chips"])):
+        with col:
+            if st.button(chip, key=f"chip_{sid}_{i}_{chip[:8]}", use_container_width=True):
+                handle_input(chip, sid)
+
+
+# ── Core response logic per service ──────────────────────────────────────────
+def handle_input(user_msg: str, sid: str):
+    if not user_msg.strip():
+        return
+
+    conv = st.session_state.conversations[sid]
+    conv.append({"role": "user", "content": user_msg, "ts": ts()})
+
+    # Greeting shortcut
+    if is_greeting(user_msg) and len(conv) <= 2:
+        reply = greeting_reply()
+        conv.append({"role": "assistant", "content": reply, "ts": ts()})
+        save_csv(user_msg, reply)
+        st.rerun()
+        return
+
+    llm = st.session_state.get("llm") or load_llm()
+    if not llm:
+        st.session_state.llm = None
+        conv.append({
+            "role": "assistant",
+            "content": "I need a Groq API key to respond. Please add GROQ_API_KEY to your .env or Streamlit secrets.",
+            "ts": ts(),
+        })
+        st.rerun()
+        return
+
+    st.session_state.llm = llm
+
+    # Build service-specific system prompt
+    system_prompts = {
+        "cv": (
+            "You are PathIQ's CV Analyzer — a world-class career consultant. "
+            "Analyze CVs with precision. Be specific: name real skills, flag real gaps, "
+            "suggest concrete rewrites. Use bold for key points, bullet points for lists. "
+            "End every response with one sharp follow-up question."
+        ),
+        "github": (
+            "You are PathIQ's Code Profile analyzer. You assess GitHub profiles like a "
+            "senior engineering recruiter. Score profiles across: consistency, depth, "
+            "visibility, documentation quality. Give concrete improvement steps. "
+            "End with a specific actionable question."
+        ),
+        "jobs": (
+            "You are PathIQ's Job Matcher. Match users to roles based on their skills. "
+            "Give match percentages, explain why they fit, identify skill gaps. "
+            "Be specific about company types, salary ranges, and growth trajectories. "
+            "End with a targeted next-step question."
+        ),
+        "assess": (
+            "You are PathIQ's Full Assessment engine. Synthesize CV, GitHub, and market data "
+            "into a structured career intelligence report. Use sections: Profile Score, "
+            "CV Score, GitHub Score, Market Fit, 30-Day Action Plan. Be thorough and precise."
+        ),
+        "rag": (
+            "You are PathIQ's Knowledge Chat powered by Graph RAG. Answer questions from "
+            "the company knowledge base. Be precise, cite document context when available, "
+            "and clearly state when something isn't in the knowledge base."
+        ),
+    }
+
+    # For RAG service, use graph retrieval if available
+    if sid == "rag" and RAG_AVAILABLE:
+        vs = st.session_state.get("vectorstore") or load_vectorstore()
+        g  = st.session_state.get("graph")      or load_graph()
+        if vs and g:
+            try:
+                retriever = GraphRetriever(vectorstore=vs, graph=g, k=5, graph_k=5, hop_depth=2)
+                docs = retriever.get_relevant_documents(user_msg)
+                context = "\n\n".join(f"[Doc {i+1}]: {d.page_content}" for i, d in enumerate(docs))
+                prompt = f"Context from knowledge base:\n{context}\n\nUser question: {user_msg}"
+            except Exception:
+                prompt = user_msg
+        else:
+            prompt = user_msg
+    else:
+        # Build conversation context
+        history = "\n".join(
+            f"{'User' if m['role']=='user' else 'PathIQ'}: {m['content']}"
+            for m in conv[-6:]
+        )
+        prompt = f"Conversation so far:\n{history}\n\nRespond to the latest user message."
+
+    with st.spinner(""):
+        reply = llm.invoke(prompt, system=system_prompts.get(sid))
+
+    conv.append({"role": "assistant", "content": reply, "ts": ts()})
+    save_csv(user_msg, reply)
+    st.rerun()
+
+
+# ── Main app ─────────────────────────────────────────────────────────────────
+def main():
+    init_state()
+    inject_css()
+
+    # ── Sidebar ──
+    with st.sidebar:
+        st.markdown(
+            '<div class="sb-brand">'
+            '<div class="brand-gem">✦</div>'
+            '<div><div class="brand-name">PathIQ</div>'
+            '<div class="brand-sub">Career Intelligence</div></div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown('<div class="sb-section"><div class="sb-section-label">Core Services</div>', unsafe_allow_html=True)
+        for sid, meta in SERVICES.items():
+            active = "active" if st.session_state.active_service == sid else ""
+            if st.button(
+                f"{meta['icon']}  {meta['label']}",
+                key=f"sb_{sid}",
+                use_container_width=True,
+            ):
+                st.session_state.active_service = sid
                 st.rerun()
 
-    # Chat input
-    if prompt := st.chat_input(placeholder_text):
-        st.session_state[key].append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        st.markdown("---")
+        st.markdown('<div class="sb-section-label" style="padding-left:8px">Coming — Phase 2</div>', unsafe_allow_html=True)
+        for label in ["🎤  Mock Interview", "🔗  LinkedIn Optimizer", "🗺️  Skill Roadmap"]:
+            st.button(label, key=f"ph2_{label}", disabled=True, use_container_width=True)
 
-        history = [
-            {"role": m["role"], "content": m["content"]}
-            for m in st.session_state[key][-HISTORY_TURNS:]
-            if m["role"] in ("user", "assistant")
-        ]
-
-        with st.chat_message("assistant"):
-            ph  = st.empty()
-            sys = system_fn(prompt)
-            reply = _stream(sys, history, ph)
-
-        st.session_state[key].append({"role": "assistant", "content": reply})
-        st.rerun()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# HEADER
-# ══════════════════════════════════════════════════════════════════════════════
-col_logo, col_title, col_status = st.columns([1, 6, 3])
-with col_logo:
-    st.markdown(
-        "<div style='font-size:2.2rem;padding-top:8px;'>🚀</div>",
-        unsafe_allow_html=True,
-    )
-with col_title:
-    st.markdown(
-        "<h1 style='font-size:1.6rem;font-weight:800;"
-        "background:linear-gradient(135deg,#38bdf8,#818cf8);"
-        "-webkit-background-clip:text;-webkit-text-fill-color:transparent;"
-        "margin:8px 0 2px;'>Career AI Assistant</h1>"
-        "<p style='color:#475569;font-size:0.82rem;margin:0;'>"
-        "Graph RAG · CV Analysis · GitHub · Job Matching · Live Scraping</p>",
-        unsafe_allow_html=True,
-    )
-with col_status:
-    if rag_ready:
+        st.markdown("---")
         st.markdown(
-            f"<div style='text-align:right;padding-top:10px;'>"
-            f"<span style='background:#052e16;color:#86efac;border:1px solid #16a34a;"
-            f"border-radius:20px;padding:4px 12px;font-size:0.78rem;font-weight:600;'>"
-            f"🕸️ RAG Live · {job_count:,} jobs</span></div>",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            "<div style='text-align:right;padding-top:10px;'>"
-            "<span style='background:#1c1008;color:#fcd34d;border:1px solid #d97706;"
-            "border-radius:20px;padding:4px 12px;font-size:0.78rem;font-weight:600;'>"
-            "⚠️ RAG offline</span></div>",
+            '<div class="status-row"><div class="pulse"></div> Graph RAG · LLaMA 3.3-70b</div>',
             unsafe_allow_html=True,
         )
 
-st.markdown("<hr style='margin:8px 0 0;'>", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TABS
-# ══════════════════════════════════════════════════════════════════════════════
-t_chat, t_cv, t_gh, t_jobs, t_scrape = st.tabs([
-    "💬  Career Chat",
-    "📄  CV Analyzer",
-    "🐙  GitHub Profiler",
-    "💼  Job Matcher",
-    "🌐  Job Scraper",
-])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Career Chat  (Graph RAG grounded)
-# ══════════════════════════════════════════════════════════════════════════════
-with t_chat:
-    # Build user context string from other services
-    ctx = []
-    if st.session_state.cv_data:
-        a = st.session_state.cv_data.get("analysis", {})
-        if isinstance(a, dict):
-            ctx.append(
-                f"User CV: {a.get('name','')} | "
-                f"level={a.get('seniority_level','?')} | "
-                f"years={a.get('years_experience','?')} | "
-                f"score={a.get('overall_score','?')}/100 | "
-                f"skills={', '.join(a.get('skills',{}).get('languages',[]))}"
-            )
-    if st.session_state.gh_data:
-        p  = st.session_state.gh_data.get("profile",  {})
-        ga = st.session_state.gh_data.get("analysis", {})
-        ctx.append(
-            f"GitHub: {p.get('username','?')} | "
-            f"repos={p.get('public_repos','?')} | "
-            f"score={ga.get('overall_score','?') if isinstance(ga,dict) else '?'}/100 | "
-            f"readiness={ga.get('career_readiness','?') if isinstance(ga,dict) else '?'}"
-        )
-
-    def _chat_system(query):
-        rag = _rag_context(query)
-        user_ctx = f"\n\nUser context: {' | '.join(ctx)}" if ctx else ""
-        rag_block = (
-            f"\n\nREAL JOB DATA (Graph RAG):\n{rag}\n\n"
-            "Ground your answer in this data. Mention specific job titles and companies when relevant."
-        ) if rag else "\n\nNo job database loaded yet."
-
-        return (
-            "You are a senior career advisor — direct, specific, and human.\n"
-            "Rules: Never start with 'Certainly' or 'Of course'. No filler openers.\n"
-            "Give concrete advice. When writing cover letters or emails, write the full text.\n"
-            "Use bullet points only when listing 3+ items. Keep paragraphs short.\n"
-            f"{user_ctx}{rag_block}"
-        )
-
-    render_chat(
-        service          = "chat",
-        system_fn        = _chat_system,
-        placeholder_text = "Ask about jobs, career advice, or say 'write me a cover letter'…",
-        suggestions      = [
-            "What Python jobs are available right now?",
-            "Which companies are hiring remotely in Egypt?",
-            "Write a cover letter for a senior backend role",
-            "How do I negotiate a higher salary?",
-            "What skills should a data scientist learn in 2025?",
-            "Draft a LinkedIn message to a recruiter",
-        ],
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — CV Analyzer  (chat-driven)
-# ══════════════════════════════════════════════════════════════════════════════
-with t_cv:
-    col_up, col_info = st.columns([1, 1])
-    with col_up:
-        uploaded = st.file_uploader("Upload your CV (PDF)", type=["pdf"], label_visibility="collapsed")
-        if uploaded:
-            if st.button("🔍 Analyze CV", use_container_width=True):
-                temp = f"temp_{uploaded.name}"
-                try:
-                    with open(temp, "wb") as f: f.write(uploaded.getbuffer())
-                    with st.spinner("Reading your CV…"):
-                        result = CVAnalyzer().analyze_cv(temp)
-                    if result.get("success"):
-                        st.session_state.cv_data = result
-                        a = result["analysis"]
-                        # Push summary into chat history
-                        intro = (
-                            f"I've analyzed your CV. Here's what I found:\n\n"
-                            f"**Overall Score:** {a.get('overall_score','?')}/100\n"
-                            f"**Level:** {a.get('seniority_level','?').title()}\n"
-                            f"**Experience:** {a.get('years_experience','?')} years\n\n"
-                            f"**Top Skills:** {', '.join(a.get('skills',{}).get('languages',[]))}\n\n"
-                            f"**Summary:** {a.get('summary','')}\n\n"
-                            "What would you like to dig into? I can rewrite your summary, "
-                            "identify skill gaps, find matching jobs, or draft a cover letter."
-                        )
-                        st.session_state.msgs_cv = [{"role": "assistant", "content": intro}]
-                        st.rerun()
-                    else:
-                        st.error(result.get("error"))
-                except Exception as e:
-                    st.error(str(e))
-                finally:
-                    if os.path.exists(temp): os.remove(temp)
-
-    with col_info:
-        if st.session_state.cv_data:
-            a = st.session_state.cv_data.get("analysis", {})
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Score",   f"{a.get('overall_score','?')}/100")
-            c2.metric("Level",   a.get("seniority_level","?").title())
-            c3.metric("Years",   a.get("years_experience","?"))
-            # Impact scores
-            exp = a.get("experience", [])
-            if exp:
-                st.markdown(
-                    "<p style='color:#475569;font-size:0.8rem;margin:12px 0 4px;'>Role impact scores:</p>",
-                    unsafe_allow_html=True,
-                )
-                for role in exp:
-                    score = role.get("impact_score", 5)
-                    bar_w = int(score * 10)
-                    st.markdown(
-                        f"<div style='display:flex;align-items:center;gap:10px;margin:3px 0;'>"
-                        f"<span style='color:#94a3b8;font-size:0.78rem;width:160px;white-space:nowrap;"
-                        f"overflow:hidden;text-overflow:ellipsis;'>{role.get('title','?')[:25]}</span>"
-                        f"<div style='flex:1;background:#1e2a4a;border-radius:4px;height:8px;'>"
-                        f"<div style='width:{bar_w}%;background:#38bdf8;border-radius:4px;height:8px;'></div></div>"
-                        f"<span style='color:#38bdf8;font-size:0.78rem;'>{score}/10</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-        else:
-            st.markdown(
-                "<div style='padding:40px;text-align:center;color:#475569;'>"
-                "<div style='font-size:2.5rem;'>📄</div>"
-                "<p style='margin-top:8px;'>Upload your CV to get a full analysis,<br>"
-                "then chat about it below.</p></div>",
-                unsafe_allow_html=True,
-            )
-
-    st.markdown("<hr style='margin:12px 0;'>", unsafe_allow_html=True)
-
-    # CV chat
-    def _cv_system(query):
-        cv_ctx = ""
-        if st.session_state.cv_data:
-            a = st.session_state.cv_data.get("analysis", {})
-            cv_ctx = (
-                f"\n\nCV DATA:\n{json.dumps(a, indent=2)[:2000]}\n\n"
-                "Use this CV data to give specific, personalized answers."
-            )
-        return (
-            "You are a career coach specializing in CV improvement. Be direct and specific.\n"
-            "Never say 'Certainly' or 'Great question'. Just answer.\n"
-            "When rewriting CV sections, show the full rewritten text in a code block.\n"
-            f"{cv_ctx}"
-        )
-
-    render_chat(
-        service          = "cv",
-        system_fn        = _cv_system,
-        placeholder_text = "Ask about your CV, request rewrites, or explore career paths…",
-        suggestions      = [
-            "Rewrite my professional summary",
-            "What are my biggest skill gaps?",
-            "What roles am I best suited for?",
-            "How can I improve my overall score?",
-        ],
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — GitHub Profiler  (chat-driven)
-# ══════════════════════════════════════════════════════════════════════════════
-with t_gh:
-    col_in, col_stats = st.columns([1, 1])
-    with col_in:
-        uname = st.text_input("GitHub username", placeholder="e.g. torvalds", label_visibility="collapsed")
-        if st.button("🔍 Analyze Profile", use_container_width=True):
-            if not uname.strip():
-                st.warning("Enter a username.")
-            else:
-                with st.spinner("Fetching GitHub data…"):
-                    try:
-                        result = GitHubAnalyzer().analyze_github_profile(uname.strip())
-                        if result.get("success"):
-                            st.session_state.gh_data = result
-                            p  = result["profile"]
-                            ga = result["analysis"]
-                            intro = (
-                                f"Here's the analysis for **@{p.get('username','?')}**:\n\n"
-                                f"**Overall Score:** {ga.get('overall_score','?')}/100\n"
-                                f"**Career Readiness:** {ga.get('career_readiness','?').title()}\n"
-                                f"**Salary Band:** {ga.get('salary_band_usd','?')}\n\n"
-                                f"**Recruiter Verdict:** {ga.get('recruiter_verdict','')}\n\n"
-                                "What would you like to know more about? I can suggest "
-                                "improvements, compare to job requirements, or help write a GitHub bio."
-                            )
-                            st.session_state.msgs_github = [{"role": "assistant", "content": intro}]
-                            st.rerun()
-                        else:
-                            st.error(result.get("error"))
-                    except Exception as e:
-                        st.error(str(e))
-
-    with col_stats:
-        if st.session_state.gh_data:
-            p  = st.session_state.gh_data.get("profile",  {})
-            ga = st.session_state.gh_data.get("analysis", {})
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Followers",  p.get("followers",   0))
-            c2.metric("Repos",      p.get("public_repos",0))
-            c3.metric("Score",      f"{ga.get('overall_score','?')}/100")
-            # 5-dimension radar (progress bars)
-            if isinstance(ga, dict) and "scores" in ga:
-                dims = ga["scores"]
-                st.markdown(
-                    "<p style='color:#475569;font-size:0.8rem;margin:12px 0 4px;'>Dimension scores:</p>",
-                    unsafe_allow_html=True,
-                )
-                for dim, val in dims.items():
-                    bar_w = int(int(val) * 10) if str(val).isdigit() else 50
-                    st.markdown(
-                        f"<div style='display:flex;align-items:center;gap:10px;margin:3px 0;'>"
-                        f"<span style='color:#94a3b8;font-size:0.78rem;width:110px;'>{dim.title()}</span>"
-                        f"<div style='flex:1;background:#1e2a4a;border-radius:4px;height:8px;'>"
-                        f"<div style='width:{bar_w}%;background:#818cf8;border-radius:4px;height:8px;'></div></div>"
-                        f"<span style='color:#818cf8;font-size:0.78rem;'>{val}/10</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-            # Language chart
-            langs = p.get("languages", {})
-            if langs:
-                st.markdown(
-                    "<p style='color:#475569;font-size:0.8rem;margin:12px 0 4px;'>Top languages:</p>",
-                    unsafe_allow_html=True,
-                )
-                top = sorted(langs.items(), key=lambda x: x[1], reverse=True)[:6]
-                total_repos = sum(v for _, v in top) or 1
-                for lang, cnt in top:
-                    pct = int(cnt / total_repos * 100)
-                    st.markdown(
-                        f"<div style='display:flex;align-items:center;gap:10px;margin:3px 0;'>"
-                        f"<span style='color:#94a3b8;font-size:0.78rem;width:90px;'>{lang}</span>"
-                        f"<div style='flex:1;background:#1e2a4a;border-radius:4px;height:8px;'>"
-                        f"<div style='width:{pct}%;background:#0ea5e9;border-radius:4px;height:8px;'></div></div>"
-                        f"<span style='color:#0ea5e9;font-size:0.78rem;'>{cnt} repos</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-        else:
-            st.markdown(
-                "<div style='padding:40px;text-align:center;color:#475569;'>"
-                "<div style='font-size:2.5rem;'>🐙</div>"
-                "<p style='margin-top:8px;'>Enter a GitHub username to analyze<br>the profile, then chat about it.</p>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-
-    st.markdown("<hr style='margin:12px 0;'>", unsafe_allow_html=True)
-
-    def _gh_system(query):
-        gh_ctx = ""
-        if st.session_state.gh_data:
-            p  = st.session_state.gh_data.get("profile",  {})
-            ga = st.session_state.gh_data.get("analysis", {})
-            gh_ctx = (
-                f"\n\nGITHUB DATA:\n{json.dumps({'profile':p,'analysis':ga}, indent=2)[:2000]}\n\n"
-                "Use this to give specific, data-driven advice."
-            )
-        return (
-            "You are a senior engineering mentor reviewing a GitHub profile.\n"
-            "Be direct, specific, and actionable. No filler. Reference actual repo data.\n"
-            f"{gh_ctx}"
-        )
-
-    render_chat(
-        service          = "github",
-        system_fn        = _gh_system,
-        placeholder_text = "Ask about the GitHub profile, get improvement tips…",
-        suggestions      = [
-            "How can I improve my profile score?",
-            "Write a better GitHub bio for me",
-            "What projects would make me more hireable?",
-            "Compare this profile to what recruiters look for",
-        ],
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — Job Matcher  (chat-driven)
-# ══════════════════════════════════════════════════════════════════════════════
-with t_jobs:
-    # Quick profile form
-    with st.expander("⚙️ Set your profile (used for matching)", expanded=not bool(st.session_state.msgs_jobs)):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            skills_raw = st.text_area("Skills (one per line)", height=90,
-                                      placeholder="Python\nReact\nDocker")
-        with c2:
-            exp_yr  = st.number_input("Years experience", 0, 40, 2)
-            seniority = st.selectbox("Seniority", ["Junior","Mid-Level","Senior","Lead"])
-        with c3:
-            roles = st.multiselect("Target roles", [
-                "Full Stack Developer","Backend Engineer","Frontend Developer",
-                "Data Scientist","ML Engineer","DevOps Engineer","Product Manager",
-                "Mobile Developer","QA Engineer",
-            ])
-        if st.button("🔍 Match Jobs", use_container_width=True):
-            skills = [s.strip() for s in skills_raw.splitlines() if s.strip()]
-            if not skills:
-                st.warning("Add at least one skill.")
-            else:
-                profile = {"skills": skills, "experience_years": exp_yr,
-                           "seniority_level": seniority.lower(), "interested_roles": roles}
-                with st.spinner("Searching job database…"):
-                    try:
-                        result = JobMatcher().match_jobs(profile)
-                        if result.get("success"):
-                            m = result["matches"]
-                            jobs_list = m.get("jobs", []) if isinstance(m, dict) else []
-                            intro_parts = [
-                                f"Found **{len(jobs_list)} matches** for your profile.\n"
-                            ]
-                            for j in jobs_list[:3]:
-                                intro_parts.append(
-                                    f"**{j.get('job_title','?')}** at {j.get('company','?')} "
-                                    f"— Fit: {j.get('fit_score','?')}% | Priority: {j.get('apply_priority','?').upper()}\n"
-                                    f"_{j.get('why_fit','')}_\n"
-                                )
-                            if isinstance(m, dict):
-                                intro_parts.append(f"\n{m.get('summary','')}")
-                            intro_parts.append("\nAsk me to write an application email, explain a gap, or find more specific roles.")
-                            intro = "\n".join(intro_parts)
-                            st.session_state.msgs_jobs = [{"role": "assistant", "content": intro}]
-                            st.rerun()
-                        else:
-                            st.warning(result.get("error"))
-                    except Exception as e:
-                        st.error(str(e))
-
-    def _jobs_system(query):
-        rag = _rag_context(query)
-        rag_block = (f"\n\nJOB DATABASE (Graph RAG):\n{rag}"
-                     if rag else "\n\nNo job database loaded.")
-        cv_ctx = ""
-        if st.session_state.cv_data:
-            a = st.session_state.cv_data.get("analysis", {})
-            cv_ctx = (f"\n\nUser CV: seniority={a.get('seniority_level','?')}, "
-                      f"skills={', '.join(a.get('skills',{}).get('languages',[]))}")
-        return (
-            "You are a job search strategist. Give specific, actionable job hunting advice.\n"
-            "When the user asks about jobs, reference real listings from the database.\n"
-            "No filler openers. Be direct.\n"
-            f"{cv_ctx}{rag_block}"
-        )
-
-    render_chat(
-        service          = "jobs",
-        system_fn        = _jobs_system,
-        placeholder_text = "Ask about specific jobs, companies, or say 'write me an application email'…",
-        suggestions      = [
-            "What remote jobs pay over $80k?",
-            "Find Python jobs in Cairo",
-            "Write an email applying to a fintech startup",
-            "What companies are hiring senior developers?",
-        ],
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — Job Scraper  (chat-driven + manual controls)
-# ══════════════════════════════════════════════════════════════════════════════
-with t_scrape:
-    # DB status strip
-    db_path = next((p for p in ["data/jobs_combined.csv","data/jobs.csv"] if os.path.exists(p)), None)
-    if db_path:
-        try:
-            import pandas as pd
-            df_c = pd.read_csv(db_path)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Jobs in DB", f"{len(df_c):,}")
-            c2.metric("Sources",    df_c["source"].nunique() if "source" in df_c.columns else "—")
-            c3.metric("File",       db_path.split("/")[-1])
-            c4.metric("RAG",        "✅ Active" if rag_ready else "⚠️ Offline")
-        except Exception:
-            pass
-        st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
-
-    # Source controls (collapsed by default)
-    with st.expander("⚙️ Scraper settings", expanded=False):
-        ca, cb = st.columns(2)
-        with ca:
-            use_ro  = st.checkbox("🌍 RemoteOK",  value=True)
-            use_arb = st.checkbox("🇩🇪 Arbeitnow", value=True)
-            use_mu  = st.checkbox("🇺🇸 The Muse",  value=True)
-            use_wu  = st.checkbox("🇪🇬 Wuzzuf",    value=True)
-        with cb:
-            ro_lim = st.slider("RemoteOK jobs", 20, 200, 100, 20, disabled=not use_ro)
-            arb_pg = st.slider("Arbeitnow pages", 1, 10, 3, disabled=not use_arb)
-            mu_pg  = st.slider("Muse pages", 1, 5, 2, disabled=not use_mu)
-            wu_pg  = st.slider("Wuzzuf pages/keyword", 1, 5, 2, disabled=not use_wu)
-
-        wu_kw_raw = st.text_area(
-            "Wuzzuf keywords", height=55, disabled=not use_wu,
-            value="software engineer, python developer, data scientist, frontend developer, backend developer, devops",
-        )
-        wu_kw = [k.strip() for k in wu_kw_raw.split(",") if k.strip()]
-
-        if st.button("🚀 Start Scraping", use_container_width=True, type="primary"):
-            if not any([use_ro, use_arb, use_mu, use_wu]):
-                st.warning("Select at least one source.")
-            else:
-                prog = st.progress(0, text="Starting…")
-                lb   = st.empty(); logs: list = []
-                def log(msg):
-                    logs.append(msg)
-                    lb.markdown("\n".join(f"`{l}`" for l in logs[-8:]))
-                try:
-                    from data_scraper import (RemoteOKScraper, ArbeitnowScraper,
-                                              TheMuseScraper, WuzzufScraper)
-                    import pandas as pd
-                    os.makedirs("data", exist_ok=True)
-                    all_j: list = []
-                    tot = sum([use_ro,use_arb,use_mu,use_wu]); step = 0
-                    if use_ro:
-                        log("📡 RemoteOK…"); prog.progress(int(100*step/tot))
-                        j = RemoteOKScraper().scrape(limit=ro_lim); all_j+=j; step+=1
-                        log(f"   ✅ {len(j)} jobs")
-                    if use_arb:
-                        log("📡 Arbeitnow…"); prog.progress(int(100*step/tot))
-                        j = ArbeitnowScraper().scrape(pages=arb_pg); all_j+=j; step+=1
-                        log(f"   ✅ {len(j)} jobs")
-                    if use_mu:
-                        log("📡 The Muse…"); prog.progress(int(100*step/tot))
-                        j = TheMuseScraper().scrape(pages=mu_pg); all_j+=j; step+=1
-                        log(f"   ✅ {len(j)} jobs")
-                    if use_wu:
-                        log(f"📡 Wuzzuf ({len(wu_kw)} kw)…"); prog.progress(int(100*step/tot))
-                        j = WuzzufScraper().scrape(keywords=wu_kw, pages_per_keyword=wu_pg)
-                        all_j+=j; step+=1; log(f"   ✅ {len(j)} jobs")
-                    existing = pd.DataFrame()
-                    for p2 in ["data/jobs.csv","docs/ai_jobs_market_2025_2026.csv"]:
-                        if os.path.exists(p2):
-                            try: existing=pd.read_csv(p2); log(f"   📂 {len(existing)} existing"); break
-                            except Exception: pass
-                    combined = pd.concat([existing,pd.DataFrame(all_j)],ignore_index=True)
-                    before   = len(combined)
-                    combined.drop_duplicates(subset=["job_title","company"],keep="first",inplace=True)
-                    log(f"   🗑️ {before-len(combined)} dupes removed")
-                    combined.to_csv("data/jobs_combined.csv",index=False)
-                    prog.progress(100,text="Done!")
-                    log(f"💾 {len(combined):,} jobs → data/jobs_combined.csv")
-                    msg = (
-                        f"✅ Scraped **{len(all_j):,} new jobs** from "
-                        f"{sum([use_ro,use_arb,use_mu,use_wu])} sources. "
-                        f"**{len(combined):,} total** in database.\n\n"
-                        "The RAG index will rebuild automatically on the next app restart, "
-                        "or click **🔄 Rebuild RAG** in the sidebar right now."
-                    )
-                    st.session_state.msgs_scraper = [{"role":"assistant","content":msg}]
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ {e}"); prog.progress(100)
-
-    def _scraper_system(query):
-        ctx_str = ""
-        if db_path:
-            try:
-                import pandas as pd
-                df2 = pd.read_csv(db_path)
-                srcs = df2["source"].value_counts().to_dict() if "source" in df2.columns else {}
-                ctx_str = (
-                    f"\n\nDatabase stats: {len(df2):,} jobs | "
-                    f"sources: {srcs} | "
-                    f"RAG: {'active' if rag_ready else 'offline'}"
-                )
-            except Exception:
-                pass
-        return (
-            "You are a data engineering assistant helping manage a job scraping pipeline.\n"
-            "Answer questions about the job database, scraping sources, or how to get more relevant data.\n"
-            "Be concise and technical.\n"
-            f"{ctx_str}"
-        )
-
-    render_chat(
-        service          = "scraper",
-        system_fn        = _scraper_system,
-        placeholder_text = "Ask about the job database or scraping…",
-        suggestions      = [
-            "How many jobs do we have per source?",
-            "Why might Wuzzuf return fewer results than expected?",
-            "How often should I re-scrape?",
-        ],
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR
-# ══════════════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown(
-        "<h2 style='font-size:1rem;margin:16px 0 8px;'>⚙️ Controls</h2>",
-        unsafe_allow_html=True,
-    )
-
-    # RAG panel
-    st.markdown(
-        "<p style='font-size:0.8rem;color:#64748b;margin:8px 0 4px;'>🕸️ Graph RAG Index</p>",
-        unsafe_allow_html=True,
-    )
-    if rag_ready:
-        g = st.session_state.rag_graph
-        st.markdown(
-            f"<div style='font-size:0.78rem;color:#86efac;'>"
-            f"✅ {job_count:,} chunks · {g.number_of_nodes():,} nodes · {g.number_of_edges():,} edges"
-            f"</div>", unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            "<div style='font-size:0.78rem;color:#fcd34d;'>⚠️ Not loaded</div>",
-            unsafe_allow_html=True,
-        )
-
-    if st.button("🔄 Rebuild RAG Now", use_container_width=True):
-        from rag_ingest import build_index, load_index
-        from sentence_transformers import SentenceTransformer
-        bar  = st.progress(0)
-        info = st.empty()
-        def _cb(pct, msg): bar.progress(pct, text=msg); info.caption(msg)
-        try:
-            build_index(progress_callback=_cb)
-            emb, chunks, meta, graph = load_index()
-            model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-            st.session_state.rag_emb    = emb
-            st.session_state.rag_chunks = chunks
-            st.session_state.rag_meta   = meta
-            st.session_state.rag_graph  = graph
-            st.session_state.rag_model  = model
-            st.session_state.rag_ready  = True
-            bar.empty(); info.empty()
+        if st.button("🗑  Clear conversation", key="clear_conv", use_container_width=True):
+            st.session_state.conversations[st.session_state.active_service] = []
             st.rerun()
-        except Exception as e:
-            st.error(f"❌ {e}")
 
-    st.markdown("<hr style='margin:12px 0;border-color:#1e2a4a;'>", unsafe_allow_html=True)
+        if os.path.exists("chat_history.csv"):
+            with open("chat_history.csv") as f:
+                st.download_button("⬇ Export chat history", f, "pathiq_history.csv",
+                                   use_container_width=True)
 
-    # Status
+    # ── Tab bar (rendered as HTML + Streamlit buttons) ──
+    sid = st.session_state.active_service
+    cols = st.columns(len(SERVICES))
+    for i, (s_id, meta) in enumerate(SERVICES.items()):
+        with cols[i]:
+            active_style = "border-bottom:2px solid #7c6af5;color:#7c6af5;" if s_id == sid else ""
+            if st.button(
+                f"{meta['icon']} {meta['label']}",
+                key=f"tab_{s_id}",
+                use_container_width=True,
+            ):
+                st.session_state.active_service = s_id
+                st.rerun()
+
+    st.markdown("<hr style='margin:0;border-color:rgba(255,255,255,0.06)'>", unsafe_allow_html=True)
+
+    # ── Service banner ──
+    render_banner(sid)
+
+    # ── Messages ──
+    render_messages(sid)
+
+    # ── CV file upload (only for CV service) ──
+    if sid == "cv":
+        with st.expander("📎 Upload CV (PDF)", expanded=False):
+            uploaded = st.file_uploader("Choose PDF", type=["pdf"], label_visibility="collapsed")
+            if uploaded and st.button("Analyze uploaded CV", key="analyze_cv"):
+                if CV_AVAILABLE:
+                    with st.spinner("Extracting CV data..."):
+                        try:
+                            tmp = f"tmp_{uploaded.name}"
+                            with open(tmp, "wb") as f:
+                                f.write(uploaded.getbuffer())
+                            analyzer = CVAnalyzer()
+                            result = analyzer.analyze_cv(tmp)
+                            os.remove(tmp)
+                            if result.get("success"):
+                                st.session_state.cv_result = result
+                                handle_input(
+                                    f"I've uploaded my CV. Here is the extracted data: {json.dumps(result.get('analysis', {}), indent=2)}. Please analyze it in depth.",
+                                    "cv",
+                                )
+                            else:
+                                st.error(f"Error: {result.get('error')}")
+                        except Exception as e:
+                            st.error(f"Upload error: {e}")
+                else:
+                    st.warning("CVAnalyzer module not available.")
+
+    # ── GitHub username input ──
+    if sid == "github":
+        with st.expander("🔍 Analyze a GitHub profile", expanded=False):
+            gh_user = st.text_input("GitHub username", placeholder="e.g. torvalds", label_visibility="collapsed")
+            if gh_user and st.button("Fetch & analyze", key="analyze_gh"):
+                if GH_AVAILABLE:
+                    with st.spinner(f"Fetching @{gh_user}..."):
+                        try:
+                            analyzer = GitHubAnalyzer()
+                            result = analyzer.analyze_github_profile(gh_user)
+                            if result.get("success"):
+                                st.session_state.gh_result = result
+                                handle_input(
+                                    f"Here is the GitHub profile data for @{gh_user}: {json.dumps(result, indent=2)}. Please give a full analysis.",
+                                    "github",
+                                )
+                            else:
+                                st.error(f"Error: {result.get('error')}")
+                        except Exception as e:
+                            st.error(f"GitHub error: {e}")
+                else:
+                    st.warning("GitHubAnalyzer module not available.")
+
+    # ── Input box ──
     st.markdown(
-        "<p style='font-size:0.8rem;color:#64748b;margin:8px 0 4px;'>📊 Session</p>",
+        f'<div class="ctx-row">'
+        f'<span class="ctx-label">{SERVICE_META[sid]["title"].upper()}</span>'
+        f'<span class="ctx-model">PathIQ · Groq Graph RAG</span>'
+        f'</div>',
         unsafe_allow_html=True,
     )
-    def _dot(ok, label):
-        color = "#86efac" if ok else "#475569"
-        st.markdown(
-            f"<div style='font-size:0.78rem;color:{color};margin:2px 0;'>"
-            f"{'●' if ok else '○'} {label}</div>",
-            unsafe_allow_html=True,
+
+    col_input, col_btn = st.columns([8, 1])
+    with col_input:
+        user_input = st.text_area(
+            "message",
+            placeholder=f"Ask PathIQ about {SERVICE_META[sid]['title'].lower()}…",
+            key=f"input_{sid}",
+            height=70,
+            label_visibility="collapsed",
         )
-    _dot(bool(GROQ_KEY),                        "Groq API")
-    _dot(rag_ready,                              "RAG Index")
-    _dot(bool(st.session_state.cv_data),         "CV Analyzed")
-    _dot(bool(st.session_state.gh_data),         "GitHub Profiled")
-    _dot(bool(db_path),                          "Job DB")
+    with col_btn:
+        st.markdown("<div style='padding-top:20px'>", unsafe_allow_html=True)
+        if st.button("Send →", key=f"send_{sid}", use_container_width=True):
+            if user_input.strip():
+                handle_input(user_input, sid)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<hr style='margin:12px 0;border-color:#1e2a4a;'>", unsafe_allow_html=True)
 
-    # Clear buttons
-    if st.button("🗑️ Clear All Chats", use_container_width=True):
-        for s in SERVICES:
-            st.session_state[f"msgs_{s}"] = None
-        st.rerun()
-    if st.button("🗑️ Clear Everything", use_container_width=True):
-        for k in _defaults:
-            st.session_state[k] = None
-        st.rerun()
-
-    st.markdown(
-        "<p style='font-size:0.72rem;color:#334155;margin-top:20px;text-align:center;'>"
-        "Career AI · Graph RAG · Groq</p>",
-        unsafe_allow_html=True,
-    )
+if __name__ == "__main__":
+    main()
