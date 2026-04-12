@@ -104,7 +104,6 @@ def _inject_copilot(api_key: str, context: str):
     safe_ctx = context.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
 
     st.markdown(f"""
-<!-- ─── Copilot Panel (fixed toggle) ─────────────────────────────────────── -->
 <style>
 #cp-btn{{
   position:fixed;bottom:28px;right:28px;z-index:9999;
@@ -126,8 +125,7 @@ def _inject_copilot(api_key: str, context: str):
   font-family:'Plus Jakarta Sans',system-ui,sans-serif;
   overflow:hidden;
 }}
-#cp-panel.cp-open{{display:flex!important;}}
-@keyframes cp-in{{from{{opacity:0;transform:translateY(12px)}}to{{opacity:1;transform:translateY(0)}}}}
+#cp-panel.open{{display:flex!important;}}
 #cp-hdr{{
   background:linear-gradient(135deg,#007acc22,#00d9ff11);
   border-bottom:1px solid rgba(0,217,255,.15);
@@ -203,184 +201,178 @@ def _inject_copilot(api_key: str, context: str):
 
 <script>
 (function() {{
-  const GROQ_KEY = "{safe_key}";
-  const USER_CTX = "{safe_ctx}";
-  const SYSTEM = "You are a warm, expert career advisor called Career AI. Give honest, specific, actionable advice in a conversational tone — like a smart mentor. Keep answers concise and focused. Use bullet points only for lists of 3 or more items. Never say 'As an AI'. Be direct and real." + (USER_CTX ? "\\n\\nContext about this user:\\n" + USER_CTX : "");
+    console.log("Career AI Copilot: script starting");
+    const GROQ_KEY = "{safe_key}";
+    const USER_CTX = "{safe_ctx}";
+    const SYSTEM = "You are a warm, expert career advisor called Career AI. Give honest, specific, actionable advice in a conversational tone — like a smart mentor. Keep answers concise and focused. Use bullet points only for lists of 3 or more items. Never say 'As an AI'. Be direct and real." + (USER_CTX ? "\\n\\nContext about this user:\\n" + USER_CTX : "");
+    let isOpen = false;
+    let greeted = false;
+    let msgs = [];
 
-  let isOpen = false;
-  let greeted = false;
-  let msgs = [];
-
-  function addMsg(role, text) {{
-    const box = document.getElementById("cp-msgs");
-    if (!box) return;
-    const div = document.createElement("div");
-    div.className = "cp-msg " + role;
-    div.innerHTML = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-                        .replace(/\\*\\*(.*?)\\*\\*/g,"<strong>$1</strong>")
-                        .replace(/\\*(.*?)\\*/g,"<em>$1</em>")
-                        .replace(/(^|\\n)[•\\-\\*] (.+)/g,"$1<li>$2</li>")
-                        .replace(/\\n/g,"<br>");
-    if (div.innerHTML.indexOf("<li>") !== -1)
-      div.innerHTML = '<ul style="padding-left:16px;margin:6px 0">' + div.innerHTML + "</ul>";
-    box.appendChild(div);
-    box.scrollTop = box.scrollHeight;
-  }}
-
-  function showTyping() {{
-    const box = document.getElementById("cp-msgs");
-    if (!box) return;
-    let typing = document.getElementById("cp-typing");
-    if (typing) typing.remove();
-    typing = document.createElement("div");
-    typing.id = "cp-typing";
-    typing.className = "cp-typing";
-    typing.innerHTML = "<span></span><span></span><span></span>";
-    box.appendChild(typing);
-    box.scrollTop = box.scrollHeight;
-  }}
-  function hideTyping() {{
-    const t = document.getElementById("cp-typing");
-    if (t) t.remove();
-  }}
-
-  async function sendToAI(text) {{
-    addMsg("usr", text);
-    msgs.push({{role:"user", content:text}});
-    showTyping();
-    try {{
-      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {{
-        method: "POST",
-        headers: {{"Content-Type":"application/json","Authorization":"Bearer " + GROQ_KEY}},
-        body: JSON.stringify({{
-          model: "llama-3.3-70b-versatile",
-          messages: [{{role:"system",content:SYSTEM}}].concat(msgs.slice(-12)),
-          temperature: 0.75,
-          max_tokens: 500
-        }})
-      }});
-      const data = await res.json();
-      const reply = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "Sorry, something went wrong. Try again!";
-      hideTyping();
-      addMsg("bot", reply);
-      msgs.push({{role:"assistant", content:reply}});
-    }} catch(e) {{
-      hideTyping();
-      addMsg("bot", "Hmm, couldn't reach the AI right now. Check your connection and try again.");
+    function addMsg(role, text) {{
+        const box = document.getElementById("cp-msgs");
+        if (!box) return;
+        const div = document.createElement("div");
+        div.className = "cp-msg " + role;
+        let t = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+        t = t.replace(/\\*\\*(.*?)\\*\\*/g,"<strong>$1</strong>");
+        t = t.replace(/\\*(.*?)\\*/g,"<em>$1</em>");
+        t = t.replace(/(^|\\n)[•\\-\\*] (.+)/g,"$1<li>$2</li>");
+        t = t.replace(/\\n/g,"<br>");
+        if (t.indexOf("<li>") !== -1)
+            t = '<ul style="padding-left:16px;margin:6px 0">' + t + "</ul>";
+        div.innerHTML = t;
+        box.appendChild(div);
+        box.scrollTop = box.scrollHeight;
     }}
-  }}
 
-  function renderChips() {{
-    const chipsDiv = document.getElementById("cp-chips");
-    if (!chipsDiv) return;
-    chipsDiv.innerHTML = "";
-    const suggestions = ["How can I improve my CV?", "What skills should I learn?", "How do I negotiate salary?", "Am I ready for a senior role?"];
-    suggestions.forEach(q => {{
-      const btn = document.createElement("button");
-      btn.className = "cp-chip";
-      btn.textContent = q;
-      btn.onclick = () => {{
+    function showTyping() {{
+        const box = document.getElementById("cp-msgs");
+        if (!box) return;
+        let typing = document.getElementById("cp-typing");
+        if (typing) typing.remove();
+        typing = document.createElement("div");
+        typing.id = "cp-typing";
+        typing.className = "cp-typing";
+        typing.innerHTML = "<span></span><span></span><span></span>";
+        box.appendChild(typing);
+        box.scrollTop = box.scrollHeight;
+    }}
+    function hideTyping() {{
+        const t = document.getElementById("cp-typing");
+        if (t) t.remove();
+    }}
+
+    async function sendToAI(text) {{
+        addMsg("usr", text);
+        msgs.push({{role:"user", content:text}});
+        showTyping();
+        try {{
+            const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {{
+                method: "POST",
+                headers: {{"Content-Type":"application/json","Authorization":"Bearer " + GROQ_KEY}},
+                body: JSON.stringify({{
+                    model: "llama-3.3-70b-versatile",
+                    messages: [{{role:"system",content:SYSTEM}}].concat(msgs.slice(-12)),
+                    temperature: 0.75,
+                    max_tokens: 500
+                }})
+            }});
+            const data = await res.json();
+            const reply = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "Sorry, something went wrong. Try again!";
+            hideTyping();
+            addMsg("bot", reply);
+            msgs.push({{role:"assistant", content:reply}});
+        }} catch(e) {{
+            hideTyping();
+            addMsg("bot", "Hmm, couldn't reach the AI right now. Check your connection and try again.");
+        }}
+    }}
+
+    function renderChips() {{
+        const chipsDiv = document.getElementById("cp-chips");
+        if (!chipsDiv) return;
         chipsDiv.innerHTML = "";
-        sendToAI(q);
-      }};
-      chipsDiv.appendChild(btn);
-    }});
-  }}
-
-  function greet() {{
-    if (USER_CTX) {{
-      addMsg("bot", "Hey! 👋 I can see you've been working through your profile. What would you like to explore?");
-    }} else {{
-      addMsg("bot", "Hey! 👋 I'm your Career AI advisor. Ask me anything — CV tips, job search, salary negotiation, skill gaps, interview prep…");
-    }}
-    renderChips();
-  }}
-
-  function togglePanel() {{
-    const panel = document.getElementById("cp-panel");
-    if (!panel) return;
-    isOpen = !isOpen;
-    if (isOpen) {{
-      panel.classList.add("cp-open");
-      panel.style.display = "flex";
-      const notif = document.getElementById("cp-notif");
-      if (notif) notif.style.display = "none";
-      if (!greeted) {{
-        greet();
-        greeted = true;
-      }}
-      const input = document.getElementById("cp-input");
-      if (input) setTimeout(() => input.focus(), 100);
-    }} else {{
-      panel.classList.remove("cp-open");
-      panel.style.display = "none";
-    }}
-  }}
-
-  function attachEvents() {{
-    const btn = document.getElementById("cp-btn");
-    const closeBtn = document.getElementById("cp-close");
-    const sendBtn = document.getElementById("cp-send");
-    const input = document.getElementById("cp-input");
-
-    if (!btn) {{
-      setTimeout(attachEvents, 200);
-      return;
+        const suggestions = ["How can I improve my CV?", "What skills should I learn?", "How do I negotiate salary?", "Am I ready for a senior role?"];
+        suggestions.forEach(q => {{
+            const btn = document.createElement("button");
+            btn.className = "cp-chip";
+            btn.textContent = q;
+            btn.onclick = () => {{
+                chipsDiv.innerHTML = "";
+                sendToAI(q);
+            }};
+            chipsDiv.appendChild(btn);
+        }});
     }}
 
-    // Remove any previous listener to avoid duplicates
-    btn.removeEventListener("click", togglePanel);
-    btn.addEventListener("click", togglePanel);
-
-    if (closeBtn) {{
-      closeBtn.removeEventListener("click", togglePanel);
-      closeBtn.addEventListener("click", togglePanel);
-    }}
-    if (sendBtn) {{
-      sendBtn.removeEventListener("click", () => {{
-        const val = input.value.trim();
-        if (val) {{ input.value = ""; sendToAI(val); }}
-      }});
-      sendBtn.addEventListener("click", () => {{
-        const val = input.value.trim();
-        if (val) {{ input.value = ""; sendToAI(val); }}
-      }});
-    }}
-    if (input) {{
-      input.removeEventListener("keydown", (e) => {{
-        if (e.key === "Enter" && !e.shiftKey) {{
-          e.preventDefault();
-          const val = input.value.trim();
-          if (val) {{ input.value = ""; sendToAI(val); }}
+    function greet() {{
+        if (USER_CTX) {{
+            addMsg("bot", "Hey! 👋 I can see you've been working through your profile. What would you like to explore?");
+        }} else {{
+            addMsg("bot", "Hey! 👋 I'm your Career AI advisor. Ask me anything — CV tips, job search, salary negotiation, skill gaps, interview prep…");
         }}
-      }});
-      input.addEventListener("keydown", (e) => {{
-        if (e.key === "Enter" && !e.shiftKey) {{
-          e.preventDefault();
-          const val = input.value.trim();
-          if (val) {{ input.value = ""; sendToAI(val); }}
-        }}
-      }});
-      input.addEventListener("input", () => {{
-        input.style.height = "auto";
-        input.style.height = Math.min(input.scrollHeight, 90) + "px";
-      }});
+        renderChips();
     }}
 
-    // Show notification after 3 seconds if still closed
-    setTimeout(() => {{
-      if (!isOpen) {{
-        const notif = document.getElementById("cp-notif");
-        if (notif) notif.style.display = "flex";
-      }}
-    }}, 3000);
-  }}
+    function togglePanel() {{
+        const panel = document.getElementById("cp-panel");
+        if (!panel) {{
+            console.error("cp-panel not found");
+            return;
+        }}
+        isOpen = !isOpen;
+        if (isOpen) {{
+            panel.classList.add("open");
+            panel.style.display = "flex";
+            const notif = document.getElementById("cp-notif");
+            if (notif) notif.style.display = "none";
+            if (!greeted) {{
+                greet();
+                greeted = true;
+            }}
+            const input = document.getElementById("cp-input");
+            if (input) setTimeout(() => input.focus(), 100);
+        }} else {{
+            panel.classList.remove("open");
+            panel.style.display = "none";
+        }}
+        console.log("Panel toggled, isOpen =", isOpen);
+    }}
 
-  if (document.readyState === "loading") {{
-    document.addEventListener("DOMContentLoaded", attachEvents);
-  }} else {{
-    attachEvents();
-  }}
+    function attachEvents() {{
+        const btn = document.getElementById("cp-btn");
+        const closeBtn = document.getElementById("cp-close");
+        const sendBtn = document.getElementById("cp-send");
+        const input = document.getElementById("cp-input");
+
+        if (!btn) {{
+            console.log("Button not found, retrying in 300ms");
+            setTimeout(attachEvents, 300);
+            return;
+        }}
+        console.log("Found button, attaching events");
+        btn.onclick = togglePanel;
+        if (closeBtn) closeBtn.onclick = togglePanel;
+        if (sendBtn) sendBtn.onclick = () => {{
+            const val = input ? input.value.trim() : "";
+            if (val) {{
+                if (input) input.value = "";
+                sendToAI(val);
+            }}
+        }};
+        if (input) {{
+            input.onkeydown = (e) => {{
+                if (e.key === "Enter" && !e.shiftKey) {{
+                    e.preventDefault();
+                    const val = input.value.trim();
+                    if (val) {{
+                        input.value = "";
+                        sendToAI(val);
+                    }}
+                }}
+            }};
+            input.oninput = () => {{
+                input.style.height = "auto";
+                input.style.height = Math.min(input.scrollHeight, 90) + "px";
+            }};
+        }}
+
+        // Show notification after 3 seconds if still closed
+        setTimeout(() => {{
+            if (!isOpen) {{
+                const notif = document.getElementById("cp-notif");
+                if (notif) notif.style.display = "flex";
+            }}
+        }}, 3000);
+    }}
+
+    // Start the attachment process
+    if (document.readyState === "loading") {{
+        document.addEventListener("DOMContentLoaded", attachEvents);
+    }} else {{
+        attachEvents();
+    }}
 }})();
 </script>
 """, unsafe_allow_html=True)
