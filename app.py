@@ -1,582 +1,307 @@
 """
-PathIQ — Career Intelligence Platform  (Single Unified Chat UI)
-================================================================
-All 4 services live inside ONE chat canvas.
-Service is selected from the sidebar; the chat header + input bar
-reflect the active mode. No top tab bar.
+Wasla AI – Graph RAG Chatbot  (Redesigned UI)
+==============================================
+Key fixes vs original:
+  • st.chat_input  →  Enter key sends the message (was broken with st.text_area)
+  • Full dark UI redesign: deep navy, cyan accents, Plus Jakarta Sans font
+  • Proper message bubbles, source pills, feedback buttons
+  • All Graph RAG / LLM logic kept exactly as-is
 """
 
 import os
-import streamlit as st
-from dotenv import load_dotenv
-import json
 import csv
-import datetime
-import random
 import re
+import random
+import datetime
 import time
+from pathlib import Path
 
-load_dotenv()
+import streamlit as st
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_core.prompts import PromptTemplate
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# ── Page config ────────────────────────────────────────────────────────────
+from graph_builder import KnowledgeGraphBuilder, GRAPH_PATH
+from graph_retriever import GraphRetriever
+
+# ── Constants ──────────────────────────────────────────────────────────────
+DB_DIR        = "db"
+EMBED_MODEL   = "sentence-transformers/all-mpnet-base-v2"
+CHUNK_SIZE    = 500
+CHUNK_OVERLAP = 100
+
+# ── Page config (must be first Streamlit call) ─────────────────────────────
 st.set_page_config(
-    page_title="PathIQ — Career Intelligence",
-    page_icon="✦",
+    page_title="Wasla AI",
+    page_icon="🕸️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Lazy imports ────────────────────────────────────────────────────────────
-try:
-    from cv_analyzer import CVAnalyzer
-    CV_AVAILABLE = True
-except ImportError:
-    CV_AVAILABLE = False
-
-try:
-    from github_analyzer import GitHubAnalyzer
-    GH_AVAILABLE = True
-except ImportError:
-    GH_AVAILABLE = False
-
-try:
-    from job_matcher import JobMatcher
-    JM_AVAILABLE = True
-except ImportError:
-    JM_AVAILABLE = False
-
-try:
-    from graph_builder import KnowledgeGraphBuilder, GRAPH_PATH
-    from graph_retriever import GraphRetriever
-    from langchain_community.vectorstores import Chroma
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    from langchain_community.document_loaders import PyPDFLoader
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    RAG_AVAILABLE = True
-except ImportError:
-    RAG_AVAILABLE = False
-
-try:
-    import plotly.graph_objects as go
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    PLOTLY_AVAILABLE = False
-
-# ── Constants ───────────────────────────────────────────────────────────────
-DB_DIR      = "db"
-EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
-
-SERVICES = {
-    "cv":     {"label": "CV Analyzer",     "icon": "📄", "accent": "#7c6af5"},
-    "github": {"label": "Code Profile",    "icon": "💻", "accent": "#2dd4c4"},
-    "jobs":   {"label": "Job Matcher",     "icon": "🎯", "accent": "#f5a623"},
-    "assess": {"label": "Full Assessment", "icon": "📊", "accent": "#f56c6c"},
-}
-
-SERVICE_HINTS = {
-    "cv":     "Try: \"Analyze my CV\" · \"What skills am I missing?\" · \"Rewrite my summary\"",
-    "github": "Try: \"Score my GitHub\" · \"Best repos to pin\" · \"Improve my README\"",
-    "jobs":   "Try: \"Find jobs for a Python dev\" · \"Senior remote roles\" · \"Best-paying AI jobs\"",
-    "assess": "Try: \"Show my dashboard\" · \"Generate full report\" · \"Compare with market\"",
-}
-
-QUICK_ACTIONS = {
-    "cv":     ["Analyze my CV", "What skills am I missing?", "How senior am I?", "Rewrite my summary"],
-    "github": ["Score my GitHub profile", "Best repos to pin", "Improve documentation", "Contribution tips"],
-    "jobs":   ["Find matching jobs", "Senior backend remote roles", "Highest-paying AI roles", "Salary benchmarks"],
-    "assess": ["Show my full dashboard", "Generate AI report", "Compare with market", "30-day action plan"],
-}
-
-SYSTEM_PROMPTS = {
-    "cv": (
-        "You are PathIQ's CV Analyzer — a world-class career consultant. "
-        "Analyze CVs with precision. Name real skills, flag real gaps, suggest concrete rewrites. "
-        "Use **bold** for key points and bullet points for lists. End with a sharp follow-up question."
-    ),
-    "github": (
-        "You are PathIQ's Code Profile analyzer. Assess GitHub profiles like a senior engineering recruiter. "
-        "Score across: consistency, depth, visibility, documentation quality. "
-        "Give concrete improvement steps and end with a specific actionable question."
-    ),
-    "jobs": (
-        "You are PathIQ's Job Matcher. Match users to roles based on their skills. "
-        "Give match percentages, explain fit, identify skill gaps. "
-        "Be specific about company types, salary ranges, and growth trajectories. End with a targeted question."
-    ),
-    "assess": (
-        "You are PathIQ's career dashboard assistant. "
-        "Answer questions about the user's career assessment data. "
-        "Be analytical, structured, and encouraging. Use bullet points and clear headings."
-    ),
-    "rag": (
-        "You are PathIQ's Knowledge Chat powered by Graph RAG. "
-        "Answer questions from the knowledge base precisely. Cite document context when available."
-    ),
-}
-
-
-# ── CSS injection ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# CSS
+# ══════════════════════════════════════════════════════════════════════════════
 def inject_css():
     st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-/* ─── Tokens ─── */
 :root {
-  --bg:      #08080f;
-  --bg2:     #0f0f1a;
-  --bg3:     #15151f;
-  --bg4:     #1c1c2a;
-  --bg5:     #252535;
-  --line:    rgba(255,255,255,0.055);
-  --line2:   rgba(255,255,255,0.09);
-  --line3:   rgba(255,255,255,0.14);
-  --t1:      #eeeef8;
-  --t2:      #8888aa;
-  --t3:      #44445a;
-  --violet:  #7c6af5;
-  --violet2: #6458e0;
-  --vdim:    rgba(124,106,245,0.10);
-  --vbdr:    rgba(124,106,245,0.22);
-  --teal:    #2dd4c4;
-  --sage:    #5ad19e;
-  --amber:   #f5a63a;
-  --rose:    #f56c6c;
-  --ff:      'DM Sans', system-ui, sans-serif;
-  --fm:      'DM Mono', monospace;
-  --r:       14px;
-  --rs:      9px;
+  --navy:    #080c18;
+  --navy2:   #0d1326;
+  --navy3:   #111829;
+  --navy4:   #172035;
+  --navy5:   #1e2d47;
+  --line:    rgba(255,255,255,0.06);
+  --line2:   rgba(255,255,255,0.10);
+  --t1:      #e8eeff;
+  --t2:      #7a8ab0;
+  --t3:      #3d4a6a;
+  --cyan:    #00d9ff;
+  --cyan2:   #00b3d4;
+  --cyan-d:  rgba(0,217,255,0.08);
+  --cyan-b:  rgba(0,217,255,0.20);
+  --sage:    #34d399;
+  --ff: 'Plus Jakarta Sans', system-ui, sans-serif;
+  --fm: 'JetBrains Mono', monospace;
+  --r: 14px; --rs: 9px;
 }
 
-/* ─── Streamlit chrome reset ─── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body,
 [data-testid="stApp"],
 [data-testid="stAppViewContainer"],
-.main { background: var(--bg) !important; }
+.main { background: var(--navy) !important; font-family: var(--ff) !important; }
 
 #MainMenu, header, footer,
 [data-testid="stToolbar"],
 [data-testid="stDecoration"],
 [data-testid="stStatusWidget"] { display: none !important; }
 
-[data-testid="collapsedControl"] { display: none !important; }
-
-.block-container {
-  padding: 0 !important;
-  max-width: 100% !important;
-}
+.block-container { padding: 0 !important; max-width: 100% !important; }
 section.main > div { padding: 0 !important; }
 
-/* ─── Sidebar ─── */
+/* ── Sidebar ── */
 [data-testid="stSidebar"] {
-  background: var(--bg2) !important;
+  background: var(--navy2) !important;
   border-right: 1px solid var(--line) !important;
+  min-width: 268px !important; max-width: 268px !important;
 }
-[data-testid="stSidebar"] > div:first-child {
-  padding: 0 !important;
-}
-
-.sb-wrap { padding: 0 12px 20px; }
-
-.sb-logo {
-  display: flex; align-items: center; gap: 12px;
-  padding: 20px 6px 18px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 18px;
-}
-.gem {
-  width: 36px; height: 36px; border-radius: 11px;
-  background: linear-gradient(135deg, var(--violet), #b09cff);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 17px; font-weight: 800; color: #fff;
-  box-shadow: 0 4px 14px rgba(124,106,245,.35);
-  flex-shrink: 0;
-}
-.logo-title { font-size: 15px; font-weight: 700; color: var(--t1); letter-spacing: -.3px; }
-.logo-badge {
-  font-size: 9px; font-weight: 600;
-  background: var(--vdim); color: var(--violet);
-  border: 1px solid var(--vbdr);
-  padding: 2px 8px; border-radius: 20px;
-  margin-top: 3px; display: inline-block;
-}
-
-.sb-section-title {
-  font-size: 10px; font-weight: 700; letter-spacing: .09em;
-  text-transform: uppercase; color: var(--t3);
-  padding: 0 6px 10px; margin-top: 4px;
-}
-
-/* Active service pill in sidebar header */
-.sb-active-pill {
-  display: flex; align-items: center; gap: 8px;
-  background: var(--bg3); border: 1px solid var(--line2);
-  border-radius: var(--rs); padding: 10px 12px;
-  margin-bottom: 18px;
-}
-.sap-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  flex-shrink: 0; animation: pulse 2.5s ease-in-out infinite;
-}
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-.sap-label { font-size: 12px; font-weight: 600; color: var(--t1); }
-.sap-sub { font-size: 10px; color: var(--t3); margin-top: 1px; }
-
-/* Sidebar nav buttons */
+[data-testid="stSidebar"] > div:first-child { padding: 0 !important; }
 [data-testid="stSidebar"] .stButton > button {
   background: transparent !important;
-  border: 1px solid transparent !important;
+  border: 1px solid var(--line2) !important;
+  border-radius: var(--rs) !important;
   color: var(--t2) !important;
   font-family: var(--ff) !important;
-  font-size: 13px !important;
+  font-size: 12.5px !important;
   font-weight: 500 !important;
-  text-align: left !important;
-  padding: 9px 12px !important;
-  border-radius: var(--rs) !important;
+  padding: 9px 14px !important;
   transition: all 0.18s !important;
-  justify-content: flex-start !important;
+  width: 100% !important;
 }
 [data-testid="stSidebar"] .stButton > button:hover {
-  background: var(--bg4) !important;
+  background: var(--navy4) !important;
+  border-color: var(--cyan-b) !important;
   color: var(--t1) !important;
-  border-color: var(--line2) !important;
   transform: none !important;
+  box-shadow: none !important;
+}
+[data-testid="stExpander"] {
+  background: var(--navy3) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: var(--r) !important;
+}
+[data-testid="stExpander"] summary { color: var(--t2) !important; font-size: 12px !important; }
+[data-testid="stAlert"] {
+  background: var(--navy3) !important;
+  border-radius: var(--r) !important;
+  border: 1px solid var(--line2) !important;
+  color: var(--t2) !important; font-size: 12.5px !important;
+}
+[data-testid="stMetricLabel"] { color: var(--t3) !important; font-size: 11px !important; }
+[data-testid="stMetricValue"] { color: var(--t1) !important; font-size: 18px !important; }
+[data-testid="stDownloadButton"] > button {
+  background: transparent !important;
+  border: 1px solid var(--line2) !important;
+  border-radius: var(--rs) !important;
+  color: var(--t2) !important; font-size: 12px !important;
+}
+[data-testid="stDownloadButton"] > button:hover {
+  border-color: var(--cyan-b) !important;
+  color: var(--cyan) !important; transform: none !important;
 }
 
-.sb-divider {
-  height: 1px; background: var(--line);
-  margin: 14px 0;
-}
-.sb-status {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 11px; color: var(--t3);
-  padding: 0 6px;
-}
-.status-dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--sage); flex-shrink: 0;
-  animation: pulse 2.4s ease-in-out infinite;
-}
-
-/* ─── Main area ─── */
-.chat-root {
-  display: flex; flex-direction: column;
-  height: 100vh; overflow: hidden;
-  background: var(--bg);
-}
-
-/* ─── Chat header bar ─── */
-.chat-header {
-  flex-shrink: 0;
-  background: var(--bg2);
+/* ── Header ── */
+.wasla-hdr {
+  background: var(--navy2);
   border-bottom: 1px solid var(--line);
-  padding: 0 28px;
-  height: 58px;
+  padding: 0 28px; height: 60px;
   display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
 }
-.ch-left { display: flex; align-items: center; gap: 14px; }
-.ch-icon {
+.hdr-left { display: flex; align-items: center; gap: 14px; }
+.hdr-gem  {
   width: 38px; height: 38px; border-radius: 11px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 18px;
+  background: linear-gradient(135deg,#007acc,#00d9ff);
+  display: flex; align-items: center; justify-content: center; font-size: 18px;
+  box-shadow: 0 4px 14px rgba(0,217,255,0.25);
 }
-.ch-name { font-size: 15px; font-weight: 700; color: var(--t1); letter-spacing: -.2px; }
-.ch-sub  { font-size: 11px; color: var(--t3); margin-top: 2px; }
-.ch-right { display: flex; align-items: center; gap: 10px; }
-.ch-badge {
+.hdr-title { font-size: 16px; font-weight: 800; color: var(--t1); letter-spacing: -.3px; }
+.hdr-sub   { font-size: 11px; color: var(--t3); margin-top: 2px; }
+.hdr-right { display: flex; gap: 8px; }
+.hdr-badge {
   font-size: 10px; font-weight: 600; padding: 4px 10px;
   border-radius: 20px; border: 1px solid var(--line2);
-  color: var(--t3); background: var(--bg3);
+  color: var(--t3); background: var(--navy3);
+}
+.hdr-badge.live {
+  background: rgba(52,211,153,.10); border-color: rgba(52,211,153,.25); color: var(--sage);
 }
 
-/* ─── Feed ─── */
-.chat-feed {
-  flex: 1; overflow-y: auto;
-  padding: 28px 32px 10px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line2) transparent;
+/* ── Feed ── */
+.wasla-feed {
+  flex: 1; overflow-y: auto; padding: 26px 0 10px;
+  scrollbar-width: thin; scrollbar-color: var(--line2) transparent;
 }
-.chat-feed::-webkit-scrollbar { width: 3px; }
-.chat-feed::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 3px; }
+.wasla-feed::-webkit-scrollbar { width: 3px; }
+.wasla-feed::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 3px; }
 
-/* Welcome card */
-.welcome-card {
-  background: var(--bg3);
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  padding: 26px 30px;
-  margin-bottom: 28px;
-  max-width: 680px;
-}
-.wc-title { font-size: 18px; font-weight: 700; color: var(--t1); margin-bottom: 6px; }
-.wc-desc  { font-size: 13px; color: var(--t2); line-height: 1.65; }
-.wc-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-/* chips rendered as st.buttons via columns — styled below */
-
-/* ─── Messages ─── */
-.msg-wrap { margin-bottom: 20px; animation: fadeUp .22s ease; }
-@keyframes fadeUp { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
-
-.msg-row  { display: flex; gap: 12px; align-items: flex-start; }
-.msg-row.user { flex-direction: row-reverse; }
-
+/* ── Messages ── */
+.msg  { display: flex; gap: 13px; padding: 0 28px; margin-bottom: 22px; animation: fu .22s ease; }
+.msg.u { flex-direction: row-reverse; }
+@keyframes fu { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
 .av {
-  width: 34px; height: 34px; border-radius: 50%;
+  width: 36px; height: 36px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 700; flex-shrink: 0;
+  font-size: 11px; font-weight: 700; flex-shrink: 0; margin-top: 2px;
+}
+.av.b { background: linear-gradient(135deg,#007acc,#00d9ff); color:#fff; box-shadow:0 3px 10px rgba(0,217,255,.25); }
+.av.u { background: var(--navy5); border: 1px solid var(--line2); color: var(--t2); }
+.bub  { max-width: 74%; }
+.bi   { padding: 13px 17px; font-size: 13.5px; line-height: 1.72; color: var(--t1); border-radius: 18px; }
+.bot .bi { background: var(--navy3); border: 1px solid var(--line); border-top-left-radius: 4px; }
+.usr .bi { background: linear-gradient(135deg,#00527a,#007cc2); border-top-right-radius: 4px; color:#fff; }
+.bm  { font-size: 10px; color: var(--t3); margin-top: 5px; padding: 0 4px; display:flex; gap:5px; align-items:center; }
+.usr .bm { justify-content: flex-end; }
+.bmd { width:3px;height:3px;border-radius:50%;background:var(--t3); }
+
+/* Source pills */
+.srcs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.spill {
+  font-size: 10px; font-weight: 600; padding: 3px 9px; border-radius: 20px;
+  background: var(--cyan-d); color: var(--cyan); border: 1px solid var(--cyan-b);
   font-family: var(--fm);
 }
-.av.bot { background: linear-gradient(135deg, var(--violet), #a898ff); color: #fff; }
-.av.usr { background: var(--bg4); border: 1px solid var(--line2); color: var(--t2); }
 
-.bubble       { max-width: 72%; }
-.bubble-inner {
-  padding: 13px 17px;
-  font-size: 13.5px; line-height: 1.7;
-  color: var(--t1); font-family: var(--ff);
-}
-.bot .bubble-inner {
-  background: var(--bg3); border: 1px solid var(--line);
-  border-radius: 18px; border-top-left-radius: 4px;
-}
-.user .bubble-inner {
-  background: var(--violet2); color: #fff;
-  border-radius: 18px; border-top-right-radius: 4px;
-}
+/* ── Starter chips ── */
+.chips-wrap { padding: 0 28px 20px; }
+.chip-row   { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.bubble-meta {
-  font-size: 10px; color: var(--t3);
-  margin-top: 5px; padding: 0 4px;
-  display: flex; align-items: center; gap: 6px;
-}
-.msg-row.user .bubble-meta { justify-content: flex-end; }
-
-/* Service tag inline in bot message */
-.svc-tag {
-  font-size: 9px; font-weight: 700; letter-spacing: .06em;
-  padding: 2px 7px; border-radius: 20px;
-  text-transform: uppercase;
-}
-
-/* Typing indicator */
-.typing-wrap { margin-bottom: 16px; }
-.typing-row  { display: flex; gap: 12px; align-items: center; }
-.typing-dots {
-  background: var(--bg3); border: 1px solid var(--line);
-  padding: 14px 18px; border-radius: 18px; border-top-left-radius: 4px;
-  display: flex; gap: 5px; align-items: center;
-}
-.td {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--t3); animation: tdot 1s ease-in-out infinite;
-}
-.td:nth-child(2){animation-delay:.16s}
-.td:nth-child(3){animation-delay:.32s}
-@keyframes tdot{0%,60%,100%{transform:translateY(0);opacity:.35}30%{transform:translateY(-5px);opacity:1}}
-
-/* ─── Quick action chips (rendered via st.columns) ─── */
-/* The main content area buttons get special quick-action styling */
-.quick-actions .stButton > button {
-  background: var(--bg3) !important;
+/* Chips rendered via st.button — override in main content area */
+div[class*="stHorizontalBlock"] .stButton > button {
+  background: var(--navy3) !important;
   border: 1px solid var(--line2) !important;
   border-radius: 30px !important;
   color: var(--t2) !important;
   font-size: 12px !important;
   font-weight: 500 !important;
-  padding: 6px 14px !important;
-  transition: all 0.18s !important;
+  padding: 7px 15px !important;
+  transition: all .18s !important;
   white-space: nowrap !important;
 }
-.quick-actions .stButton > button:hover {
-  border-color: var(--vbdr) !important;
-  color: var(--violet) !important;
-  background: var(--vdim) !important;
+div[class*="stHorizontalBlock"] .stButton > button:hover {
+  border-color: var(--cyan-b) !important;
+  color: var(--cyan) !important;
+  background: var(--cyan-d) !important;
   transform: translateY(-1px) !important;
+  box-shadow: none !important;
 }
 
-/* ─── Input bar ─── */
-.input-bar {
-  flex-shrink: 0;
-  background: var(--bg2);
-  border-top: 1px solid var(--line);
-  padding: 14px 28px 16px;
-}
-.input-context {
+/* ── Input ── */
+.input-meta {
   display: flex; align-items: center; gap: 10px;
-  margin-bottom: 10px;
+  padding: 12px 28px 8px;
+  background: var(--navy2); border-top: 1px solid var(--line);
+  flex-shrink: 0;
 }
-.ic-mode {
+.im-tag {
   font-size: 10px; font-weight: 700; letter-spacing: .06em;
-  text-transform: uppercase; padding: 3px 10px;
-  border-radius: 20px;
+  text-transform: uppercase; padding: 3px 10px; border-radius: 20px;
+  background: var(--cyan-d); color: var(--cyan); border: 1px solid var(--cyan-b);
 }
-.ic-engine { font-size: 11px; color: var(--t3); }
+.im-hint { font-size: 11px; color: var(--t3); }
 
-/* Streamlit textarea override */
-.stTextArea textarea {
-  background: var(--bg3) !important;
+/* st.chat_input */
+[data-testid="stChatInput"] {
+  background: var(--navy3) !important;
   border: 1px solid var(--line2) !important;
   border-radius: var(--r) !important;
-  color: var(--t1) !important;
-  font-size: 13px !important;
-  font-family: var(--ff) !important;
-  resize: none !important;
+  margin: 0 28px 16px !important;
   transition: border-color .18s, box-shadow .18s !important;
-  caret-color: var(--violet) !important;
 }
-.stTextArea textarea:focus {
-  border-color: var(--violet) !important;
-  box-shadow: 0 0 0 2px var(--vdim) !important;
-  outline: none !important;
+[data-testid="stChatInput"]:focus-within {
+  border-color: var(--cyan) !important;
+  box-shadow: 0 0 0 2px var(--cyan-d) !important;
 }
-.stTextArea textarea::placeholder { color: var(--t3) !important; }
-
-/* Send button */
-.send-col .stButton > button {
-  background: var(--violet) !important;
+[data-testid="stChatInput"] textarea {
+  background: transparent !important;
   border: none !important;
-  border-radius: var(--rs) !important;
-  color: #fff !important;
-  font-weight: 700 !important;
-  font-size: 13px !important;
-  padding: 12px 20px !important;
-  height: 70px !important;
-  width: 100% !important;
-  transition: all .18s !important;
-  letter-spacing: -.1px !important;
+  color: var(--t1) !important;
+  font-family: var(--ff) !important;
+  font-size: 13.5px !important;
+  caret-color: var(--cyan) !important;
 }
-.send-col .stButton > button:hover {
-  background: var(--violet2) !important;
-  transform: scale(0.97) !important;
+[data-testid="stChatInput"] textarea::placeholder { color: var(--t3) !important; }
+[data-testid="stChatInput"] button {
+  background: linear-gradient(135deg,#007acc,#00d9ff) !important;
+  border: none !important; border-radius: 9px !important;
+  color: var(--navy) !important;
 }
 
-/* Tool toggle buttons in input area */
-.tool-row .stButton > button {
-  background: var(--bg3) !important;
+.stProgress > div > div { background: var(--cyan) !important; }
+
+/* Feedback row buttons */
+.fb-row .stButton > button {
+  background: transparent !important;
   border: 1px solid var(--line) !important;
   border-radius: var(--rs) !important;
   color: var(--t3) !important;
-  font-size: 11px !important;
-  padding: 6px 12px !important;
+  padding: 4px 10px !important;
+  font-size: 12px !important;
   transition: all .15s !important;
 }
-.tool-row .stButton > button:hover {
-  border-color: var(--line3) !important;
-  color: var(--t2) !important;
-  background: var(--bg4) !important;
+.fb-row .stButton > button:hover {
+  border-color: var(--cyan-b) !important;
+  color: var(--cyan) !important;
   transform: none !important;
 }
 
-/* File uploader */
-[data-testid="stFileUploader"] {
-  background: var(--bg3) !important;
-  border: 1px dashed var(--line2) !important;
-  border-radius: var(--r) !important;
-  padding: 12px !important;
+.sb-div { height: 1px; background: var(--line); margin: 14px 0; }
+.sb-lbl {
+  font-size: 10px; font-weight: 700; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--t3); padding-bottom: 8px;
 }
-[data-testid="stFileUploader"] label { color: var(--t2) !important; font-size: 12px !important; }
-
-/* Text input */
-.stTextInput input {
-  background: var(--bg3) !important;
-  border: 1px solid var(--line2) !important;
-  border-radius: var(--rs) !important;
-  color: var(--t1) !important;
-  font-family: var(--ff) !important;
-  font-size: 13px !important;
-}
-.stTextInput input:focus {
-  border-color: var(--violet) !important;
-  box-shadow: 0 0 0 2px var(--vdim) !important;
-}
-
-/* Expanders */
-[data-testid="stExpander"] {
-  background: var(--bg3) !important;
-  border: 1px solid var(--line) !important;
-  border-radius: var(--r) !important;
-}
-[data-testid="stExpander"] summary {
-  color: var(--t2) !important; font-size: 12px !important;
-}
-
-/* Dashboard cards */
-.dash-kpi {
-  background: var(--bg3); border: 1px solid var(--line);
-  border-radius: var(--r); padding: 20px 22px;
-  transition: box-shadow .2s;
-}
-.dash-kpi:hover { box-shadow: 0 8px 24px rgba(0,0,0,.35); }
-.kpi-val   { font-size: 34px; font-weight: 800; line-height: 1.1; font-family: var(--fm); }
-.kpi-label { font-size: 10px; font-weight: 600; text-transform: uppercase;
-             letter-spacing: .07em; color: var(--t3); margin-top: 6px; }
-.kpi-sub   { font-size: 11px; color: var(--t3); }
-
-.dash-section {
-  background: var(--bg3); border: 1px solid var(--line);
-  border-radius: var(--r); padding: 20px 22px;
-  margin-top: 16px;
-}
-.dash-section-title {
-  font-size: 11px; font-weight: 700; letter-spacing: .07em;
-  text-transform: uppercase; color: var(--t3); margin-bottom: 14px;
-}
-
-/* Streamlit info/warning/success */
-[data-testid="stAlert"] {
-  background: var(--bg3) !important;
-  border-radius: var(--r) !important;
-  border: 1px solid var(--line2) !important;
-  color: var(--t2) !important;
-}
+.sb-stat { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--t3); }
+.sb-dot  { width:7px;height:7px;border-radius:50%;animation:blink 2.4s ease-in-out infinite; }
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── Session init ────────────────────────────────────────────────────────────
-def init_state():
-    defaults = {
-        "active_service": "cv",
-        "conversations":  [],          # single unified conversation list
-        "cv_result":      None,
-        "gh_result":      None,
-        "llm":            None,
-        "vectorstore":    None,
-        "graph":          None,
-        "assessment_data": None,
-        "show_upload":    False,
-        "show_gh_input":  False,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════════════════════
 def ts():
     return datetime.datetime.now().strftime("%H:%M")
 
 
-def save_csv(sid, q, a):
-    path = "chat_history.csv"
-    exists = os.path.isfile(path)
-    try:
-        with open(path, "a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            if not exists:
-                w.writerow(["Service", "Question", "Answer", "Time", "Date"])
-            w.writerow([sid, q, a,
-                        datetime.datetime.now().strftime("%H:%M:%S"),
-                        datetime.datetime.now().strftime("%Y-%m-%d")])
-    except Exception:
-        pass
-
-
 def is_greeting(q: str) -> bool:
-    patterns = [r'\b(hi|hello|hey|greetings|howdy|yo|sup)\b',
-                r'how are you', r"what'?s up", r'good (morning|afternoon|evening)']
+    patterns = [r'\b(hi|hello|hey|greetings|howdy|sup|yo)\b',
+                r'how are you', r"how's it going", r"what's up",
+                r'good (morning|afternoon|evening)']
     q = q.lower().strip()
     if len(q.split()) <= 4:
         for p in patterns:
@@ -585,20 +310,109 @@ def is_greeting(q: str) -> bool:
     return False
 
 
-def greeting_reply() -> str:
+def get_greeting() -> str:
     return random.choice([
-        "Hey! Great to have you here. I'm **PathIQ** — your career intelligence assistant. Pick a service from the sidebar and let's get started!",
-        "Hello! I'm ready to help you level up your career. Switch services from the sidebar — CV analysis, GitHub profile, job matching, or full assessment.",
-        "Hi there! PathIQ at your service. Choose a mode on the left and ask me anything about your career, CV, or job search.",
+        "Hi there! 👋 I'm **Wasla AI**. What would you like to know about Wasla Solutions today?",
+        "Hello! Great to have you here. How can I help you explore Wasla's services?",
+        "Hey! I'm here to help with any questions about Wasla Solutions. What's on your mind?",
     ])
 
 
-# ── LLM ─────────────────────────────────────────────────────────────────────
+def save_csv(question, answer):
+    path = "chat_history.csv"
+    exists = os.path.isfile(path)
+    try:
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if not exists:
+                w.writerow(["Question", "Answer", "Time", "Date"])
+            w.writerow([question, answer,
+                        datetime.datetime.now().strftime("%H:%M:%S"),
+                        datetime.datetime.now().strftime("%Y-%m-%d")])
+    except Exception:
+        pass
+
+
+def save_feedback(question, response, fb):
+    path = "feedback.csv"
+    exists = os.path.isfile(path)
+    try:
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if not exists:
+                w.writerow(["Question", "Response", "Feedback", "Time", "Date"])
+            w.writerow([question, response, fb,
+                        datetime.datetime.now().strftime("%H:%M:%S"),
+                        datetime.datetime.now().strftime("%Y-%m-%d")])
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Conversation tracker
+# ══════════════════════════════════════════════════════════════════════════════
+class ConversationTracker:
+    def __init__(self):
+        self.topics_discussed = []
+        self.message_count    = 0
+
+    def add_topic(self, t):
+        if t and t not in self.topics_discussed:
+            self.topics_discussed.append(t)
+            if len(self.topics_discussed) > 5:
+                self.topics_discussed = self.topics_discussed[-5:]
+
+    def increment_count(self):
+        self.message_count += 1
+
+    def get_context(self):
+        return {
+            "msg_count":       self.message_count,
+            "previous_topics": ", ".join(self.topics_discussed) or "none yet",
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Prompt
+# ══════════════════════════════════════════════════════════════════════════════
+WASLA_PROMPT = PromptTemplate(
+    template="""You are Wasla AI, a knowledgeable and friendly assistant for Wasla Solutions.
+
+**CONVERSATION CONTEXT:**
+Message #{msg_count}. Previous topics: {previous_topics}
+
+**RETRIEVED CONTEXT (vector + graph-expanded):**
+{context}
+
+**USER QUESTION:**
+{question}
+
+**GUIDELINES:**
+- Vary your openings; never repeat the same phrase twice.
+- Use bullet points for lists; be specific and cite document details.
+- If information is missing, say so politely and suggest related topics.
+- Professional, warm tone. End with a natural follow-up question.
+
+**YOUR RESPONSE:**""",
+    input_variables=["context", "question", "msg_count", "previous_topics"],
+)
+
+SYSTEM_PROMPT = (
+    "You are Wasla AI, a knowledgeable and friendly assistant for Wasla Solutions. "
+    "Be professional, warm, and vary your responses naturally. "
+    "Only share information from the provided document context; never invent facts."
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LLM
+# ══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource(ttl=3600)
 def load_llm():
     try:
         from groq import Groq
     except ImportError:
+        st.sidebar.error("❌ Install groq: pip install groq")
         return None
 
     key = None
@@ -607,620 +421,433 @@ def load_llm():
     elif os.getenv("GROQ_API_KEY"):
         key = os.getenv("GROQ_API_KEY")
     if not key:
+        st.sidebar.error("❌ GROQ_API_KEY not found")
         return None
 
     client = Groq(api_key=key)
 
     class GroqLLM:
         def __init__(self, c, model):
-            self.client = c
-            self.model  = model
-
-        def invoke(self, prompt, system=None):
-            sys_msg = system or (
-                "You are PathIQ, a world-class AI career intelligence assistant. "
-                "Be specific, warm, and structured. Use bold and bullets. "
-                "Always end with a clear next-step question."
-            )
+            self.client = c; self.model = model
+        def invoke(self, prompt):
             try:
                 r = self.client.chat.completions.create(
                     model=self.model,
-                    messages=[
-                        {"role": "system", "content": sys_msg},
-                        {"role": "user",   "content": prompt},
-                    ],
-                    temperature=0.75, max_tokens=700, top_p=0.9,
+                    messages=[{"role":"system","content":SYSTEM_PROMPT},
+                               {"role":"user","content":prompt}],
+                    temperature=0.8, max_tokens=600, top_p=0.9,
                 )
                 return r.choices[0].message.content
             except Exception as e:
-                return f"I ran into a small issue: {e}. Please try again!"
+                return f"Sorry, I ran into an issue: {e}"
 
-    for model in ["llama-3.3-70b-versatile", "deepseek-r1-distill-llama-70b", "gemma2-9b-it"]:
+    ph = st.sidebar.empty()
+    for model in ["llama-3.3-70b-versatile","deepseek-r1-distill-llama-70b",
+                  "meta-llama/llama-4-scout-17b-16e-instruct","gemma2-9b-it"]:
         try:
+            ph.info(f"🔄 Testing {model.split('/')[-1]}…")
             llm  = GroqLLM(client, model)
             test = llm.invoke("Reply with: ready")
             if test and "Error" not in test:
+                ph.success(f"✅ AI ready · {model.split('/')[-1]}")
                 return llm
         except Exception:
             continue
+    ph.error("❌ Could not start AI")
     return None
 
 
-# ── Vector / Graph store ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Vector store & graph
+# ══════════════════════════════════════════════════════════════════════════════
 @st.cache_resource(ttl=3600)
-def load_vectorstore():
-    if not RAG_AVAILABLE:
-        return None
+def init_vectorstore():
     try:
-        emb = HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device": "cpu"})
-        if os.path.exists(os.path.join(DB_DIR, "chroma.sqlite3")):
-            return Chroma(embedding_function=emb, persist_directory=DB_DIR)
-    except Exception:
-        pass
-    return None
-
-
-@st.cache_resource(ttl=3600)
-def load_graph():
-    if not RAG_AVAILABLE:
-        return None
-    try:
-        builder = KnowledgeGraphBuilder()
-        if builder.load():
-            return builder.G
-    except Exception:
-        pass
-    return None
-
-
-# ── Assessment data ──────────────────────────────────────────────────────────
-def compute_assessment_data():
-    cv = st.session_state.cv_result
-    gh = st.session_state.gh_result
-    data = {
-        "overall_score": 0, "cv_score": 0, "github_score": 0, "market_fit": 0,
-        "skills": [], "missing_skills": [], "experience_years": 0,
-        "top_languages": [], "repo_count": 0, "total_commits": 0,
-        "recommendations": [],
-    }
-    if cv and cv.get("success"):
-        a = cv.get("analysis", {})
-        data["cv_score"]        = a.get("score", 65)
-        data["experience_years"]= a.get("experience_years", 3)
-        data["skills"]          = a.get("skills", ["Python", "SQL", "ML"])
-        data["missing_skills"]  = a.get("missing_skills", ["Docker", "Cloud"])
-    else:
-        data["cv_score"]       = 50
-        data["skills"]         = ["Python", "Data Analysis"]
-        data["missing_skills"] = ["Version Control", "Testing"]
-
-    if gh and gh.get("success"):
-        data["github_score"]  = gh.get("score", 70)
-        data["top_languages"] = gh.get("languages", [("Python", 60), ("JS", 30)])
-        data["repo_count"]    = gh.get("total_repos", 5)
-        data["total_commits"] = gh.get("total_commits", 200)
-    else:
-        data["github_score"] = 45
-
-    data["overall_score"] = min(100, max(0,
-        int(0.5 * data["cv_score"] + 0.3 * data["github_score"] + 20)))
-    data["market_fit"]    = min(100,
-        int(data["overall_score"] * 0.9 + random.randint(-5, 5)))
-    data["recommendations"] = [
-        "Complete missing skills: " + ", ".join(data["missing_skills"][:2]),
-        f"Add READMEs to {max(0, 5 - data['repo_count'])} more GitHub repos",
-        "Add quantifiable achievements to your CV",
-        "Network with 3 professionals in your target industry per week",
-    ]
-    return data
-
-
-def render_dashboard():
-    """Power BI-style dashboard rendered inline in the chat feed."""
-    if not st.session_state.cv_result and not st.session_state.gh_result:
-        st.warning("No profile data yet. Upload your CV or enter a GitHub username using the toolbar below.")
-        return
-
-    if st.session_state.assessment_data is None:
-        st.session_state.assessment_data = compute_assessment_data()
-    d = st.session_state.assessment_data
-
-    # KPIs
-    c1, c2, c3, c4 = st.columns(4)
-    for col, label, val, unit, color in [
-        (c1, "Career Score",  d["overall_score"], "/100", "#7c6af5"),
-        (c2, "CV Score",      d["cv_score"],      "/100", "#7c6af5"),
-        (c3, "GitHub Score",  d["github_score"],  "/100", "#2dd4c4"),
-        (c4, "Market Fit",    d["market_fit"],    "%",    "#5ad19e"),
-    ]:
-        with col:
-            st.markdown(
-                f'<div class="dash-kpi">'
-                f'<div class="kpi-label">{label}</div>'
-                f'<div class="kpi-val" style="color:{color}">{val}'
-                f'<span style="font-size:16px;color:var(--t3)">{unit}</span></div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-    # Charts
-    if PLOTLY_AVAILABLE:
-        import plotly.graph_objects as go
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown('<div class="dash-section"><div class="dash-section-title">Skill Gap</div>', unsafe_allow_html=True)
-            skills   = d["skills"][:5]
-            missing  = d["missing_skills"][:5]
-            fig = go.Figure(data=[
-                go.Bar(name="Present", x=skills,  y=[85]*len(skills),  marker_color="#7c6af5"),
-                go.Bar(name="Missing", x=missing, y=[30]*len(missing), marker_color="#f56c6c"),
-            ])
-            fig.update_layout(
-                barmode="group", height=240,
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#8888aa", family="DM Sans", size=11),
-                margin=dict(l=10, r=10, t=10, b=20),
-                legend=dict(bgcolor="rgba(0,0,0,0)", font_color="#8888aa"),
-                xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        with col_b:
-            st.markdown('<div class="dash-section"><div class="dash-section-title">Language Distribution</div>', unsafe_allow_html=True)
-            if d["top_languages"]:
-                langs = [l[0] for l in d["top_languages"]]
-                vals  = [l[1] for l in d["top_languages"]]
-                fig2 = go.Figure(data=[go.Pie(
-                    labels=langs, values=vals, hole=0.45,
-                    marker=dict(colors=["#7c6af5","#2dd4c4","#f5a63a","#f56c6c","#5ad19e"]),
-                )])
-                fig2.update_layout(
-                    height=240, paper_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#8888aa", family="DM Sans", size=11),
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    legend=dict(bgcolor="rgba(0,0,0,0)", font_color="#8888aa"),
-                )
-                st.plotly_chart(fig2, use_container_width=True)
-            else:
-                st.info("No language data available.")
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    # 30-day plan
-    st.markdown('<div class="dash-section"><div class="dash-section-title">🚀 30-Day Action Plan</div>', unsafe_allow_html=True)
-    for rec in d["recommendations"]:
-        st.markdown(f"- ✅ {rec}")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # AI report
-    if st.button("📄 Generate AI Report", key="dash_gen_report"):
-        llm = st.session_state.get("llm") or load_llm()
-        if llm:
-            with st.spinner("Generating your report…"):
-                prompt = (
-                    f"Career assessment — Overall: {d['overall_score']}/100, "
-                    f"CV: {d['cv_score']}, GitHub: {d['github_score']}, "
-                    f"Market fit: {d['market_fit']}%. "
-                    f"Skills: {', '.join(d['skills'])}. "
-                    f"Missing: {', '.join(d['missing_skills'])}. "
-                    f"Experience: {d['experience_years']} yrs."
-                )
-                report = llm.invoke(
-                    prompt,
-                    system="You are a career intelligence analyst. Write a structured, encouraging, actionable report.",
-                )
-                st.markdown("---")
-                st.markdown(report)
-        else:
-            st.error("LLM not available. Add GROQ_API_KEY.")
-
-
-# ── Message rendering ────────────────────────────────────────────────────────
-def render_messages():
-    conv = st.session_state.conversations
-    if not conv:
-        return
-
-    for m in conv:
-        sid    = m.get("service", "cv")
-        accent = SERVICES[sid]["accent"]
-        sicon  = SERVICES[sid]["icon"]
-
-        if m["role"] == "user":
-            st.markdown(
-                f'<div class="msg-wrap">'
-                f'<div class="msg-row user">'
-                f'<div class="av usr">YOU</div>'
-                f'<div class="bubble">'
-                f'<div class="bubble-inner user">{m["content"]}</div>'
-                f'<div class="bubble-meta">{m["ts"]}</div>'
-                f'</div></div></div>',
-                unsafe_allow_html=True,
-            )
-        elif m["role"] == "assistant":
-            st.markdown(
-                f'<div class="msg-wrap">'
-                f'<div class="msg-row bot">'
-                f'<div class="av bot">P</div>'
-                f'<div class="bubble">'
-                f'<div class="bubble-inner bot">{m["content"]}</div>'
-                f'<div class="bubble-meta">'
-                f'<span class="svc-tag" style="background:{accent}22;color:{accent};border:1px solid {accent}44">'
-                f'{sicon} {SERVICES[sid]["label"]}</span>'
-                f'PathIQ · {m["ts"]}'
-                f'</div></div></div></div>',
-                unsafe_allow_html=True,
-            )
-        elif m["role"] == "dashboard":
-            # Special dashboard card
-            st.markdown(
-                f'<div class="msg-wrap">'
-                f'<div class="msg-row bot">'
-                f'<div class="av bot">P</div>'
-                f'<div style="flex:1;min-width:0">',
-                unsafe_allow_html=True,
-            )
-            render_dashboard()
-            st.markdown('</div></div></div>', unsafe_allow_html=True)
-
-
-# ── Core response handler ────────────────────────────────────────────────────
-def handle_input(user_msg: str):
-    user_msg = user_msg.strip()
-    if not user_msg:
-        return
-
-    sid  = st.session_state.active_service
-    conv = st.session_state.conversations
-
-    conv.append({"role": "user", "content": user_msg, "ts": ts(), "service": sid})
-
-    # Greeting shortcut
-    if is_greeting(user_msg) and len(conv) <= 3:
-        reply = greeting_reply()
-        conv.append({"role": "assistant", "content": reply, "ts": ts(), "service": sid})
-        save_csv(sid, user_msg, reply)
-        st.rerun()
-        return
-
-    # Assessment: dashboard request
-    if sid == "assess" and any(k in user_msg.lower() for k in
-                               ["dashboard", "show", "assessment", "full report", "30-day"]):
-        if not st.session_state.cv_result and not st.session_state.gh_result:
-            reply = ("I'd love to show your dashboard! First, please **upload your CV** or "
-                     "**connect your GitHub** using the 📎 / 🐙 buttons in the input bar below.")
-            conv.append({"role": "assistant", "content": reply, "ts": ts(), "service": sid})
-        else:
-            if st.session_state.assessment_data is None:
-                st.session_state.assessment_data = compute_assessment_data()
-            conv.append({"role": "dashboard", "content": "", "ts": ts(), "service": sid})
-        save_csv(sid, user_msg, "[dashboard rendered]")
-        st.rerun()
-        return
-
-    # LLM path
-    llm = st.session_state.get("llm") or load_llm()
-    if not llm:
-        conv.append({
-            "role": "assistant",
-            "content": "⚠️ I need a **Groq API key** to respond. Add `GROQ_API_KEY` to your `.env` or Streamlit secrets.",
-            "ts": ts(), "service": sid,
-        })
-        st.rerun()
-        return
-
-    st.session_state.llm = llm
-
-    # Build prompt
-    history = "\n".join(
-        f"{'User' if m['role']=='user' else 'PathIQ'}: {m['content']}"
-        for m in conv[-8:] if m["role"] in ("user", "assistant")
-    )
-
-    if sid == "rag" and RAG_AVAILABLE:
-        vs = st.session_state.get("vectorstore") or load_vectorstore()
-        g  = st.session_state.get("graph")       or load_graph()
-        if vs and g:
+        emb = HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device":"cpu"})
+        if os.path.exists(os.path.join(DB_DIR,"chroma.sqlite3")):
+            db = Chroma(embedding_function=emb, persist_directory=DB_DIR)
             try:
-                retriever = GraphRetriever(vectorstore=vs, graph=g, k=5, graph_k=5, hop_depth=2)
-                docs      = retriever.get_relevant_documents(user_msg)
-                context   = "\n\n".join(f"[Doc {i+1}]: {d.page_content}" for i, d in enumerate(docs))
-                prompt    = f"Context:\n{context}\n\nConversation:\n{history}\n\nAnswer the latest question."
+                count = db._collection.count()
+                st.sidebar.success(f"✅ Vector DB — {count} chunks")
             except Exception:
-                prompt = f"Conversation:\n{history}\n\nAnswer the latest question."
+                st.sidebar.success("✅ Vector DB loaded")
+            return db
+        st.sidebar.warning("📁 No vector DB — run ingestion")
+    except Exception as e:
+        st.sidebar.error(f"❌ Vector store: {e}")
+    return None
+
+
+@st.cache_resource(ttl=3600)
+def init_graph():
+    builder = KnowledgeGraphBuilder()
+    if builder.load():
+        s = builder.stats()
+        st.sidebar.success(f"🕸️ Graph — {s['nodes']} nodes · {s['edges']} edges")
+        return builder.G
+    st.sidebar.warning("🕸️ No graph — run ingestion")
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Ingestion
+# ══════════════════════════════════════════════════════════════════════════════
+def run_ingestion():
+    bar = st.progress(0); status = st.empty()
+    try:
+        status.text("📁 Scanning PDFs…")
+        docs_path = Path("docs"); docs_path.mkdir(exist_ok=True)
+        pdfs = list(docs_path.glob("**/*.pdf"))
+        if not pdfs:
+            status.warning("No PDFs in docs/ folder."); bar.progress(100); time.sleep(2); return False
+
+        all_docs = []
+        for i, pdf in enumerate(pdfs):
+            status.text(f"📄 {pdf.name} ({i+1}/{len(pdfs)})…")
+            all_docs.extend(PyPDFLoader(str(pdf)).load())
+            bar.progress(int(20*(i+1)/len(pdfs)))
+
+        status.text("✂️ Splitting…")
+        chunks = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
+        ).split_documents(all_docs)
+        bar.progress(30)
+
+        status.text("🔤 Building vector store…")
+        emb = HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device":"cpu"})
+        Path(DB_DIR).mkdir(exist_ok=True)
+        db = Chroma.from_documents(chunks, embedding=emb, persist_directory=DB_DIR)
+        db.persist(); bar.progress(65)
+
+        status.text("🕸️ Building knowledge graph…")
+        builder = KnowledgeGraphBuilder()
+        builder.build_from_documents(chunks, progress_callback=lambda d,t: bar.progress(65+int(30*d/t)))
+        s = builder.stats(); bar.progress(100)
+        status.success(f"✅ {len(chunks)} chunks · {s['nodes']} nodes · {s['edges']} edges")
+        time.sleep(2); status.empty(); bar.empty()
+        return True
+    except Exception as e:
+        status.error(f"❌ {e}"); bar.progress(100); time.sleep(3); status.empty(); bar.empty()
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Question processing
+# ══════════════════════════════════════════════════════════════════════════════
+def process_question(prompt, vectorstore, graph, llm):
+    conv = st.session_state.conversation_tracker
+    if is_greeting(prompt) and conv.get_context()["msg_count"] <= 2:
+        conv.increment_count()
+        return get_greeting(), []
+
+    retriever = GraphRetriever(vectorstore=vectorstore, graph=graph, k=5, graph_k=5, hop_depth=2)
+    docs      = retriever.get_relevant_documents(prompt)
+    conv.increment_count()
+
+    ctx       = conv.get_context()
+    context   = "\n\n".join(f"[Doc {i+1}]: {d.page_content}" for i,d in enumerate(docs))
+    formatted = WASLA_PROMPT.format(
+        context=context, question=prompt,
+        msg_count=ctx["msg_count"], previous_topics=ctx["previous_topics"],
+    )
+    response = llm.invoke(formatted)
+    save_csv(prompt, response)
+    return response, docs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Welcome & starters
+# ══════════════════════════════════════════════════════════════════════════════
+WELCOME = (
+    "👋 **Welcome to Wasla AI!** I'm your intelligent assistant powered by Graph RAG.\n\n"
+    "**What I can help with:**\n"
+    "• 📋 Document analysis and insights\n"
+    "• 🕸️ Connected information across the knowledge base\n"
+    "• 💡 Detailed answers with source references\n"
+    "• 🔗 Relationship discovery between topics\n\n"
+    "💬 Ask me anything about Wasla Solutions!"
+)
+
+STARTERS = [
+    "What services does Wasla offer?",
+    "How does Graph RAG work?",
+    "Tell me about Wasla's API",
+    "What industries does Wasla serve?",
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Render helpers
+# ══════════════════════════════════════════════════════════════════════════════
+def render_messages():
+    msgs = st.session_state.messages
+    for i, m in enumerate(msgs):
+        role    = m["role"]
+        content = m["content"]
+        t       = m.get("ts", "")
+        sources = m.get("sources", [])
+
+        if role == "user":
+            st.markdown(
+                f'<div class="msg u">'
+                f'<div class="av u">YOU</div>'
+                f'<div class="bub usr"><div class="bi">{content}</div>'
+                f'<div class="bm">{t}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
         else:
-            prompt = f"Conversation:\n{history}\n\nAnswer the latest question."
-    else:
-        prompt = f"Conversation:\n{history}\n\nAnswer the latest user question helpfully and specifically."
+            src_html = ""
+            if sources:
+                pills = "".join(f'<span class="spill">doc {j+1}</span>'
+                                for j in range(min(len(sources), 4)))
+                src_html = f'<div class="srcs">{pills}</div>'
 
-    with st.spinner(""):
-        reply = llm.invoke(prompt, system=SYSTEM_PROMPTS.get(sid, SYSTEM_PROMPTS["cv"]))
+            st.markdown(
+                f'<div class="msg bot">'
+                f'<div class="av b">W</div>'
+                f'<div class="bub bot"><div class="bi">{content}</div>'
+                f'{src_html}'
+                f'<div class="bm">Wasla AI <span class="bmd"></span> {t}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
 
-    conv.append({"role": "assistant", "content": reply, "ts": ts(), "service": sid})
-    save_csv(sid, user_msg, reply)
-    st.rerun()
+            # Feedback on last bot message
+            if i == len(msgs) - 1:
+                st.markdown('<div class="fb-row">', unsafe_allow_html=True)
+                fb1, fb2, _ = st.columns([1, 1, 10])
+                with fb1:
+                    if st.button("👍", key=f"up_{i}"):
+                        save_feedback(msgs[i-1]["content"] if i>0 else "", content, "positive")
+                        st.toast("Thanks!", icon="✅")
+                with fb2:
+                    if st.button("👎", key=f"dn_{i}"):
+                        save_feedback(msgs[i-1]["content"] if i>0 else "", content, "negative")
+                        st.toast("Got it!", icon="📝")
+                st.markdown('</div>', unsafe_allow_html=True)
 
 
-# ── Sidebar ─────────────────────────────────────────────────────────────────
 def render_sidebar():
-    sid    = st.session_state.active_service
-    smeta  = SERVICES[sid]
-
     with st.sidebar:
+        # Logo
         st.markdown(
-            '<div class="sb-wrap">'
-            '<div class="sb-logo">'
-            '<div class="gem">✦</div>'
-            '<div><div class="logo-title">PathIQ</div>'
-            '<div class="logo-badge">Career Intelligence</div>'
-            '</div></div>',
+            '<div style="padding:20px 16px 16px;border-bottom:1px solid rgba(255,255,255,.06)">'
+            '<div style="display:flex;align-items:center;gap:12px">'
+            '<div style="width:38px;height:38px;border-radius:11px;'
+            'background:linear-gradient(135deg,#007acc,#00d9ff);'
+            'display:flex;align-items:center;justify-content:center;font-size:18px;'
+            'box-shadow:0 4px 14px rgba(0,217,255,.25)">🕸️</div>'
+            '<div><div style="font-size:15px;font-weight:800;color:#e8eeff;letter-spacing:-.3px">Wasla AI</div>'
+            '<div style="font-size:10px;color:#00d9ff;background:rgba(0,217,255,.08);'
+            'padding:2px 8px;border-radius:20px;border:1px solid rgba(0,217,255,.2);'
+            'display:inline-block;font-weight:600;margin-top:2px">Graph RAG</div>'
+            '</div></div></div>',
             unsafe_allow_html=True,
         )
 
-        # Active service indicator
+        st.markdown("<div style='padding:14px 14px 0'>", unsafe_allow_html=True)
+
+        # AI
+        st.markdown('<div class="sb-lbl">AI Engine</div>', unsafe_allow_html=True)
+        key_ok = (hasattr(st,"secrets") and "GROQ_API_KEY" in st.secrets) or bool(os.getenv("GROQ_API_KEY"))
+        if key_ok:
+            st.success("✅ Groq API key found")
+            if st.button("▶ Start AI", key="btn_start_ai", use_container_width=True):
+                with st.spinner("Loading AI…"):
+                    st.session_state.llm = load_llm(); st.rerun()
+        else:
+            st.error("❌ GROQ_API_KEY missing")
+
+        st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
+
+        # Knowledge base
+        st.markdown('<div class="sb-lbl">Knowledge Base</div>', unsafe_allow_html=True)
+        db_ok    = os.path.exists(os.path.join(DB_DIR,"chroma.sqlite3"))
+        graph_ok = os.path.exists(GRAPH_PATH)
+
+        if db_ok and graph_ok:
+            st.success("✅ Index ready")
+            if st.session_state.vectorstore is None:
+                with st.spinner("Loading vector DB…"): st.session_state.vectorstore = init_vectorstore()
+            if st.session_state.graph is None:
+                with st.spinner("Loading graph…"): st.session_state.graph = init_graph()
+        else:
+            docs_path = Path("docs")
+            pdfs = list(docs_path.glob("**/*.pdf")) if docs_path.exists() else []
+            st.warning(f"{'📄 '+str(len(pdfs))+' PDF(s) found — index not built' if pdfs else '📁 No PDFs in docs/ folder'}")
+            if st.button("🔨 Build Index", key="btn_build", use_container_width=True):
+                if run_ingestion():
+                    st.cache_resource.clear(); st.rerun()
+
+        st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
+
+        # Status
+        with st.expander("⚙️ System Status", expanded=True):
+            vs = st.session_state.vectorstore; g = st.session_state.graph
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric("Groq",   "🟢" if key_ok else "🔴")
+                st.metric("AI",     "🟢" if st.session_state.llm else "🔴")
+            with c2:
+                st.metric("Vector", "🟢" if vs else "🔴")
+                st.metric("Graph",  "🟢" if g  else "🔴")
+            if g: st.caption(f"Nodes: {g.number_of_nodes()} · Edges: {g.number_of_edges()}")
+            st.caption(f"Messages: {len(st.session_state.messages)}")
+
+        st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
+
+        # Controls
+        st.markdown('<div class="sb-lbl">Controls</div>', unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔄 Reset", key="btn_reset", use_container_width=True):
+                st.cache_resource.clear(); st.session_state.llm = None; st.rerun()
+        with c2:
+            if st.button("🗑 Clear", key="btn_clear", use_container_width=True):
+                st.session_state.messages = [{"role":"assistant","content":WELCOME,"ts":ts(),"sources":[]}]
+                st.session_state.conversation_tracker = ConversationTracker(); st.rerun()
+
+        st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
+
+        # Export
+        st.markdown('<div class="sb-lbl">Export</div>', unsafe_allow_html=True)
+        if os.path.exists("chat_history.csv"):
+            with open("chat_history.csv") as f:
+                st.download_button("💬 Chat History", f, "chat_history.csv",
+                                   use_container_width=True, key="dl_chat")
+        if os.path.exists("feedback.csv"):
+            with open("feedback.csv") as f:
+                st.download_button("👍 Feedback", f, "feedback.csv",
+                                   use_container_width=True, key="dl_fb")
+
+        st.markdown('<div class="sb-div"></div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div class="sb-active-pill">'
-            f'<div class="sap-dot" style="background:{smeta["accent"]}"></div>'
-            f'<div><div class="sap-label">{smeta["icon"]} {smeta["label"]}</div>'
-            f'<div class="sap-sub">Active mode</div></div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown('<div class="sb-section-title">Services</div>', unsafe_allow_html=True)
-        for s_id, meta in SERVICES.items():
-            is_active = s_id == sid
-            label     = f"{meta['icon']}  {meta['label']}"
-            if is_active:
-                st.markdown(
-                    f'<div style="background:rgba(124,106,245,.10);border:1px solid rgba(124,106,245,.22);'
-                    f'border-radius:9px;padding:9px 12px;color:{meta["accent"]};'
-                    f'font-size:13px;font-weight:600;font-family:DM Sans,sans-serif;'
-                    f'margin-bottom:4px">{label}</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                if st.button(label, key=f"sb_{s_id}", use_container_width=True):
-                    st.session_state.active_service = s_id
-                    st.rerun()
-
-        st.markdown('<div class="sb-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="sb-section-title">Coming — Phase 2</div>', unsafe_allow_html=True)
-        for label in ["🎤  Mock Interview", "🔗  LinkedIn Optimizer", "🗺️  Skill Roadmap"]:
-            st.button(label, key=f"ph2_{label}", disabled=True, use_container_width=True)
-
-        st.markdown('<div class="sb-divider"></div>', unsafe_allow_html=True)
-
-        st.markdown(
-            '<div class="sb-status">'
-            '<div class="status-dot"></div>'
+            '<div class="sb-stat">'
+            '<div class="sb-dot" style="background:#34d399"></div>'
             'Graph RAG · LLaMA 3.3-70b'
             '</div>',
             unsafe_allow_html=True,
         )
-        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-
-        if st.button("🗑  Clear conversation", key="clear_conv", use_container_width=True):
-            st.session_state.conversations = []
-            st.session_state.assessment_data = None
-            st.rerun()
-
-        if os.path.exists("chat_history.csv"):
-            with open("chat_history.csv") as f:
-                st.download_button("⬇  Export history", f, "pathiq_history.csv",
-                                   use_container_width=True)
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
-
-# ── Chat header ──────────────────────────────────────────────────────────────
-def render_header():
-    sid   = st.session_state.active_service
-    meta  = SERVICES[sid]
-    msgs  = len([m for m in st.session_state.conversations if m["role"] == "user"])
-    st.markdown(
-        f'<div class="chat-header">'
-        f'<div class="ch-left">'
-        f'<div class="ch-icon" style="background:{meta["accent"]}18">{meta["icon"]}</div>'
-        f'<div>'
-        f'<div class="ch-name">{meta["label"]}</div>'
-        f'<div class="ch-sub">{SERVICE_HINTS[sid]}</div>'
-        f'</div></div>'
-        f'<div class="ch-right">'
-        f'<div class="ch-badge">{msgs} messages</div>'
-        f'<div class="ch-badge">PathIQ · Groq</div>'
-        f'</div></div>',
-        unsafe_allow_html=True,
-    )
-
-
-# ── Welcome card + quick chips ───────────────────────────────────────────────
-def render_welcome():
-    sid  = st.session_state.active_service
-    meta = SERVICES[sid]
-    if st.session_state.conversations:
-        return  # only show when chat is empty
-
-    descriptions = {
-        "cv":     "Upload your CV and I'll extract your skill fingerprint, experience level, achievement gaps, and tell you exactly what to rewrite.",
-        "github": "Share your GitHub username and I'll score your repositories, language diversity, and contribution quality — then show you how to level up.",
-        "jobs":   "Tell me your skills and experience. I'll match you against thousands of live postings and explain your fit score for each role.",
-        "assess": "Interactive Power BI–style dashboard: overall career score, skill gaps, GitHub metrics, and a personalized 30-day action plan.",
-    }
-    st.markdown(
-        f'<div class="welcome-card">'
-        f'<div class="wc-title">{meta["icon"]} {meta["label"]}</div>'
-        f'<div class="wc-desc">{descriptions[sid]}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-    # Quick action chips
-    actions = QUICK_ACTIONS[sid]
-    st.markdown('<div class="quick-actions">', unsafe_allow_html=True)
-    cols = st.columns(len(actions))
-    for i, (col, action) in enumerate(zip(cols, actions)):
-        with col:
-            if st.button(action, key=f"qa_{sid}_{i}", use_container_width=True):
-                handle_input(action)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-# ── Input bar ────────────────────────────────────────────────────────────────
-def render_input_bar():
-    sid  = st.session_state.active_service
-    meta = SERVICES[sid]
-
-    # Context pill
-    st.markdown(
-        f'<div class="input-context">'
-        f'<span class="ic-mode" style="background:{meta["accent"]}18;'
-        f'color:{meta["accent"]};border:1px solid {meta["accent"]}33">'
-        f'{meta["icon"]} {meta["label"].upper()}</span>'
-        f'<span class="ic-engine">PathIQ · Groq Graph RAG</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    # Tool toggles (CV upload / GitHub input) shown inline
-    if sid == "cv":
-        st.markdown('<div class="tool-row">', unsafe_allow_html=True)
-        with st.expander("📎 Upload CV (PDF)", expanded=st.session_state.show_upload):
-            uploaded = st.file_uploader(
-                "CV PDF", type=["pdf"], label_visibility="collapsed", key="cv_upload_main"
-            )
-            if uploaded and st.button("Analyze CV", key="analyze_cv_main"):
-                if CV_AVAILABLE:
-                    with st.spinner("Reading your CV…"):
-                        try:
-                            tmp = f"tmp_{uploaded.name}"
-                            with open(tmp, "wb") as f:
-                                f.write(uploaded.getbuffer())
-                            analyzer = CVAnalyzer()
-                            result   = analyzer.analyze_cv(tmp)
-                            os.remove(tmp)
-                            if result.get("success"):
-                                st.session_state.cv_result = result
-                                handle_input(
-                                    f"I've uploaded my CV. Data: {json.dumps(result.get('analysis', {}), indent=2)}. Please analyze in depth."
-                                )
-                            else:
-                                st.error(f"Error: {result.get('error')}")
-                        except Exception as e:
-                            st.error(f"Upload error: {e}")
-                else:
-                    st.warning("CVAnalyzer module not available.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    if sid == "github":
-        with st.expander("🐙 Analyze a GitHub profile", expanded=False):
-            gh_col1, gh_col2 = st.columns([3, 1])
-            with gh_col1:
-                gh_user = st.text_input(
-                    "GitHub username", placeholder="e.g. torvalds",
-                    label_visibility="collapsed", key="gh_user_main"
-                )
-            with gh_col2:
-                if st.button("Fetch →", key="fetch_gh_main"):
-                    if gh_user:
-                        if GH_AVAILABLE:
-                            with st.spinner(f"Fetching @{gh_user}…"):
-                                try:
-                                    analyzer = GitHubAnalyzer()
-                                    result   = analyzer.analyze_github_profile(gh_user)
-                                    if result.get("success"):
-                                        st.session_state.gh_result = result
-                                        handle_input(
-                                            f"GitHub @{gh_user} data: {json.dumps(result, indent=2)}. Full analysis please."
-                                        )
-                                    else:
-                                        st.error(f"Error: {result.get('error')}")
-                                except Exception as e:
-                                    st.error(f"GitHub error: {e}")
-                        else:
-                            st.warning("GitHubAnalyzer module not available.")
 
-    if sid == "assess":
-        with st.expander("🔧 Load Profile Data", expanded=False):
-            a1, a2 = st.columns(2)
-            with a1:
-                up2 = st.file_uploader("CV PDF", type=["pdf"], label_visibility="collapsed", key="assess_cv")
-                if up2 and st.button("Load CV", key="assess_load_cv"):
-                    if CV_AVAILABLE:
-                        with st.spinner("Reading CV…"):
-                            try:
-                                tmp = f"tmp_{up2.name}"
-                                with open(tmp, "wb") as f:
-                                    f.write(up2.getbuffer())
-                                analyzer = CVAnalyzer()
-                                result   = analyzer.analyze_cv(tmp)
-                                os.remove(tmp)
-                                if result.get("success"):
-                                    st.session_state.cv_result = result
-                                    st.session_state.assessment_data = None
-                                    st.success("CV loaded! Ask me to show the dashboard.")
-                                else:
-                                    st.error(result.get("error"))
-                            except Exception as e:
-                                st.error(str(e))
-                    else:
-                        st.warning("CVAnalyzer not available.")
-            with a2:
-                gh2 = st.text_input("GitHub username", label_visibility="collapsed",
-                                    placeholder="e.g. torvalds", key="assess_gh")
-                if st.button("Load GitHub", key="assess_load_gh"):
-                    if gh2 and GH_AVAILABLE:
-                        with st.spinner(f"Fetching @{gh2}…"):
-                            try:
-                                analyzer = GitHubAnalyzer()
-                                result   = analyzer.analyze_github_profile(gh2)
-                                if result.get("success"):
-                                    st.session_state.gh_result = result
-                                    st.session_state.assessment_data = None
-                                    st.success("GitHub loaded! Ask me to show the dashboard.")
-                                else:
-                                    st.error(result.get("error"))
-                            except Exception as e:
-                                st.error(str(e))
-                    else:
-                        st.warning("GitHubAnalyzer not available.")
+# ══════════════════════════════════════════════════════════════════════════════
+# Submit handler
+# ══════════════════════════════════════════════════════════════════════════════
+def _submit(user_msg: str):
+    msgs = st.session_state.messages
+    msgs.append({"role":"user","content":user_msg,"ts":ts(),"sources":[]})
 
-    # Main text input + send
-    st.markdown('<div style="display:flex;gap:10px">', unsafe_allow_html=True)
-    col_txt, col_btn = st.columns([9, 1])
-    with col_txt:
-        user_input = st.text_area(
-            "message",
-            placeholder=f"Message PathIQ about {meta['label'].lower()}…",
-            key=f"main_input_{sid}",
-            height=70,
-            label_visibility="collapsed",
-        )
-    with col_btn:
-        st.markdown('<div class="send-col" style="padding-top:0">', unsafe_allow_html=True)
-        if st.button("Send\n→", key=f"send_{sid}", use_container_width=True):
-            if user_input.strip():
-                handle_input(user_input)
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    llm   = st.session_state.llm
+    vs    = st.session_state.vectorstore
+    graph = st.session_state.graph
+
+    if not llm:
+        msgs.append({"role":"assistant","ts":ts(),"sources":[],
+                     "content":"⚠️ AI not started. Click **▶ Start AI** in the sidebar."})
+        st.rerun(); return
+
+    if not vs or not graph:
+        msgs.append({"role":"assistant","ts":ts(),"sources":[],
+                     "content":"⚠️ Knowledge base not ready. Click **Build Index** in the sidebar first."})
+        st.rerun(); return
+
+    with st.spinner("Wasla AI is thinking…"):
+        response, sources = process_question(user_msg, vs, graph, llm)
+
+    msgs.append({"role":"assistant","content":response,"ts":ts(),"sources":sources})
+    st.rerun()
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
 def main():
-    init_state()
     inject_css()
+
+    # Session state
+    for k, v in {
+        "messages":             [],
+        "llm":                  None,
+        "vectorstore":          None,
+        "graph":                None,
+        "conversation_tracker": ConversationTracker(),
+        "auto_ingest_done":     False,
+        "_pending":             None,
+    }.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    # Auto-ingest
+    if not st.session_state.auto_ingest_done:
+        docs_path = Path("docs"); docs_path.mkdir(exist_ok=True)
+        pdfs     = list(docs_path.glob("**/*.pdf"))
+        db_ok    = os.path.exists(os.path.join(DB_DIR,"chroma.sqlite3"))
+        graph_ok = os.path.exists(GRAPH_PATH)
+        if pdfs and (not db_ok or not graph_ok):
+            with st.spinner("🚀 Setting up knowledge base (runs once)…"):
+                try:
+                    run_ingestion(); st.cache_resource.clear()
+                except Exception as e:
+                    st.warning(f"Auto-ingest issue: {e}")
+        st.session_state.auto_ingest_done = True
+
+    # Welcome message
+    if not st.session_state.messages:
+        st.session_state.messages.append(
+            {"role":"assistant","content":WELCOME,"ts":ts(),"sources":[]}
+        )
+
+    # Sidebar
     render_sidebar()
-    render_header()
 
-    # Chat feed area
-    with st.container():
-        render_welcome()
-        render_messages()
+    # Header
+    vs_ok = st.session_state.vectorstore is not None
+    g_ok  = st.session_state.graph is not None
+    st.markdown(
+        '<div class="wasla-hdr">'
+        '<div class="hdr-left">'
+        '<div class="hdr-gem">🕸️</div>'
+        '<div><div class="hdr-title">Wasla AI Assistant</div>'
+        '<div class="hdr-sub">Powered by Graph RAG · Ask anything about Wasla Solutions</div>'
+        '</div></div>'
+        '<div class="hdr-right">'
+        + ('<div class="hdr-badge live">● RAG Active</div>' if vs_ok and g_ok
+           else '<div class="hdr-badge">○ RAG Offline</div>')
+        + '<div class="hdr-badge">Groq · LLaMA 3.3</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    # Starter chips (first visit only)
+    if len(st.session_state.messages) == 1:
+        cols = st.columns(len(STARTERS))
+        for i, (col, q) in enumerate(zip(cols, STARTERS)):
+            with col:
+                if st.button(q, key=f"s_{i}", use_container_width=True):
+                    st.session_state._pending = q; st.rerun()
 
-    # Input bar (always at bottom)
-    render_input_bar()
+    # Messages
+    render_messages()
+
+    # Handle chip pending
+    if st.session_state._pending:
+        p = st.session_state._pending
+        st.session_state._pending = None
+        _submit(p); return
+
+    # ── Chat input — Enter sends! ──────────────────────────────────────────
+    st.markdown(
+        '<div class="input-meta">'
+        '<span class="im-tag">WASLA AI</span>'
+        '<span class="im-hint">Enter to send · Shift+Enter for new line</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    user_input = st.chat_input("Ask Wasla AI anything…", key="chat_main")
+    if user_input and user_input.strip():
+        _submit(user_input.strip())
 
 
 if __name__ == "__main__":
