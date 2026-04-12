@@ -1,206 +1,254 @@
 """
-job_matcher.py — PathIQ Job Matching Engine
-============================================
-Matches a user profile against a jobs CSV database and uses Groq
-to generate ranked matches with explanation and gap analysis.
+Job Matcher  –  fixed
+======================
+• Uses groq package directly (langchain_community.llms.Groq does not exist)
+• Keyword-filters the CSV first, then sends top candidates to the LLM
+• Returns a parsed list of job dicts, not a raw string
+• Handles multiple Kaggle CSV column formats automatically
 """
 
 import os
-import json
 import re
+import json
+
 import pandas as pd
-from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv()
 
-JOBS_PATH = Path("data/jobs.csv")
+# ── Groq helpers ──────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are PathIQ's Job Matching Engine — a precision career placement AI.
-Given a user profile and job listings, return ONLY a valid JSON object. No markdown, no fences.
+def _groq_client():
+    from groq import Groq
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        raise ValueError("GROQ_API_KEY not set")
+    return Groq(api_key=key)
 
-Required structure:
-{
-  "matches": [
-    {
-      "rank": 1,
-      "title": "Job title",
-      "company": "Company name",
-      "match_score": 1-100,
-      "why_fit": "2-sentence explanation of why they fit",
-      "skill_gaps": ["gap 1", "gap 2"],
-      "gap_fix": "How to close the main gap in < 30 days",
-      "salary_est_usd": {"min": 100000, "max": 145000},
-      "apply_priority": "high|medium|low"
-    }
-  ],
-  "overall_market_fit": 1-100,
-  "strongest_profile_aspect": "One sentence",
-  "top_recommendation": "The single best next step for this candidate",
-  "search_keywords": ["keyword1", "keyword2", "keyword3"]
-}"""
 
+def _call_llm(client, prompt: str, max_tokens: int = 1500) -> str:
+    for model in ["llama-3.3-70b-versatile", "gemma2-9b-it"]:
+        try:
+            r = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            return r.choices[0].message.content
+        except Exception:
+            continue
+    raise RuntimeError("All Groq models failed.")
+
+
+def _parse_json(text: str):
+    text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+        m2 = re.search(r"\{.*\}", text, re.DOTALL)
+        if m2:
+            try:
+                return json.loads(m2.group())
+            except Exception:
+                pass
+    return []
+
+
+# ── CSV column normaliser ─────────────────────────────────────────────────────
+
+# Maps known Kaggle column names → our internal names
+_COL_MAP = {
+    # job title
+    "job_title":        "title",
+    "title":            "title",
+    "position":         "title",
+    "job_position":     "title",
+    "role":             "title",
+    # company
+    "company_name":     "company",
+    "company":          "company",
+    "employer":         "company",
+    # description
+    "job_description":  "description",
+    "description":      "description",
+    "responsibilities": "description",
+    "details":          "description",
+    # location
+    "location":         "location",
+    "job_location":     "location",
+    "city":             "location",
+    # salary
+    "salary":           "salary",
+    "salary_in_usd":    "salary",
+    "salary_estimate":  "salary",
+    "avg_salary":       "salary",
+    # experience / level
+    "experience_level": "level",
+    "seniority_level":  "level",
+    "level":            "level",
+    "employment_type":  "type",
+}
+
+
+def _normalise(df: pd.DataFrame) -> pd.DataFrame:
+    rename = {}
+    for col in df.columns:
+        low = col.lower().strip()
+        if low in _COL_MAP and _COL_MAP[low] not in df.columns:
+            rename[col] = _COL_MAP[low]
+    return df.rename(columns=rename)
+
+
+# ── Keyword pre-filter ────────────────────────────────────────────────────────
+
+def _score_row(row_text: str, skills: list[str], roles: list[str]) -> int:
+    """Quick keyword match score — no LLM needed for pre-filtering."""
+    text = row_text.lower()
+    score = 0
+    for s in skills:
+        if s.lower() in text:
+            score += 2
+    for r in roles:
+        # match any word from a role title
+        for word in r.lower().split():
+            if len(word) > 3 and word in text:
+                score += 1
+    return score
+
+
+def _load_jobs(limit: int = 500) -> pd.DataFrame | None:
+    paths = [
+        "data/jobs_combined.csv",
+        "data/jobs.csv",
+        "docs/ai_jobs_market_2025_2026.csv",
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                df = pd.read_csv(p, nrows=limit, on_bad_lines="skip")
+                df = _normalise(df)
+                df = df.fillna("")
+                return df
+            except Exception as e:
+                print(f"Warning loading {p}: {e}")
+    return None
+
+
+# ── Main class ────────────────────────────────────────────────────────────────
 
 class JobMatcher:
-    """Matches user skills/experience against a jobs database."""
+    def __init__(self):
+        self.client = _groq_client()
 
-    def __init__(self, jobs_path: str = None):
-        self.jobs_path = Path(jobs_path) if jobs_path else JOBS_PATH
-        self._llm_client = None
-        self._df = None
-
-    def _get_llm(self):
-        if self._llm_client:
-            return self._llm_client
-        try:
-            from groq import Groq
-        except ImportError:
-            raise ImportError("Install groq: pip install groq")
-
-        key = None
-        try:
-            import streamlit as st
-            key = st.secrets.get("GROQ_API_KEY")
-        except Exception:
-            pass
-        if not key:
-            key = os.getenv("GROQ_API_KEY")
-        if not key:
-            raise ValueError("GROQ_API_KEY not found")
-
-        self._llm_client = Groq(api_key=key)
-        return self._llm_client
-
-    def _load_jobs(self) -> pd.DataFrame:
-        if self._df is not None:
-            return self._df
-
-        if not self.jobs_path.exists():
-            raise FileNotFoundError(
-                f"Jobs database not found at {self.jobs_path}. "
-                "Download a dataset from Kaggle and save as data/jobs.csv. "
-                "See README for dataset options."
-            )
-
-        df = pd.read_csv(self.jobs_path)
-
-        # Normalize column names (handle different Kaggle dataset formats)
-        df.columns = [c.lower().strip().replace(" ", "_") for c in df.columns]
-
-        # Map known column aliases to standard names
-        col_map = {
-            "job_title": ["job_title", "title", "position", "role", "job_name"],
-            "company":   ["company", "company_name", "employer", "organization"],
-            "description": ["description", "job_description", "requirements", "details"],
-            "location":  ["location", "city", "country", "work_location"],
-            "salary":    ["salary", "salary_usd", "salary_in_usd", "average_salary", "pay"],
-        }
-        rename = {}
-        for std, aliases in col_map.items():
-            if std not in df.columns:
-                for alias in aliases:
-                    if alias in df.columns:
-                        rename[alias] = std
-                        break
-        if rename:
-            df = df.rename(columns=rename)
-
-        # Ensure required columns exist
-        for col in ["job_title", "company", "description"]:
-            if col not in df.columns:
-                df[col] = "Unknown"
-
-        self._df = df
-        return df
-
-    def _candidate_keyword_filter(self, df: pd.DataFrame, profile: dict) -> pd.DataFrame:
-        """Pre-filter jobs by keyword match before sending to LLM."""
-        skills = [s.lower() for s in profile.get("skills", [])]
-        roles  = [r.lower() for r in profile.get("interested_roles", [])]
-        keywords = skills + roles
-
-        if not keywords:
-            return df.head(50)
-
-        def row_score(row):
-            text = " ".join([
-                str(row.get("job_title", "")),
-                str(row.get("description", "")),
-            ]).lower()
-            return sum(1 for kw in keywords if kw in text)
-
-        df = df.copy()
-        df["_score"] = df.apply(row_score, axis=1)
-        filtered = df[df["_score"] > 0].sort_values("_score", ascending=False).head(20)
-        if len(filtered) < 5:
-            filtered = df.head(20)
-        return filtered.drop(columns=["_score"])
-
-    def match_jobs(self, user_profile: dict) -> dict:
-        """
-        Match user profile against job database.
-
-        Args:
-            user_profile: {
-                "skills": ["Python", "FastAPI", ...],
-                "experience_years": 4,
-                "seniority_level": "mid",
-                "interested_roles": ["Backend Engineer", ...]
+    def match_jobs(self, user_profile: dict, limit: int = 8) -> dict:
+        df = _load_jobs()
+        if df is None or df.empty:
+            return {
+                "success": False,
+                "error": (
+                    "Job database not found. "
+                    "Download a Kaggle dataset and save it as data/jobs.csv"
+                ),
             }
 
-        Returns:
-            {"success": bool, "matches": list, "analysis": dict, "error": str}
-        """
-        try:
-            df = self._load_jobs()
-        except FileNotFoundError as e:
-            return {"success": False, "error": str(e)}
-        except Exception as e:
-            return {"success": False, "error": f"Failed to load jobs database: {e}"}
+        skills  = user_profile.get("skills", [])
+        roles   = user_profile.get("interested_roles", [])
+        seniority = user_profile.get("seniority_level", "")
+        exp_years = user_profile.get("experience_years", 0)
 
-        try:
-            candidates = self._candidate_keyword_filter(df, user_profile)
-        except Exception:
-            candidates = df.head(20)
+        # Build a combined text column for scoring
+        text_cols = [c for c in ["title", "description", "company", "level"] if c in df.columns]
+        if not text_cols:
+            # fallback: use all columns
+            text_cols = list(df.columns)
 
-        # Build compact job list for LLM
+        df["_combined"] = df[text_cols].astype(str).agg(" ".join, axis=1)
+        df["_score"] = df["_combined"].apply(lambda t: _score_row(t, skills, roles))
+
+        # Take top candidates (scored > 0 first, then random sample as fallback)
+        candidates = df[df["_score"] > 0].nlargest(20, "_score")
+        if len(candidates) < 5:
+            candidates = df.sample(min(20, len(df)), random_state=42)
+
+        # Prepare a compact list for the LLM
         job_list = []
         for _, row in candidates.iterrows():
-            job_list.append({
-                "title":       str(row.get("job_title", ""))[:80],
-                "company":     str(row.get("company", ""))[:50],
-                "description": str(row.get("description", ""))[:300],
-                "location":    str(row.get("location", ""))[:50],
-                "salary":      str(row.get("salary", "N/A"))[:30],
-            })
+            entry = {}
+            for field in ["title", "company", "location", "level", "type", "salary", "description"]:
+                if field in row and str(row[field]).strip():
+                    val = str(row[field])
+                    entry[field] = val[:200] if field == "description" else val
+            job_list.append(entry)
 
-        prompt = f"""Match this candidate profile against the job listings and return the top 5 matches.
+        prompt = f"""You are a career advisor. Given the user profile and job listings below,
+return ONLY a valid JSON array (no markdown, no explanation) of the top {limit} best-matching jobs.
 
-CANDIDATE PROFILE:
-{json.dumps(user_profile, indent=2)}
+Each object in the array must have exactly these keys:
+{{
+  "title": "job title",
+  "company": "company name",
+  "location": "city or remote",
+  "match_score": <integer 0-100>,
+  "matched_skills": ["skill1", "skill2"],
+  "missing_skills": ["skill1"],
+  "why_good_fit": "one or two sentences explaining the match",
+  "salary": "salary info or N/A"
+}}
 
-JOB LISTINGS:
-{json.dumps(job_list[:20], indent=2)}
+User profile:
+- Skills: {', '.join(skills)}
+- Experience: {exp_years} years
+- Seniority: {seniority}
+- Interested roles: {', '.join(roles) if roles else 'any'}
 
-Return ONLY the JSON object with the top 5 best matches."""
+Job listings:
+{json.dumps(job_list, indent=2)[:4000]}
+
+Return ONLY the JSON array.
+"""
 
         try:
-            client   = self._get_llm()
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
-                ],
-                temperature=0.3,
-                max_tokens=1200,
-            )
-            raw_json = response.choices[0].message.content.strip()
-            raw_json = re.sub(r"```(?:json)?\s*", "", raw_json).strip().strip("`")
-            result   = json.loads(raw_json)
-            return {"success": True, **result}
+            raw     = _call_llm(self.client, prompt)
+            matches = _parse_json(raw)
 
-        except json.JSONDecodeError as e:
-            return {"success": False, "error": f"JSON parse error: {e}"}
+            # Ensure it's a list
+            if isinstance(matches, dict) and "jobs" in matches:
+                matches = matches["jobs"]
+            if not isinstance(matches, list):
+                matches = []
+
+            return {
+                "success":  True,
+                "matches":  matches,
+                "total_in_db": len(df),
+                "candidates_evaluated": len(job_list),
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def explain_gap(self, user_skills: list, job: dict) -> dict:
+        prompt = f"""You are a career advisor. Analyse the skill gap.
+
+User skills: {', '.join(user_skills)}
+
+Target job: {json.dumps(job)}
+
+Return ONLY a valid JSON object:
+{{
+  "matching_skills": ["..."],
+  "missing_skills": ["..."],
+  "learning_path": ["step 1", "step 2"],
+  "time_to_readiness": "e.g. 3 months",
+  "resources": ["course or resource 1", "resource 2"]
+}}
+"""
+        try:
+            raw = _call_llm(self.client, prompt, max_tokens=800)
+            return {"success": True, "gap_analysis": _parse_json(raw)}
         except Exception as e:
             return {"success": False, "error": str(e)}
