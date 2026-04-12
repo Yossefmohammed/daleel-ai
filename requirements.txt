@@ -1,4 +1,5 @@
 # PathIQ — Career Intelligence Platform
+
 # Core
 streamlit>=1.35.0
 python-dotenv>=1.0.0
@@ -14,13 +15,14 @@ langchain-text-splitters>=0.2.0
 chromadb>=0.5.0
 sentence-transformers>=2.7.0
 
-# PDF parsing (install at least one)
-pymupdf>=1.24.0          # fastest, recommended
-# pdfplumber>=0.11.0     # alternative
-# PyPDF2>=3.0.0          # lightweight fallback
+# PDF parsing
+pymupdf>=1.24.0
+pypdf>=5.0.0
 
-# GitHub API
+# GitHub API + scraping
 requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
 
 # Job matching
 pandas>=2.1.0
@@ -28,10 +30,5 @@ pandas>=2.1.0
 # Knowledge graph
 networkx>=3.3
 
-# NLP entity extraction (optional but recommended)
-# spacy>=3.7.0
-# After installing spacy: python -m spacy download en_core_web_sm
-
 # Data
 numpy>=1.26.0
-pypdf>=5.0.0
