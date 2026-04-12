@@ -17,6 +17,7 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
+from data_scraper import scrape_and_save
 
 # ── page config (must be the very first Streamlit call) ────────────────────
 st.set_page_config(page_title="Career AI", page_icon="🎯",
@@ -226,20 +227,18 @@ def _load_combined():
 
 def build_job_database(status_ph=None):
     def say(m):
-        if status_ph: status_ph.info(m)
-    all_jobs = []
-    say("📡 Scraping RemoteOK…")
-    rok = _scrape_remoteok(); all_jobs.extend(rok)
-    say(f"✅ RemoteOK: {len(rok)} jobs. Trying Arbeitnow…")
-    anow = _scrape_arbeitnow(); all_jobs.extend(anow)
-    say(f"✅ Arbeitnow: {len(anow)} jobs. Checking local CSV…")
-    local = _load_local_csv(); all_jobs.extend(local)
-    seen, unique = set(), []
-    for j in all_jobs:
-        k = (str(j.get("title","")).lower()[:40], str(j.get("company","")).lower()[:30])
-        if k not in seen: seen.add(k); unique.append(j)
-    _save_combined(unique)
-    return len(unique)
+        if status_ph:
+            status_ph.info(m)
+
+    say("📡 Scraping all sources (RemoteOK + Arbeitnow + The Muse + Wuzzuf)...")
+
+    try:
+        df = scrape_and_save()
+        say(f"✅ Done — {len(df)} jobs collected")
+        return len(df)
+    except Exception as e:
+        say(f"⚠️ Scraping failed: {e}")
+        return 0
 
 def _auto_build():
     if st.session_state.get("db_checked"): return
