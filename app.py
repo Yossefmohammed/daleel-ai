@@ -1,18 +1,18 @@
 """
-Career AI Assistant  –  fully self-contained + Copilot floating chat
+Career AI Assistant  –  fully self-contained + Sidebar Chat (FIXED)
 =====================================================================
-Changes vs previous version:
-  • Career Chat is now a floating Copilot panel (bottom-right, always available)
-  • CV skills auto-populate the Job Matcher AND trigger a targeted skill scrape
-  • data_scraper.scrape_by_skills() is called with user skills for relevant jobs
-  • 4 tabs only: CV / GitHub / Jobs / Assessment
+ROOT CAUSE OF BROKEN COPILOT:
+  st.markdown() renders inside a sandboxed <iframe>, so:
+    1. position:fixed is relative to that tiny iframe, not the browser viewport
+    2. <script> tags are stripped or delayed by Streamlit's sanitizer
+    3. The Groq API key was exposed in plain HTML source
 
-FIXES APPLIED (2 changes only, nothing else removed):
-  FIX 1 – Chat button: removed inline onclick (stripped by Streamlit sanitizer),
-           now wired via addEventListener inside the <script> block.
-  FIX 2 – Skills auto-fill: after CV analysis, write directly into
-           st.session_state["js_skills_v3"] so Streamlit picks it up
-           even when the widget key already exists in session state.
+FIXES APPLIED:
+  FIX 1 – Floating chat replaced with a proper Streamlit sidebar chat panel.
+           Uses st.chat_input / st.chat_message — fully supported, no JS needed.
+  FIX 2 – All AI calls go through the server-side _llm() function.
+           API key never touches the browser.
+  FIX 3 – Skills auto-fill via st.session_state["js_skills_v3"] preserved.
 """
 
 import os, re, json, html, datetime, time
@@ -39,351 +39,103 @@ def _css():
   --g:#34d399;--a:#fbbf24;--r:#f87171;
   --ff:'Plus Jakarta Sans',system-ui,sans-serif;--fm:'JetBrains Mono',monospace;--R:14px;--Rs:9px;}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body,[data-testid="stApp"],[data-testid="stAppViewContainer"],.main{background:var(--n)!important;font-family:var(--ff)!important;color:var(--t1)!important}
-#MainMenu,header,footer,[data-testid="stToolbar"],[data-testid="stDecoration"],[data-testid="stStatusWidget"]{display:none!important}
+html,body,[data-testid="stApp"],[data-testid="stAppViewContainer"],.main{
+  background:var(--n)!important;font-family:var(--ff)!important;color:var(--t1)!important}
+#MainMenu,header,footer,[data-testid="stToolbar"],[data-testid="stDecoration"],
+[data-testid="stStatusWidget"]{display:none!important}
 .block-container{padding:0!important;max-width:100%!important}
 section.main>div{padding:0!important}
-[data-testid="stSidebar"]{background:var(--n2)!important;border-right:1px solid var(--L)!important;min-width:268px!important;max-width:268px!important}
+[data-testid="stSidebar"]{background:var(--n2)!important;border-right:1px solid var(--L)!important;
+  min-width:300px!important;max-width:300px!important}
 [data-testid="stSidebar"]>div:first-child{padding:0!important}
-[data-testid="stSidebar"] label,[data-testid="stSidebar"] p,[data-testid="stSidebar"] span{color:var(--t2)!important;font-size:12.5px!important}
-[data-testid="stSidebar"] .stButton>button{background:transparent!important;border:1px solid var(--L2)!important;border-radius:var(--Rs)!important;color:var(--t2)!important;font-family:var(--ff)!important;font-size:12.5px!important;font-weight:500!important;padding:9px 14px!important;width:100%!important;transition:all .18s!important}
-[data-testid="stSidebar"] .stButton>button:hover{background:var(--n4)!important;border-color:var(--cb)!important;color:var(--t1)!important}
+[data-testid="stSidebar"] label,[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span{color:var(--t2)!important;font-size:12.5px!important}
+[data-testid="stSidebar"] .stButton>button{background:transparent!important;
+  border:1px solid var(--L2)!important;border-radius:var(--Rs)!important;
+  color:var(--t2)!important;font-family:var(--ff)!important;font-size:12.5px!important;
+  font-weight:500!important;padding:9px 14px!important;width:100%!important;
+  box-shadow:none!important;transition:all .18s!important}
+[data-testid="stSidebar"] .stButton>button:hover{background:var(--n4)!important;
+  border-color:var(--cb)!important;color:var(--t1)!important;transform:none!important}
 [data-testid="stSidebar"] [data-testid="stMetricValue"]{color:var(--t1)!important;font-size:15px!important}
 [data-testid="stSidebar"] [data-testid="stMetricLabel"]{color:var(--t3)!important;font-size:10px!important}
-[data-testid="stTabs"] [data-baseweb="tab-list"]{background:var(--n2)!important;border-bottom:1px solid var(--L)!important;padding:0 28px!important;gap:2px!important}
-[data-testid="stTabs"] [data-baseweb="tab"]{background:transparent!important;border:none!important;color:var(--t2)!important;font-family:var(--ff)!important;font-size:13px!important;font-weight:600!important;padding:14px 16px!important;border-bottom:2px solid transparent!important;transition:all .18s!important}
+/* chat messages in sidebar */
+[data-testid="stSidebar"] [data-testid="stChatMessage"]{background:var(--n3)!important;
+  border:1px solid var(--L)!important;border-radius:var(--R)!important;margin-bottom:6px!important}
+[data-testid="stSidebar"] [data-testid="stChatInput"]{background:var(--n3)!important;
+  border:1px solid var(--L2)!important;border-radius:var(--R)!important;}
+[data-testid="stTabs"] [data-baseweb="tab-list"]{background:var(--n2)!important;
+  border-bottom:1px solid var(--L)!important;padding:0 28px!important;gap:2px!important}
+[data-testid="stTabs"] [data-baseweb="tab"]{background:transparent!important;border:none!important;
+  color:var(--t2)!important;font-family:var(--ff)!important;font-size:13px!important;
+  font-weight:600!important;padding:14px 16px!important;
+  border-bottom:2px solid transparent!important;transition:all .18s!important}
 [data-testid="stTabs"] [data-baseweb="tab"]:hover{color:var(--t1)!important}
 [data-testid="stTabs"] [aria-selected="true"]{color:var(--c)!important;border-bottom-color:var(--c)!important}
-[data-testid="stTabPanel"]{background:transparent!important;padding:28px!important}
-[data-testid="stTextInput"] input,[data-testid="stTextArea"] textarea,[data-testid="stNumberInput"] input{background:var(--n3)!important;border:1px solid var(--L2)!important;border-radius:var(--R)!important;color:var(--t1)!important;font-family:var(--ff)!important;font-size:13.5px!important;caret-color:var(--c)!important}
-[data-testid="stTextInput"] input:focus,[data-testid="stTextArea"] textarea:focus{border-color:var(--c)!important;box-shadow:0 0 0 2px var(--cd)!important;outline:none!important}
-[data-testid="stTextInput"] label,[data-testid="stTextArea"] label,[data-testid="stNumberInput"] label,[data-testid="stSelectbox"] label,[data-testid="stMultiSelect"] label{color:var(--t2)!important;font-size:12.5px!important;font-weight:600!important}
-[data-testid="stFileUploader"]{background:var(--n3)!important;border:1px dashed var(--cb)!important;border-radius:var(--R)!important;padding:16px!important}
-[data-testid="stSelectbox"] [data-baseweb="select"]>div,[data-testid="stMultiSelect"] [data-baseweb="select"]>div{background:var(--n3)!important;border:1px solid var(--L2)!important;border-radius:var(--R)!important;color:var(--t1)!important}
-.stButton>button{background:linear-gradient(135deg,#007acc,#00d9ff)!important;border:none!important;border-radius:var(--R)!important;color:var(--n)!important;font-family:var(--ff)!important;font-size:13.5px!important;font-weight:700!important;padding:11px 22px!important;transition:all .2s!important;box-shadow:0 4px 14px rgba(0,217,255,.25)!important}
+[data-testid="stTabPanel"]{background:transparent!important;padding:28px!important;padding-right:32px!important}
+[data-testid="stTextInput"] input,[data-testid="stTextArea"] textarea,
+[data-testid="stNumberInput"] input{background:var(--n3)!important;border:1px solid var(--L2)!important;
+  border-radius:var(--R)!important;color:var(--t1)!important;font-family:var(--ff)!important;
+  font-size:13.5px!important;caret-color:var(--c)!important}
+[data-testid="stTextInput"] input:focus,[data-testid="stTextArea"] textarea:focus{
+  border-color:var(--c)!important;box-shadow:0 0 0 2px var(--cd)!important;outline:none!important}
+[data-testid="stTextInput"] label,[data-testid="stTextArea"] label,
+[data-testid="stNumberInput"] label,[data-testid="stSelectbox"] label,
+[data-testid="stMultiSelect"] label{color:var(--t2)!important;font-size:12.5px!important;font-weight:600!important}
+[data-testid="stFileUploader"]{background:var(--n3)!important;border:1px dashed var(--cb)!important;
+  border-radius:var(--R)!important;padding:16px!important}
+[data-testid="stSelectbox"] [data-baseweb="select"]>div,
+[data-testid="stMultiSelect"] [data-baseweb="select"]>div{background:var(--n3)!important;
+  border:1px solid var(--L2)!important;border-radius:var(--R)!important;color:var(--t1)!important}
+.stButton>button{background:linear-gradient(135deg,#007acc,#00d9ff)!important;border:none!important;
+  border-radius:var(--R)!important;color:var(--n)!important;font-family:var(--ff)!important;
+  font-size:13.5px!important;font-weight:700!important;padding:11px 22px!important;
+  transition:all .2s!important;box-shadow:0 4px 14px rgba(0,217,255,.25)!important}
 .stButton>button:hover{transform:translateY(-2px)!important;box-shadow:0 6px 20px rgba(0,217,255,.4)!important}
 .stButton>button:active{transform:translateY(0)!important}
 .stButton>button:disabled{opacity:.4!important;transform:none!important}
-[data-testid="stMetric"]{background:var(--n3)!important;border:1px solid var(--L)!important;border-radius:var(--R)!important;padding:14px 18px!important}
+[data-testid="stMetric"]{background:var(--n3)!important;border:1px solid var(--L)!important;
+  border-radius:var(--R)!important;padding:14px 18px!important}
 [data-testid="stMetricLabel"]{color:var(--t3)!important;font-size:11px!important}
 [data-testid="stMetricValue"]{color:var(--t1)!important;font-size:22px!important}
-[data-testid="stExpander"]{background:var(--n3)!important;border:1px solid var(--L)!important;border-radius:var(--R)!important}
+[data-testid="stExpander"]{background:var(--n3)!important;border:1px solid var(--L)!important;
+  border-radius:var(--R)!important}
 [data-testid="stExpander"] summary{color:var(--t2)!important;font-size:12.5px!important}
 .stProgress>div>div{background:var(--c)!important}
-[data-testid="stDownloadButton"]>button{background:transparent!important;border:1px solid var(--L2)!important;box-shadow:none!important;color:var(--t2)!important}
-[data-testid="stDownloadButton"]>button:hover{border-color:var(--cb)!important;color:var(--c)!important;transform:none!important;box-shadow:none!important}
+[data-testid="stDownloadButton"]>button{background:transparent!important;
+  border:1px solid var(--L2)!important;box-shadow:none!important;color:var(--t2)!important}
+[data-testid="stDownloadButton"]>button:hover{border-color:var(--cb)!important;
+  color:var(--c)!important;transform:none!important;box-shadow:none!important}
 hr{border-color:var(--L)!important}
-.hdr{background:var(--n2);border-bottom:1px solid var(--L);padding:0 28px;height:64px;display:flex;align-items:center;justify-content:space-between}
-.hgem{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#007acc,#00d9ff);display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 14px rgba(0,217,255,.25)}
-.badge{font-size:10px;font-weight:600;padding:4px 10px;border-radius:20px;border:1px solid var(--L2);color:var(--t3);background:var(--n3)}
+.hdr{background:var(--n2);border-bottom:1px solid var(--L);padding:0 28px;height:64px;
+  display:flex;align-items:center;justify-content:space-between}
+.hgem{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#007acc,#00d9ff);
+  display:flex;align-items:center;justify-content:center;font-size:20px;
+  box-shadow:0 4px 14px rgba(0,217,255,.25)}
+.badge{font-size:10px;font-weight:600;padding:4px 10px;border-radius:20px;
+  border:1px solid var(--L2);color:var(--t3);background:var(--n3)}
 .badge.live{background:rgba(52,211,153,.10);border-color:rgba(52,211,153,.25);color:#34d399}
-.pill{display:inline-block;background:var(--cd);border:1px solid var(--cb);color:var(--c);font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;margin:3px 2px;font-family:var(--fm)}
+.pill{display:inline-block;background:var(--cd);border:1px solid var(--cb);color:var(--c);
+  font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;margin:3px 2px;font-family:var(--fm)}
 .pill.tech{background:rgba(251,191,36,.08);border-color:rgba(251,191,36,.25);color:#fbbf24}
 .pill.miss{background:rgba(248,113,113,.08);border-color:rgba(248,113,113,.25);color:#f87171}
-.aib{background:var(--n3);border:1px solid var(--L);border-left:3px solid var(--c);border-radius:0 var(--R) var(--R) var(--R);padding:16px 20px;font-size:13.5px;line-height:1.75;color:var(--t1);margin:12px 0}
-.ailbl{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--c);margin-bottom:8px}
-.jcard{background:var(--n3);border:1px solid var(--L);border-radius:var(--R);padding:20px 22px;margin-bottom:14px;transition:border-color .18s}
+.aib{background:var(--n3);border:1px solid var(--L);border-left:3px solid var(--c);
+  border-radius:0 var(--R) var(--R) var(--R);padding:16px 20px;font-size:13.5px;
+  line-height:1.75;color:var(--t1);margin:12px 0}
+.ailbl{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--c);margin-bottom:8px}
+.jcard{background:var(--n3);border:1px solid var(--L);border-radius:var(--R);
+  padding:20px 22px;margin-bottom:14px;transition:border-color .18s}
 .jcard:hover{border-color:var(--cb)}
-.sh{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--t3);margin:22px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--L)}
+.sh{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--t3);margin:22px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--L)}
 .sdiv{height:1px;background:var(--L);margin:12px 0}
-.slbl{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--t3);padding-bottom:6px}
-[data-testid="stTabPanel"]{padding-right:32px!important}
-/* prevent Streamlit global button CSS from overriding the copilot send button */
-#cp-send{background:linear-gradient(135deg,#007acc,#00d9ff)!important;color:#0d1326!important;
-  transform:none!important;box-shadow:none!important;border:none!important;
-  width:36px!important;height:36px!important;padding:0!important;border-radius:9px!important;}
-#cp-send:hover{transform:scale(1.08)!important;box-shadow:none!important;}
+.slbl{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--t3);padding-bottom:6px}
+.chat-hdr{background:linear-gradient(135deg,rgba(0,122,204,.15),rgba(0,217,255,.08));
+  border-radius:10px;padding:10px 14px;margin-bottom:10px;
+  border:1px solid rgba(0,217,255,.15)}
 </style>""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Floating Copilot Chat Panel
-# ══════════════════════════════════════════════════════════════════════════════
-def _inject_copilot(api_key: str, context: str):
-    safe_key = api_key.replace('"', '')
-    safe_ctx = context.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
-
-    st.markdown(f"""
-<!-- ─── Copilot Panel ─────────────────────────────────────────── -->
-<style>
-#cp-btn{{
-  position:fixed;bottom:28px;right:28px;z-index:9999;
-  width:54px;height:54px;border-radius:50%;
-  background:linear-gradient(135deg,#007acc,#00d9ff)!important;
-  border:none!important;cursor:pointer;font-size:22px;
-  box-shadow:0 6px 24px rgba(0,217,255,.45);
-  display:flex!important;align-items:center;justify-content:center;
-  transition:transform .2s,box-shadow .2s;
-  color:#0d1326!important;font-weight:700;
-  transform:none!important;
-}}
-#cp-btn:hover{{transform:scale(1.1)!important;box-shadow:0 8px 30px rgba(0,217,255,.6)!important;}}
-#cp-panel{{
-  position:fixed;bottom:96px;right:28px;z-index:9998;
-  width:360px;height:520px;
-  background:#0d1326;border:1px solid rgba(0,217,255,.25);
-  border-radius:18px;display:none;flex-direction:column;
-  box-shadow:0 20px 60px rgba(0,0,0,.6);
-  font-family:'Plus Jakarta Sans',system-ui,sans-serif;
-  overflow:hidden;
-}}
-#cp-panel.cp-open{{display:flex!important;animation:cp-in .22s ease;}}
-@keyframes cp-in{{from{{opacity:0;transform:translateY(12px)}}to{{opacity:1;transform:translateY(0)}}}}
-#cp-hdr{{
-  background:linear-gradient(135deg,#007acc22,#00d9ff11);
-  border-bottom:1px solid rgba(0,217,255,.15);
-  padding:14px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0;
-}}
-.cp-gem{{width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,#007acc,#00d9ff);display:flex;align-items:center;justify-content:center;font-size:15px;}}
-.cp-title{{font-size:13.5px;font-weight:700;color:#e8eeff;}}
-.cp-sub{{font-size:10px;color:#3d4a6a;margin-top:1px;}}
-#cp-close{{
-  margin-left:auto;background:none!important;border:none!important;
-  color:#3d4a6a;font-size:18px;cursor:pointer;padding:0 4px;
-  box-shadow:none!important;transform:none!important;width:auto!important;height:auto!important;
-}}
-#cp-close:hover{{color:#e8eeff!important;background:none!important;box-shadow:none!important;transform:none!important;}}
-#cp-msgs{{
-  flex:1;overflow-y:auto;padding:14px;
-  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent;
-  display:flex;flex-direction:column;gap:10px;
-}}
-#cp-msgs::-webkit-scrollbar{{width:3px;}}
-#cp-msgs::-webkit-scrollbar-thumb{{background:rgba(255,255,255,.1);border-radius:3px;}}
-.cp-msg{{max-width:88%;font-size:13px;line-height:1.65;padding:10px 13px;border-radius:14px;word-break:break-word;}}
-.cp-msg.bot{{background:#111829;border:1px solid rgba(255,255,255,.06);color:#e8eeff;border-top-left-radius:4px;align-self:flex-start;}}
-.cp-msg.usr{{background:linear-gradient(135deg,#00527a,#007cc2);color:#fff;border-top-right-radius:4px;align-self:flex-end;}}
-.cp-typing{{display:flex;gap:4px;padding:12px 14px;align-items:center;align-self:flex-start;}}
-.cp-typing span{{width:6px;height:6px;border-radius:50%;background:#00d9ff;animation:cp-blink 1.2s ease-in-out infinite;}}
-.cp-typing span:nth-child(2){{animation-delay:.2s;}}
-.cp-typing span:nth-child(3){{animation-delay:.4s;}}
-@keyframes cp-blink{{0%,100%{{opacity:.2}}50%{{opacity:1}}}}
-#cp-chips{{padding:0 14px 8px;display:flex;flex-wrap:wrap;gap:6px;}}
-.cp-chip{{
-  font-size:11px;font-weight:600;padding:5px 11px;border-radius:20px;
-  background:rgba(0,217,255,.08);border:1px solid rgba(0,217,255,.2);
-  color:#00d9ff;cursor:pointer;transition:all .15s;
-  font-family:'Plus Jakarta Sans',system-ui,sans-serif;
-}}
-.cp-chip:hover{{background:rgba(0,217,255,.18);}}
-#cp-form{{
-  border-top:1px solid rgba(255,255,255,.06);
-  padding:10px 12px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0;
-}}
-#cp-input{{
-  flex:1;background:#111829;border:1px solid rgba(255,255,255,.10);
-  border-radius:10px;padding:9px 12px;color:#e8eeff;
-  font-family:'Plus Jakarta Sans',system-ui,sans-serif;font-size:13px;
-  resize:none;outline:none;max-height:90px;line-height:1.5;
-  caret-color:#00d9ff;
-}}
-#cp-input:focus{{border-color:#00d9ff;box-shadow:0 0 0 2px rgba(0,217,255,.1);}}
-#cp-input::placeholder{{color:#3d4a6a;}}
-#cp-notif{{
-  position:absolute;top:-4px;right:-4px;
-  width:16px;height:16px;border-radius:50%;background:#f87171;
-  font-size:9px;font-weight:700;color:#fff;
-  display:none;align-items:center;justify-content:center;
-  border:2px solid #0d1326;pointer-events:none;
-}}
-</style>
-
-<!-- ── FIX 1: NO inline onclick — events are wired in the script below ── -->
-<div id="cp-btn" title="Career AI Chat" aria-label="Open career chat">
-  💬
-  <div id="cp-notif">1</div>
-</div>
-
-<div id="cp-panel">
-  <div id="cp-hdr">
-    <div class="cp-gem">🎯</div>
-    <div>
-      <div class="cp-title">Career AI</div>
-      <div class="cp-sub">Your personal career advisor</div>
-    </div>
-    <button id="cp-close">✕</button>
-  </div>
-  <div id="cp-msgs"></div>
-  <div id="cp-chips"></div>
-  <div id="cp-form">
-    <textarea id="cp-input" placeholder="Ask anything about your career…" rows="1"></textarea>
-    <button id="cp-send" title="Send">➤</button>
-  </div>
-</div>
-
-<script>
-(function() {{
-  var GROQ_KEY = "{safe_key}";
-  var USER_CTX = "{safe_ctx}";
-  var SYSTEM = "You are a warm, expert career advisor called Career AI. Give honest, specific, actionable advice in a conversational tone — like a smart mentor. Keep answers concise and focused. Use bullet points only for lists of 3 or more items. Never say 'As an AI'. Be direct and real."
-              + (USER_CTX ? "\\n\\nContext about this user:\\n" + USER_CTX : "");
-
-  var msgs     = [];
-  var isOpen   = false;
-  var greeted  = false;
-
-  var CHIPS = [
-    "How can I improve my CV?",
-    "What skills should I learn?",
-    "How do I negotiate salary?",
-    "Am I ready for a senior role?"
-  ];
-
-  /* ── FIX 1: wire all clicks via addEventListener, not onclick attributes ── */
-  function attachEvents() {{
-    var btnEl   = document.getElementById("cp-btn");
-    var closeEl = document.getElementById("cp-close");
-    var sendEl  = document.getElementById("cp-send");
-    var inputEl = document.getElementById("cp-input");
-
-    if (!btnEl) {{
-      // Elements not yet in DOM — retry after a short delay
-      setTimeout(attachEvents, 150);
-      return;
-    }}
-
-    btnEl.addEventListener("click",  toggle);
-    if (closeEl) closeEl.addEventListener("click", toggle);
-    if (sendEl)  sendEl.addEventListener("click",  doSend);
-    if (inputEl) {{
-      inputEl.addEventListener("keydown", function(e) {{
-        if (e.key === "Enter" && !e.shiftKey) {{ e.preventDefault(); doSend(); }}
-      }});
-      inputEl.addEventListener("input", function() {{
-        inputEl.style.height = "auto";
-        inputEl.style.height = Math.min(inputEl.scrollHeight, 90) + "px";
-      }});
-    }}
-
-    // notification dot after 3 s if still closed
-    setTimeout(function() {{
-      if (!isOpen) {{
-        var n = document.getElementById("cp-notif");
-        if (n) n.style.display = "flex";
-      }}
-    }}, 3000);
-  }}
-
-  function toggle() {{
-    isOpen = !isOpen;
-    var panel = document.getElementById("cp-panel");
-    var notif = document.getElementById("cp-notif");
-    if (!panel) return;
-    if (isOpen) {{
-      panel.classList.add("cp-open");
-      if (notif) notif.style.display = "none";
-      if (!greeted) {{ greet(); greeted = true; }}
-      var inp = document.getElementById("cp-input");
-      if (inp) setTimeout(function() {{ inp.focus(); }}, 260);
-    }} else {{
-      panel.classList.remove("cp-open");
-    }}
-  }}
-
-  function greet() {{
-    addMsg("bot", USER_CTX
-      ? "Hey! 👋 I can see you've been working through your profile. What would you like to explore?"
-      : "Hey! 👋 I'm your Career AI advisor. Ask me anything — CV tips, job search, salary negotiation, skill gaps, interview prep…");
-    renderChips();
-  }}
-
-  function renderChips() {{
-    var c = document.getElementById("cp-chips");
-    if (!c) return;
-    c.innerHTML = "";
-    CHIPS.forEach(function(q) {{
-      var b = document.createElement("button");
-      b.className = "cp-chip";
-      b.textContent = q;
-      b.addEventListener("click", function() {{ c.innerHTML = ""; cpSendMsg(q); }});
-      c.appendChild(b);
-    }});
-  }}
-
-  function addMsg(role, text) {{
-    var box = document.getElementById("cp-msgs");
-    if (!box) return null;
-    var d = document.createElement("div");
-    d.className = "cp-msg " + role;
-    d.innerHTML = mdToHtml(text);
-    box.appendChild(d);
-    box.scrollTop = box.scrollHeight;
-    return d;
-  }}
-
-  function mdToHtml(t) {{
-    t = t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-    t = t.replace(/\*\*(.*?)\*\*/g,"<strong>$1</strong>");
-    t = t.replace(/\*(.*?)\*/g,"<em>$1</em>");
-    t = t.replace(/(^|\n)[•\-\*] (.+)/g,"$1<li>$2</li>");
-    t = t.replace(/<li>/g,'<li style="margin:3px 0;padding-left:4px">');
-    if (t.indexOf("<li>") !== -1)
-      t = '<ul style="padding-left:16px;margin:6px 0">' + t + "</ul>";
-    t = t.replace(/\n/g,"<br>");
-    return t;
-  }}
-
-  function showTyping() {{
-    var box = document.getElementById("cp-msgs");
-    if (!box) return;
-    var d = document.createElement("div");
-    d.className = "cp-typing"; d.id = "cp-typing";
-    d.innerHTML = "<span></span><span></span><span></span>";
-    box.appendChild(d); box.scrollTop = box.scrollHeight;
-  }}
-  function hideTyping() {{
-    var d = document.getElementById("cp-typing"); if (d) d.remove();
-  }}
-
-  async function cpSendMsg(text) {{
-    var chips = document.getElementById("cp-chips");
-    if (chips) chips.innerHTML = "";
-    addMsg("usr", text);
-    msgs.push({{role:"user", content:text}});
-    showTyping();
-    try {{
-      var res = await fetch("https://api.groq.com/openai/v1/chat/completions", {{
-        method: "POST",
-        headers: {{"Content-Type":"application/json","Authorization":"Bearer " + GROQ_KEY}},
-        body: JSON.stringify({{
-          model: "llama-3.3-70b-versatile",
-          messages: [{{role:"system",content:SYSTEM}}].concat(msgs.slice(-12)),
-          temperature: 0.75,
-          max_tokens: 500
-        }})
-      }});
-      var data = await res.json();
-      var reply = (data.choices && data.choices[0] && data.choices[0].message
-                   && data.choices[0].message.content)
-                  || "Sorry, something went wrong. Try again!";
-      hideTyping();
-      addMsg("bot", reply);
-      msgs.push({{role:"assistant", content:reply}});
-    }} catch(e) {{
-      hideTyping();
-      addMsg("bot", "Hmm, couldn't reach the AI right now. Check your connection and try again.");
-    }}
-  }}
-
-  function doSend() {{
-    var inp = document.getElementById("cp-input");
-    if (!inp) return;
-    var text = inp.value.trim();
-    if (!text) return;
-    inp.value = ""; inp.style.height = "auto";
-    cpSendMsg(text);
-  }}
-
-  // Start attaching — works whether DOM is ready or not
-  if (document.readyState === "loading") {{
-    document.addEventListener("DOMContentLoaded", attachEvents);
-  }} else {{
-    attachEvents();
-  }}
-}})();
-</script>
-<!-- ─── End Copilot Panel ─────────────────────────────────────── -->
-""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -440,8 +192,7 @@ def _scrape_remoteok(keywords: str = "", limit: int = 150) -> list:
     import requests
     try:
         params = {"tags": keywords} if keywords else {}
-        r = requests.get("https://remoteok.com/api",
-                         params=params,
+        r = requests.get("https://remoteok.com/api", params=params,
                          headers={"User-Agent": "CareerAI/1.0"}, timeout=14)
         r.raise_for_status()
         jobs = []
@@ -494,7 +245,8 @@ def _load_local_csv() -> list:
         "salary_in_usd":"salary","salary_estimate":"salary",
         "annual_salary_usd":"salary","avg_salary":"salary",
     }
-    for p in [DATA_DIR/"jobs.csv", Path("docs")/"ai_jobs_market_2025_2026.csv"] + list(Path("docs").glob("*.csv")):
+    for p in ([DATA_DIR/"jobs.csv", Path("docs")/"ai_jobs_market_2025_2026.csv"]
+              + list(Path("docs").glob("*.csv"))):
         if not p.exists(): continue
         try:
             df = pd.read_csv(str(p), on_bad_lines="skip", nrows=2000)
@@ -530,9 +282,7 @@ def _load_combined() -> list:
 def build_job_database(skills: list = None, status_ph=None) -> int:
     def say(m):
         if status_ph: status_ph.info(m)
-
     all_jobs = []
-
     if skills:
         for sk in skills[:3]:
             say(f"📡 RemoteOK: searching '{sk}'…")
@@ -542,7 +292,6 @@ def build_job_database(skills: list = None, status_ph=None) -> int:
     else:
         say("📡 Scraping RemoteOK (general)…")
         all_jobs.extend(_scrape_remoteok(limit=150))
-
     say(f"✅ RemoteOK: {len(all_jobs)} jobs. Trying Arbeitnow…")
     anow = _scrape_arbeitnow()
     all_jobs.extend(anow)
@@ -550,7 +299,6 @@ def build_job_database(skills: list = None, status_ph=None) -> int:
     local = _load_local_csv()
     all_jobs.extend(local)
     say("🔧 Deduplicating…")
-
     seen, unique = set(), []
     for j in all_jobs:
         k = (str(j.get("title","")).lower()[:40], str(j.get("company","")).lower()[:30])
@@ -576,7 +324,7 @@ def _auto_build():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CV analysis  (inline)
+# CV analysis
 # ══════════════════════════════════════════════════════════════════════════════
 def _pdf_text(path: str) -> str:
     from pypdf import PdfReader
@@ -585,8 +333,8 @@ def _pdf_text(path: str) -> str:
 def analyze_cv(pdf_path: str) -> dict:
     text = _pdf_text(pdf_path)
     if not text.strip():
-        return {"success":False,
-                "error":"Could not read text from this PDF. Make sure it is not a scanned image."}
+        return {"success": False,
+                "error": "Could not read text from this PDF. Make sure it is not a scanned image."}
     client = _groq()
     prompt = (
         "Analyze this CV. Return ONLY a valid JSON object — no markdown, no text outside the JSON.\n\n"
@@ -600,26 +348,26 @@ def analyze_cv(pdf_path: str) -> dict:
     raw = _llm(client, [{"role":"user","content":prompt}], max_tokens=1200)
     parsed = _parse_json(raw)
     if not parsed or "skills" not in parsed:
-        return {"success":False,"error":"AI could not parse your CV. Try a cleaner text-based PDF."}
-    return {"success":True,"analysis":parsed}
+        return {"success": False, "error": "AI could not parse your CV. Try a cleaner text-based PDF."}
+    return {"success": True, "analysis": parsed}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GitHub analysis  (inline)
+# GitHub analysis
 # ══════════════════════════════════════════════════════════════════════════════
 def analyze_github(username: str) -> dict:
     import requests
-    hdrs = {"Accept":"application/vnd.github+json"}
+    hdrs = {"Accept": "application/vnd.github+json"}
     tok = _gh_token()
     if tok: hdrs["Authorization"] = f"Bearer {tok}"
     base = f"https://api.github.com/users/{username}"
     try:
         u = requests.get(base, headers=hdrs, timeout=10)
         if u.status_code == 404:
-            return {"success":False,"error":f"User '{username}' not found on GitHub."}
+            return {"success": False, "error": f"User '{username}' not found on GitHub."}
         u.raise_for_status(); user = u.json()
     except Exception as e:
-        return {"success":False,"error":f"GitHub API error: {e}"}
+        return {"success": False, "error": f"GitHub API error: {e}"}
     try:
         rr = requests.get(f"{base}/repos", headers=hdrs,
                           params={"per_page":30,"sort":"pushed"}, timeout=10)
@@ -649,17 +397,17 @@ def analyze_github(username: str) -> dict:
         f"Top repos:{json.dumps(profile['top_repos'][:3])}"
     )
     raw = _llm(client, [{"role":"user","content":prompt}], max_tokens=600)
-    return {"success":True,"profile":profile,"analysis":_parse_json(raw)}
+    return {"success": True, "profile": profile, "analysis": _parse_json(raw)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Job matching  (inline)
+# Job matching
 # ══════════════════════════════════════════════════════════════════════════════
 def match_jobs(user_profile: dict, limit: int = 8) -> dict:
     jobs = _load_combined()
     if not jobs:
-        return {"success":False,
-                "error":"Job database is empty. Click 🔄 Refresh Job Database in the sidebar."}
+        return {"success": False,
+                "error": "Job database is empty. Click 🔄 Refresh Job Database in the sidebar."}
     skills = [s.lower() for s in user_profile.get("skills",[])]
     roles  = [r.lower() for r in user_profile.get("interested_roles",[])]
     def _score(j):
@@ -667,7 +415,7 @@ def match_jobs(user_profile: dict, limit: int = 8) -> dict:
         s = sum(2 for sk in skills if sk in blob)
         s += sum(1 for ro in roles for w in ro.split() if len(w)>3 and w in blob)
         return s
-    top25 = sorted(jobs,key=_score,reverse=True)[:25]
+    top25 = sorted(jobs, key=_score, reverse=True)[:25]
     compact = [{"title":str(j.get("title",""))[:60],"company":str(j.get("company",""))[:40],
                 "location":str(j.get("location",""))[:30],
                 "description":str(j.get("description",""))[:200],
@@ -684,104 +432,237 @@ def match_jobs(user_profile: dict, limit: int = 8) -> dict:
         f"roles={user_profile.get('interested_roles',[])}\n\n"
         f"Jobs:\n{json.dumps(compact,indent=2)[:4000]}\n\nReturn ONLY the JSON array."
     )
-    raw = _llm(client,[{"role":"user","content":prompt}],max_tokens=1400)
+    raw = _llm(client, [{"role":"user","content":prompt}], max_tokens=1400)
     matches = _parse_json(raw)
-    if isinstance(matches,dict) and "jobs" in matches: matches=matches["jobs"]
-    if not isinstance(matches,list): matches=[]
-    return {"success":True,"matches":matches,
-            "total_in_db":len(jobs),"candidates_evaluated":len(compact)}
+    if isinstance(matches, dict) and "jobs" in matches: matches = matches["jobs"]
+    if not isinstance(matches, list): matches = []
+    return {"success": True, "matches": matches,
+            "total_in_db": len(jobs), "candidates_evaluated": len(compact)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Session state
 # ══════════════════════════════════════════════════════════════════════════════
 def _init():
-    for k,v in {"cv_analysis":None,"github_analysis":None,"job_matches":None,
-                "db_checked":False,"skill_scrape_done":False,
-                "_jobs_skills_shown":False}.items():
-        if k not in st.session_state: st.session_state[k]=v
+    defaults = {
+        "cv_analysis": None,
+        "github_analysis": None,
+        "job_matches": None,
+        "db_checked": False,
+        "skill_scrape_done": False,
+        "_jobs_skills_shown": False,
+        # ── FIX 1: sidebar chat history lives in session state ──
+        "chat_history": [],
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
-# ── Render helpers ─────────────────────────────────────────────────────────
-def _pill(t,k="skill"):
-    cls={"skill":"pill","tech":"pill tech","miss":"pill miss"}.get(k,"pill")
+# ── Render helpers ──────────────────────────────────────────────────────────
+def _pill(t, k="skill"):
+    cls = {"skill":"pill","tech":"pill tech","miss":"pill miss"}.get(k,"pill")
     return f'<span class="{cls}">{html.escape(str(t))}</span>'
-def _pills(items,k="skill"):
+
+def _pills(items, k="skill"):
     if not items: return '<span style="color:var(--t3);font-size:12px">none found</span>'
     return "".join(_pill(i,k) for i in items)
+
 def _sc(s):
-    if s>=80: return "#34d399"
-    if s>=60: return "#00d9ff"
-    if s>=40: return "#fbbf24"
+    if s >= 80: return "#34d399"
+    if s >= 60: return "#00d9ff"
+    if s >= 40: return "#fbbf24"
     return "#f87171"
+
 def _dot(col="#00d9ff"):
-    return f'<div style="width:9px;height:9px;border-radius:50%;background:{col};margin-top:4px;flex-shrink:0"></div>'
+    return (f'<div style="width:9px;height:9px;border-radius:50%;background:{col};'
+            f'margin-top:4px;flex-shrink:0"></div>')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIX 1 — Sidebar Chat (replaces broken floating Copilot panel)
+# ══════════════════════════════════════════════════════════════════════════════
+def _sidebar_chat(context: str):
+    """
+    Fully server-side chat using st.chat_input + st.chat_message.
+    Works reliably because it's pure Streamlit — no JS, no iframes,
+    no position:fixed, and the API key never leaves the server.
+    """
+    st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="chat-hdr">'
+        '<div style="font-size:13px;font-weight:700;color:#e8eeff">💬 Career AI Chat</div>'
+        '<div style="font-size:10px;color:#3d4a6a;margin-top:2px">Ask anything about your career</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Quick-start chip buttons
+    chips = [
+        "How can I improve my CV?",
+        "What skills should I learn?",
+        "How do I negotiate salary?",
+    ]
+    chip_cols = st.columns(len(chips))
+    for col, chip in zip(chip_cols, chips):
+        with col:
+            if st.button(chip, key=f"chip_{chip[:10]}", use_container_width=True):
+                st.session_state.chat_history.append({"role":"user","content":chip})
+                _run_chat_reply(context)
+
+    # Display history (last 10 messages to keep sidebar tidy)
+    history_container = st.container()
+    with history_container:
+        for msg in st.session_state.chat_history[-10:]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+    # Input box — always at the bottom of the sidebar section
+    user_input = st.chat_input("Ask Career AI…", key="sidebar_chat_input")
+    if user_input:
+        st.session_state.chat_history.append({"role":"user","content":user_input})
+        _run_chat_reply(context)
+        st.rerun()
+
+    # Clear chat button
+    if st.session_state.chat_history:
+        if st.button("🗑 Clear Chat", key="clear_chat", use_container_width=True):
+            st.session_state.chat_history = []
+            st.rerun()
+
+
+def _run_chat_reply(context: str):
+    """Generate and append an AI reply using the server-side Groq client."""
+    if not _key():
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": "⚠️ GROQ_API_KEY is not set. Please add it to your .env file."
+        })
+        return
+
+    system = (
+        "You are a warm, expert career advisor called Career AI. "
+        "Give honest, specific, actionable advice in a conversational tone — like a smart mentor. "
+        "Keep answers concise and focused. Use bullet points only for lists of 3 or more items. "
+        "Never say 'As an AI'. Be direct and real."
+    )
+    if context:
+        system += f"\n\nContext about this user:\n{context}"
+
+    messages = [{"role":"system","content":system}]
+    # Send last 12 turns for context
+    messages += [{"role":m["role"],"content":m["content"]}
+                 for m in st.session_state.chat_history[-12:]]
+
+    try:
+        client = _groq()
+        reply = _llm(client, messages, max_tokens=500)
+    except Exception as e:
+        reply = f"Sorry, I couldn't reach the AI right now: {e}"
+
+    st.session_state.chat_history.append({"role":"assistant","content":reply})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
-def _sidebar():
+def _sidebar(context: str):
     with st.sidebar:
         st.markdown(
             '<div style="padding:20px 16px 14px;border-bottom:1px solid rgba(255,255,255,.06)">'
             '<div style="display:flex;align-items:center;gap:12px">'
-            '<div style="width:40px;height:40px;border-radius:12px;background:linear-gradient(135deg,#007acc,#00d9ff);'
-            'display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 14px rgba(0,217,255,.25)">🎯</div>'
+            '<div style="width:40px;height:40px;border-radius:12px;'
+            'background:linear-gradient(135deg,#007acc,#00d9ff);'
+            'display:flex;align-items:center;justify-content:center;font-size:20px;'
+            'box-shadow:0 4px 14px rgba(0,217,255,.25)">🎯</div>'
             '<div><div style="font-size:15px;font-weight:800;color:#e8eeff;letter-spacing:-.3px">Career AI</div>'
-            '<div style="font-size:10px;color:#00d9ff;background:rgba(0,217,255,.08);padding:2px 8px;border-radius:20px;'
-            'border:1px solid rgba(0,217,255,.2);display:inline-block;font-weight:600;margin-top:2px">Phase 1 · MVP</div>'
+            '<div style="font-size:10px;color:#00d9ff;background:rgba(0,217,255,.08);padding:2px 8px;'
+            'border-radius:20px;border:1px solid rgba(0,217,255,.2);display:inline-block;'
+            'font-weight:600;margin-top:2px">Phase 1 · MVP</div>'
             '</div></div></div>',
             unsafe_allow_html=True,
         )
+
         st.markdown("<div style='padding:14px 14px 0'>", unsafe_allow_html=True)
+
+        # Status metrics
         st.markdown('<div class="slbl">Status</div>', unsafe_allow_html=True)
-        c1,c2=st.columns(2)
-        with c1: st.metric("Groq AI","🟢 Ready" if _key() else "🔴 Missing")
-        with c2: st.metric("GitHub","🟢" if _gh_token() else "⚪ Optional")
-        cnt=len(_load_combined())
-        st.metric("Job Database",f"🟢 {cnt:,} jobs" if cnt else "🔴 Empty")
-        if not _key(): st.error("GROQ_API_KEY missing.\nAdd to .env or Streamlit secrets.")
+        c1, c2 = st.columns(2)
+        with c1: st.metric("Groq AI", "🟢 Ready" if _key() else "🔴 Missing")
+        with c2: st.metric("GitHub", "🟢" if _gh_token() else "⚪ Optional")
+        cnt = len(_load_combined())
+        st.metric("Job Database", f"🟢 {cnt:,} jobs" if cnt else "🔴 Empty")
+        if not _key():
+            st.error("GROQ_API_KEY missing.\nAdd to .env or Streamlit secrets.")
+
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
+
+        # Job database controls
         st.markdown('<div class="slbl">Job Database</div>', unsafe_allow_html=True)
         if COMBINED.exists():
-            age_h=(datetime.datetime.now()-datetime.datetime.fromtimestamp(COMBINED.stat().st_mtime)).total_seconds()/3600
+            age_h = (datetime.datetime.now() -
+                     datetime.datetime.fromtimestamp(COMBINED.stat().st_mtime)).total_seconds() / 3600
             st.caption(f"Cache: {age_h:.0f}h old  ·  refreshes every {CACHE_HOURS}h")
-        if st.button("🔄 Refresh Job Database",key="sb_ref",use_container_width=True):
-            ph=st.empty()
-            skills=[]
+        if st.button("🔄 Refresh Job Database", key="sb_ref", use_container_width=True):
+            ph = st.empty()
+            skills = []
             if st.session_state.cv_analysis:
-                a=st.session_state.cv_analysis.get("analysis",{})
-                if isinstance(a,dict): skills=a.get("skills",[])[:6]
+                a = st.session_state.cv_analysis.get("analysis",{})
+                if isinstance(a, dict): skills = a.get("skills",[])[:6]
             try:
-                n=build_job_database(skills=skills,status_ph=ph)
-                ph.success(f"✅ Done — {n:,} jobs saved{' (targeted to your skills)' if skills else ''}")
-            except Exception as e: ph.error(f"❌ {e}")
+                n = build_job_database(skills=skills, status_ph=ph)
+                ph.success(f"✅ Done — {n:,} jobs saved"
+                           f"{' (targeted to your skills)' if skills else ''}")
+            except Exception as e:
+                ph.error(f"❌ {e}")
+
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
+
+        # Progress tracker
         st.markdown('<div class="slbl">Your Progress</div>', unsafe_allow_html=True)
-        for lbl,done in [("📄 CV analyzed",st.session_state.cv_analysis is not None),
-                          ("🐙 GitHub analyzed",st.session_state.github_analysis is not None),
-                          ("💼 Jobs matched",st.session_state.job_matches is not None)]:
-            col="#34d399" if done else "var(--t3)"
-            st.markdown(f'<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12.5px;color:{col}">{"✅" if done else "⬜"} {lbl}</div>',unsafe_allow_html=True)
-        if st.button("🗑 Clear Session",key="sb_clear",use_container_width=True):
-            st.session_state.cv_analysis=None; st.session_state.github_analysis=None
-            st.session_state.job_matches=None; st.session_state.skill_scrape_done=False
-            st.session_state._jobs_skills_shown=False
-            # FIX 2: clear widget state so skills box resets on next render
+        for lbl, done in [
+            ("📄 CV analyzed",    st.session_state.cv_analysis is not None),
+            ("🐙 GitHub analyzed",st.session_state.github_analysis is not None),
+            ("💼 Jobs matched",   st.session_state.job_matches is not None),
+        ]:
+            col = "#34d399" if done else "var(--t3)"
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:8px;padding:4px 0;'
+                f'font-size:12.5px;color:{col}">{"✅" if done else "⬜"} {lbl}</div>',
+                unsafe_allow_html=True,
+            )
+
+        if st.button("🗑 Clear Session", key="sb_clear", use_container_width=True):
+            st.session_state.cv_analysis       = None
+            st.session_state.github_analysis   = None
+            st.session_state.job_matches       = None
+            st.session_state.skill_scrape_done = False
+            st.session_state._jobs_skills_shown = False
+            st.session_state.chat_history      = []
             if "js_skills_v3" in st.session_state:
                 del st.session_state["js_skills_v3"]
             st.rerun()
+
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
-        if any([st.session_state.cv_analysis,st.session_state.github_analysis,st.session_state.job_matches]):
-            st.download_button("📥 Download Report",
-                data=json.dumps({"generated_at":datetime.datetime.now().isoformat(),
-                                  "cv":st.session_state.cv_analysis,
-                                  "github":st.session_state.github_analysis,
-                                  "jobs":st.session_state.job_matches},indent=2,default=str),
+
+        if any([st.session_state.cv_analysis,
+                st.session_state.github_analysis,
+                st.session_state.job_matches]):
+            st.download_button(
+                "📥 Download Report",
+                data=json.dumps({
+                    "generated_at": datetime.datetime.now().isoformat(),
+                    "cv":     st.session_state.cv_analysis,
+                    "github": st.session_state.github_analysis,
+                    "jobs":   st.session_state.job_matches,
+                }, indent=2, default=str),
                 file_name=f"career_report_{datetime.date.today()}.json",
-                mime="application/json",use_container_width=True,key="sb_dl")
-        st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
+                mime="application/json",
+                use_container_width=True,
+                key="sb_dl",
+            )
+            st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
+
         with st.expander("⚙️ Setup Guide"):
             st.markdown("""
 **`.env` (local)**
@@ -796,6 +677,10 @@ GROQ_API_KEY = "gsk_..."
 **Tip:** After analyzing your CV, the job database
 will automatically re-scrape with your skills as keywords.
 """)
+
+        # ── FIX 1: working chat panel at the bottom of the sidebar ──
+        _sidebar_chat(context)
+
         st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -803,15 +688,20 @@ will automatically re-scrape with your skills as keywords.
 # Header
 # ══════════════════════════════════════════════════════════════════════════════
 def _header():
-    ready=any([st.session_state.cv_analysis,st.session_state.github_analysis,st.session_state.job_matches])
+    ready = any([st.session_state.cv_analysis,
+                 st.session_state.github_analysis,
+                 st.session_state.job_matches])
     st.markdown(
         '<div class="hdr"><div style="display:flex;align-items:center;gap:14px">'
         '<div class="hgem">🎯</div>'
-        '<div><div style="font-size:17px;font-weight:800;color:var(--t1);letter-spacing:-.3px">Career AI Assistant</div>'
-        '<div style="font-size:11px;color:var(--t3);margin-top:2px">CV · GitHub · Job Matching · Assessment  —  💬 Chat always available bottom-right</div>'
+        '<div><div style="font-size:17px;font-weight:800;color:var(--t1);letter-spacing:-.3px">'
+        'Career AI Assistant</div>'
+        '<div style="font-size:11px;color:var(--t3);margin-top:2px">'
+        'CV · GitHub · Job Matching · Assessment  —  💬 Chat in the sidebar</div>'
         '</div></div><div style="display:flex;gap:8px">'
-        +('<div class="badge live">● Session Active</div>' if ready else '<div class="badge">○ No Data Yet</div>')
-        +'<div class="badge">Groq · LLaMA 3.3</div></div></div>',
+        + ('<div class="badge live">● Session Active</div>' if ready
+           else '<div class="badge">○ No Data Yet</div>')
+        + '<div class="badge">Groq · LLaMA 3.3</div></div></div>',
         unsafe_allow_html=True,
     )
 
@@ -820,42 +710,45 @@ def _header():
 # Tab: CV Analyzer
 # ══════════════════════════════════════════════════════════════════════════════
 def _tab_cv():
-    st.markdown('<div class="sh">📄 CV Analyzer</div>',unsafe_allow_html=True)
-    st.markdown('<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Upload your PDF and I\'ll give you a plain-English breakdown. Your skills will automatically populate the Job Matcher and trigger a targeted job scrape.</p>',unsafe_allow_html=True)
-    cu,cb=st.columns([3,1])
-    with cu: f=st.file_uploader("Choose your CV (PDF)",type=["pdf"],key="cv_file")
+    st.markdown('<div class="sh">📄 CV Analyzer</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="color:var(--t2);font-size:13px;margin-bottom:18px">'
+        "Upload your PDF and I'll give you a plain-English breakdown. "
+        "Your skills will automatically populate the Job Matcher and trigger a targeted job scrape.</p>",
+        unsafe_allow_html=True,
+    )
+    cu, cb = st.columns([3,1])
+    with cu:
+        f = st.file_uploader("Choose your CV (PDF)", type=["pdf"], key="cv_file")
     with cb:
         st.write(""); st.write("")
-        go=st.button("🔍 Analyze CV",key="btn_cv",use_container_width=True,disabled=f is None)
+        go = st.button("🔍 Analyze CV", key="btn_cv",
+                       use_container_width=True, disabled=f is None)
+
     if go and f:
         if not _key(): return
         with st.spinner("Reading your CV…"):
-            tmp=f"temp_{f.name}"
-            with open(tmp,"wb") as fh: fh.write(f.getbuffer())
-            res=analyze_cv(tmp); os.remove(tmp)
+            tmp = f"temp_{f.name}"
+            with open(tmp, "wb") as fh: fh.write(f.getbuffer())
+            res = analyze_cv(tmp); os.remove(tmp)
             if res.get("success"):
-                st.session_state.cv_analysis=res
-                st.session_state.skill_scrape_done=False
-                st.session_state._jobs_skills_shown=False
-
-                # ══ FIX 2: write skills directly into the widget's session-state key ══
-                # This forces the Job Matcher text_area to show them on next render,
-                # even if the widget was already drawn once with an empty value.
+                st.session_state.cv_analysis       = res
+                st.session_state.skill_scrape_done = False
+                st.session_state._jobs_skills_shown = False
+                # FIX 3: auto-fill skills into the Job Matcher widget
                 a = res.get("analysis", {})
                 if isinstance(a, dict):
                     skills_list = a.get("skills", [])
                     if skills_list:
                         st.session_state["js_skills_v3"] = "\n".join(str(s) for s in skills_list)
-                # ═════════════════════════════════════════════════════════════════════
-
                 st.success("✅ CV analyzed! Skills auto-filled in the 💼 Job Matcher tab.")
             else:
                 st.error(f"❌ {res.get('error')}"); return
 
-    # Trigger targeted scrape when CV is analyzed and cache is stale
+    # Trigger targeted scrape when CV analyzed and cache stale
     if (st.session_state.cv_analysis and
-        not st.session_state.skill_scrape_done and
-        not _cache_fresh()):
+            not st.session_state.skill_scrape_done and
+            not _cache_fresh()):
         a = st.session_state.cv_analysis.get("analysis",{})
         skills = a.get("skills",[])[:6] if isinstance(a,dict) else []
         if skills:
@@ -868,255 +761,395 @@ def _tab_cv():
                     st.session_state.skill_scrape_done = True
 
     if not st.session_state.cv_analysis:
-        st.info("Upload your CV and click **Analyze CV** to get started."); return
+        st.info("Upload your CV and click **Analyze CV** to get started.")
+        return
 
-    a=st.session_state.cv_analysis.get("analysis",{})
-    if isinstance(a,str): a=_parse_json(a) or {}
-    c1,c2,c3=st.columns(3)
-    with c1: st.metric("Seniority",a.get("seniority_level","—"))
-    with c2: st.metric("Experience",f"{a.get('experience_years','—')} yrs")
-    with c3: st.metric("Skills",len(a.get("skills",[])))
+    a = st.session_state.cv_analysis.get("analysis",{})
+    if isinstance(a, str): a = _parse_json(a) or {}
+
+    c1, c2, c3 = st.columns(3)
+    with c1: st.metric("Seniority", a.get("seniority_level","—"))
+    with c2: st.metric("Experience", f"{a.get('experience_years','—')} yrs")
+    with c3: st.metric("Skills", len(a.get("skills",[])))
+
     if a.get("summary"):
-        st.markdown(f'<div class="aib"><div class="ailbl">🤖 AI Summary</div>{html.escape(str(a["summary"]))}</div>',unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="aib"><div class="ailbl">🤖 AI Summary</div>'
+            f'{html.escape(str(a["summary"]))}</div>',
+            unsafe_allow_html=True,
+        )
     if a.get("skills") or a.get("technologies"):
-        st.markdown('<div class="sh">Skills & Technologies</div>',unsafe_allow_html=True)
-        st.markdown(_pills(a.get("skills",[]),"skill")+_pills(a.get("technologies",[]),"tech"),unsafe_allow_html=True)
+        st.markdown('<div class="sh">Skills & Technologies</div>', unsafe_allow_html=True)
+        st.markdown(_pills(a.get("skills",[]),"skill") + _pills(a.get("technologies",[]),"tech"),
+                    unsafe_allow_html=True)
     if a.get("experience"):
-        st.markdown('<div class="sh">Work Experience</div>',unsafe_allow_html=True)
+        st.markdown('<div class="sh">Work Experience</div>', unsafe_allow_html=True)
         for e in a["experience"]:
-            st.markdown(f'<div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px">{_dot()}'
-                        f'<div><div style="font-size:13.5px;font-weight:600;color:var(--t1)">{html.escape(str(e.get("title","—")))}</div>'
-                        f'<div style="font-size:12px;color:var(--t2)">{html.escape(str(e.get("company","—")))} · {html.escape(str(e.get("duration","")))}</div>'
-                        f'</div></div>',unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px">{_dot()}'
+                f'<div><div style="font-size:13.5px;font-weight:600;color:var(--t1)">'
+                f'{html.escape(str(e.get("title","—")))}</div>'
+                f'<div style="font-size:12px;color:var(--t2)">'
+                f'{html.escape(str(e.get("company","—")))} · {html.escape(str(e.get("duration","")))}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
     if a.get("education"):
-        st.markdown('<div class="sh">Education</div>',unsafe_allow_html=True)
+        st.markdown('<div class="sh">Education</div>', unsafe_allow_html=True)
         for e in a["education"]:
-            st.markdown(f'<div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px">{_dot("#34d399")}'
-                        f'<div><div style="font-size:13.5px;font-weight:600;color:var(--t1)">{html.escape(str(e.get("degree","")))}{" "+html.escape(str(e.get("field","")))}</div>'
-                        f'<div style="font-size:12px;color:var(--t2)">{html.escape(str(e.get("school","—")))}</div>'
-                        f'</div></div>',unsafe_allow_html=True)
-    c1,c2=st.columns(2)
+            st.markdown(
+                f'<div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px">'
+                f'{_dot("#34d399")}'
+                f'<div><div style="font-size:13.5px;font-weight:600;color:var(--t1)">'
+                f'{html.escape(str(e.get("degree","")))} {html.escape(str(e.get("field","")))}</div>'
+                f'<div style="font-size:12px;color:var(--t2)">{html.escape(str(e.get("school","—")))}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+    c1, c2 = st.columns(2)
     with c1:
         if a.get("strengths"):
-            st.markdown('<div class="sh">💪 Strengths</div>',unsafe_allow_html=True)
-            for s in a["strengths"]: st.markdown(f'<div style="color:var(--t2);font-size:13px;padding:3px 0">✅ {html.escape(str(s))}</div>',unsafe_allow_html=True)
+            st.markdown('<div class="sh">💪 Strengths</div>', unsafe_allow_html=True)
+            for s in a["strengths"]:
+                st.markdown(
+                    f'<div style="color:var(--t2);font-size:13px;padding:3px 0">✅ {html.escape(str(s))}</div>',
+                    unsafe_allow_html=True)
     with c2:
         if a.get("improvement_areas"):
-            st.markdown('<div class="sh">🎯 To Improve</div>',unsafe_allow_html=True)
-            for g in a["improvement_areas"]: st.markdown(f'<div style="color:var(--t2);font-size:13px;padding:3px 0">→ {html.escape(str(g))}</div>',unsafe_allow_html=True)
+            st.markdown('<div class="sh">🎯 To Improve</div>', unsafe_allow_html=True)
+            for g in a["improvement_areas"]:
+                st.markdown(
+                    f'<div style="color:var(--t2);font-size:13px;padding:3px 0">→ {html.escape(str(g))}</div>',
+                    unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Tab: GitHub
 # ══════════════════════════════════════════════════════════════════════════════
 def _tab_github():
-    st.markdown('<div class="sh">🐙 GitHub Profile Analysis</div>',unsafe_allow_html=True)
-    st.markdown('<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Enter any public GitHub username for an honest, plain-English assessment with a score and tips.</p>',unsafe_allow_html=True)
-    ci,cb=st.columns([3,1])
-    with ci: uname=st.text_input("GitHub Username",placeholder="e.g. torvalds",key="gh_username")
+    st.markdown('<div class="sh">🐙 GitHub Profile Analysis</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="color:var(--t2);font-size:13px;margin-bottom:18px">'
+        'Enter any public GitHub username for an honest, plain-English assessment with a score and tips.</p>',
+        unsafe_allow_html=True,
+    )
+    ci, cb = st.columns([3,1])
+    with ci:
+        uname = st.text_input("GitHub Username", placeholder="e.g. torvalds", key="gh_username")
     with cb:
         st.write(""); st.write("")
-        go=st.button("🔍 Analyze",key="btn_gh",use_container_width=True,disabled=not (uname or "").strip())
+        go = st.button("🔍 Analyze", key="btn_gh",
+                       use_container_width=True, disabled=not (uname or "").strip())
+
     if go and (uname or "").strip():
         if not _key(): return
         with st.spinner(f"Fetching @{uname.strip()}…"):
-            res=analyze_github(uname.strip())
-            if res.get("success"): st.session_state.github_analysis=res
+            res = analyze_github(uname.strip())
+            if res.get("success"): st.session_state.github_analysis = res
             else:
                 st.error(f"❌ {res.get('error')}")
                 st.info("Make sure the username is correct and the profile is public.")
                 return
+
     if not st.session_state.github_analysis:
         st.info("Enter a GitHub username and click **Analyze**."); return
-    data=st.session_state.github_analysis; profile=data.get("profile",{}); analysis=data.get("analysis",{})
-    if isinstance(analysis,str): analysis=_parse_json(analysis) or {}
-    c1,c2,c3,c4=st.columns(4)
-    with c1: st.metric("Followers",profile.get("followers",0))
-    with c2: st.metric("Public Repos",profile.get("public_repos",0))
-    with c3: st.metric("Following",profile.get("following",0))
-    score=analysis.get("profile_score","—") if isinstance(analysis,dict) else "—"
-    with c4: st.metric("Profile Score",f"{score}/100" if str(score).isdigit() else score)
-    summary=analysis.get("summary","") if isinstance(analysis,dict) else str(analysis)
+
+    data    = st.session_state.github_analysis
+    profile = data.get("profile",{})
+    analysis = data.get("analysis",{})
+    if isinstance(analysis, str): analysis = _parse_json(analysis) or {}
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("Followers",    profile.get("followers",0))
+    with c2: st.metric("Public Repos", profile.get("public_repos",0))
+    with c3: st.metric("Following",    profile.get("following",0))
+    score = analysis.get("profile_score","—") if isinstance(analysis,dict) else "—"
+    with c4: st.metric("Profile Score", f"{score}/100" if str(score).isdigit() else score)
+
+    summary = analysis.get("summary","") if isinstance(analysis,dict) else str(analysis)
     if summary:
-        st.markdown(f'<div class="aib"><div class="ailbl">🤖 AI Assessment</div>{html.escape(str(summary))}</div>',unsafe_allow_html=True)
-    langs=profile.get("languages",{})
+        st.markdown(
+            f'<div class="aib"><div class="ailbl">🤖 AI Assessment</div>'
+            f'{html.escape(str(summary))}</div>',
+            unsafe_allow_html=True,
+        )
+    langs = profile.get("languages",{})
     if langs:
-        st.markdown('<div class="sh">Top Languages</div>',unsafe_allow_html=True)
+        st.markdown('<div class="sh">Top Languages</div>', unsafe_allow_html=True)
         st.bar_chart(langs)
-    recs=analysis.get("recommendations",[]) if isinstance(analysis,dict) else []
+    recs = analysis.get("recommendations",[]) if isinstance(analysis,dict) else []
     if recs:
-        st.markdown('<div class="sh">💡 Recommendations</div>',unsafe_allow_html=True)
-        for r in recs: st.markdown(f'<div style="color:var(--t2);font-size:13px;padding:4px 0">→ {html.escape(str(r))}</div>',unsafe_allow_html=True)
+        st.markdown('<div class="sh">💡 Recommendations</div>', unsafe_allow_html=True)
+        for r in recs:
+            st.markdown(
+                f'<div style="color:var(--t2);font-size:13px;padding:4px 0">→ {html.escape(str(r))}</div>',
+                unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Tab: Job Matcher
 # ══════════════════════════════════════════════════════════════════════════════
 def _tab_jobs():
-    st.markdown('<div class="sh">💼 Job Matcher</div>',unsafe_allow_html=True)
-    cnt=len(_load_combined())
-    if cnt==0:
-        st.warning("**Job database is empty.** Click **🔄 Refresh Job Database** in the sidebar, or analyze your CV first — it will trigger an automatic targeted scrape.")
+    st.markdown('<div class="sh">💼 Job Matcher</div>', unsafe_allow_html=True)
+    cnt = len(_load_combined())
+    if cnt == 0:
+        st.warning("**Job database is empty.** Click **🔄 Refresh Job Database** in the sidebar, "
+                   "or analyze your CV first — it will trigger an automatic targeted scrape.")
     else:
-        st.markdown(f'<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Searching <strong style="color:var(--c)">{cnt:,} jobs</strong>. Fill in your profile — skills are auto-filled from your CV if you\'ve analyzed it.</p>',unsafe_allow_html=True)
+        st.markdown(
+            f'<p style="color:var(--t2);font-size:13px;margin-bottom:18px">'
+            f'Searching <strong style="color:var(--c)">{cnt:,} jobs</strong>. '
+            f"Fill in your profile — skills are auto-filled from your CV if you've analyzed it.</p>",
+            unsafe_allow_html=True,
+        )
 
-    # Show banner once after CV is analyzed
     if st.session_state.cv_analysis and not st.session_state._jobs_skills_shown:
         st.success("✅ Skills auto-filled from your CV — edit them freely below.")
         st.session_state._jobs_skills_shown = True
 
-    c1,c2=st.columns(2)
+    c1, c2 = st.columns(2)
     with c1:
-        # ══ FIX 2: no `value=` kwarg here — the value lives in
-        #    st.session_state["js_skills_v3"] which was set in _tab_cv()
-        #    after a successful analysis. Streamlit picks it up automatically.
-        sr=st.text_area(
+        sr = st.text_area(
             "Your Skills (one per line)",
             placeholder="Python\nReact\nSQL",
             height=140,
-            key="js_skills_v3",
+            key="js_skills_v3",  # value auto-populated from session_state after CV analysis
         )
-        exp=st.number_input("Years of Experience",0,50,2,key="js_exp")
+        exp = st.number_input("Years of Experience", 0, 50, 2, key="js_exp")
     with c2:
-        sen=st.selectbox("Seniority Level",["Junior","Mid-Level","Senior","Lead","Principal"],key="js_sen")
-        roles=st.multiselect("Interested Roles",
-            ["Full Stack Developer","Backend Engineer","Frontend Developer","Data Scientist",
-             "ML Engineer","DevOps Engineer","Product Manager","Mobile Developer","Cloud Architect"],key="js_roles")
+        sen = st.selectbox("Seniority Level",
+                           ["Junior","Mid-Level","Senior","Lead","Principal"], key="js_sen")
+        roles = st.multiselect("Interested Roles", [
+            "Full Stack Developer","Backend Engineer","Frontend Developer",
+            "Data Scientist","ML Engineer","DevOps Engineer",
+            "Product Manager","Mobile Developer","Cloud Architect",
+        ], key="js_roles")
 
-    go=st.button("🔍 Find My Best Jobs",key="btn_jobs",disabled=(cnt==0))
+    go = st.button("🔍 Find My Best Jobs", key="btn_jobs", disabled=(cnt==0))
     if go:
         if not _key(): return
-        skills=[s.strip() for s in sr.split("\n") if s.strip()]
-        if not skills: st.warning("Please enter at least one skill."); return
+        skills = [s.strip() for s in sr.split("\n") if s.strip()]
+        if not skills:
+            st.warning("Please enter at least one skill."); return
         with st.spinner("Scanning jobs and ranking with AI…"):
-            res=match_jobs({"skills":skills,"experience_years":int(exp),
-                            "seniority_level":sen.lower().replace("-","_"),"interested_roles":roles})
-        if res.get("success"): st.session_state.job_matches=res
+            res = match_jobs({
+                "skills": skills,
+                "experience_years": int(exp),
+                "seniority_level": sen.lower().replace("-","_"),
+                "interested_roles": roles,
+            })
+        if res.get("success"): st.session_state.job_matches = res
         else: st.error(f"❌ {res.get('error')}"); return
 
     if not st.session_state.job_matches:
-        if cnt>0: st.info("Fill in your profile and click **Find My Best Jobs**."); return
+        if cnt > 0: st.info("Fill in your profile and click **Find My Best Jobs**.")
         return
 
-    res=st.session_state.job_matches; matches=res.get("matches",[]); total=res.get("total_in_db","?"); evald=res.get("candidates_evaluated","?")
-    if not matches: st.warning("No matches found. Try broadening your skills."); return
-    st.markdown(f'<div class="aib"><div class="ailbl">Results</div>Out of <strong>{total:,}</strong> jobs, the AI shortlisted <strong>{evald}</strong> candidates and picked these <strong>{len(matches)}</strong> best fits for you.</div>',unsafe_allow_html=True)
+    res     = st.session_state.job_matches
+    matches = res.get("matches",[])
+    total   = res.get("total_in_db","?")
+    evald   = res.get("candidates_evaluated","?")
+
+    if not matches:
+        st.warning("No matches found. Try broadening your skills."); return
+
+    st.markdown(
+        f'<div class="aib"><div class="ailbl">Results</div>Out of <strong>{total:,}</strong> jobs, '
+        f'the AI shortlisted <strong>{evald}</strong> candidates and picked these '
+        f'<strong>{len(matches)}</strong> best fits for you.</div>',
+        unsafe_allow_html=True,
+    )
     for job in matches:
-        if not isinstance(job,dict): continue
-        score=int(job.get("match_score",0)); colour=_sc(score)
-        matched=job.get("matched_skills",[]); missing=job.get("missing_skills",[])
-        why=job.get("why_good_fit",""); salary=str(job.get("salary","")); loc=str(job.get("location",""))
-        mp="".join(_pill(s,"skill") for s in matched) if matched else ""
-        xp="".join(_pill(s,"miss") for s in missing) if missing else ""
-        sal_txt=f'  ·  💰 {html.escape(salary)}' if salary not in ("N/A","","nan") else ""
-        loc_txt=f'  📍 {html.escape(loc)}' if loc else ""
-        url=str(job.get("url",""))
-        title_html=(f'<a href="{html.escape(url)}" target="_blank" style="color:var(--t1);text-decoration:none">'
-                    f'{html.escape(str(job.get("title","—")))}</a>'
-                    if url else html.escape(str(job.get("title","—"))))
+        if not isinstance(job, dict): continue
+        score   = int(job.get("match_score",0))
+        colour  = _sc(score)
+        matched = job.get("matched_skills",[])
+        missing = job.get("missing_skills",[])
+        why     = job.get("why_good_fit","")
+        salary  = str(job.get("salary",""))
+        loc     = str(job.get("location",""))
+        mp = "".join(_pill(s,"skill") for s in matched) if matched else ""
+        xp = "".join(_pill(s,"miss")  for s in missing) if missing else ""
+        sal_txt = f'  ·  💰 {html.escape(salary)}' if salary not in ("N/A","","nan") else ""
+        loc_txt = f'  📍 {html.escape(loc)}'        if loc else ""
+        url     = str(job.get("url",""))
+        title_html = (
+            f'<a href="{html.escape(url)}" target="_blank" '
+            f'style="color:var(--t1);text-decoration:none">'
+            f'{html.escape(str(job.get("title","—")))}</a>'
+            if url else html.escape(str(job.get("title","—")))
+        )
         st.markdown(f"""
 <div class="jcard">
   <div style="display:flex;justify-content:space-between;align-items:flex-start">
-    <div><div style="font-size:15px;font-weight:700">{title_html}</div>
-    <div style="font-size:12px;color:var(--t2);margin-top:2px">🏢 {html.escape(str(job.get('company','—')))}{loc_txt}{sal_txt}</div></div>
+    <div>
+      <div style="font-size:15px;font-weight:700">{title_html}</div>
+      <div style="font-size:12px;color:var(--t2);margin-top:2px">
+        🏢 {html.escape(str(job.get('company','—')))}{loc_txt}{sal_txt}</div>
+    </div>
     <div style="text-align:right;flex-shrink:0;margin-left:16px">
       <div style="font-size:22px;font-weight:800;color:{colour}">{score}%</div>
-      <div style="font-size:10px;color:var(--t3)">match</div></div></div>
+      <div style="font-size:10px;color:var(--t3)">match</div>
+    </div>
+  </div>
   <div style="background:var(--n5);border-radius:4px;height:6px;width:100%;margin:8px 0">
-    <div style="height:6px;border-radius:4px;width:{score}%;background:linear-gradient(90deg,#007acc,{colour})"></div></div>
-  {f'<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3);letter-spacing:.07em">Matched  </span>{mp}</div>' if mp else ""}
-  {f'<div style="margin-bottom:8px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3);letter-spacing:.07em">Skills to learn  </span>{xp}</div>' if xp else ""}
-  {f'<div style="font-size:13px;color:var(--t2);line-height:1.6;margin-top:6px">💬 {html.escape(str(why))}</div>' if why else ""}
-  {f'<div style="margin-top:10px"><a href="{html.escape(url)}" target="_blank" style="font-size:11px;color:var(--c);text-decoration:none;font-weight:600">🔗 View Job →</a></div>' if url else ""}
-</div>""",unsafe_allow_html=True)
+    <div style="height:6px;border-radius:4px;width:{score}%;
+         background:linear-gradient(90deg,#007acc,{colour})"></div>
+  </div>
+  {f'<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3);letter-spacing:.07em">Matched  </span>{mp}</div>' if mp else ''}
+  {f'<div style="margin-bottom:8px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3);letter-spacing:.07em">Skills to learn  </span>{xp}</div>' if xp else ''}
+  {f'<div style="font-size:13px;color:var(--t2);line-height:1.6;margin-top:6px">💬 {html.escape(str(why))}</div>' if why else ''}
+  {f'<div style="margin-top:10px"><a href="{html.escape(url)}" target="_blank" style="font-size:11px;color:var(--c);text-decoration:none;font-weight:600">🔗 View Job →</a></div>' if url else ''}
+</div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Tab: Full Assessment
 # ══════════════════════════════════════════════════════════════════════════════
 def _tab_assessment():
-    st.markdown('<div class="sh">📊 Full Career Assessment</div>',unsafe_allow_html=True)
-    cv_done=st.session_state.cv_analysis is not None
-    gh_done=st.session_state.github_analysis is not None
-    job_done=st.session_state.job_matches is not None
-    if not any([cv_done,gh_done,job_done]):
-        st.info("Complete at least one analysis in the other tabs first, then come back for your full report."); return
-    c1,c2,c3=st.columns(3)
-    with c1: st.metric("CV","✅ Done" if cv_done else "⬜ Pending")
-    with c2: st.metric("GitHub","✅ Done" if gh_done else "⬜ Pending")
-    with c3: st.metric("Jobs","✅ Done" if job_done else "⬜ Pending")
-    if st.button("✨ Write My Career Report",key="btn_report"):
-        parts=[]
+    st.markdown('<div class="sh">📊 Full Career Assessment</div>', unsafe_allow_html=True)
+    cv_done  = st.session_state.cv_analysis     is not None
+    gh_done  = st.session_state.github_analysis is not None
+    job_done = st.session_state.job_matches     is not None
+
+    if not any([cv_done, gh_done, job_done]):
+        st.info("Complete at least one analysis in the other tabs first, then come back for your full report.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    with c1: st.metric("CV",     "✅ Done" if cv_done  else "⬜ Pending")
+    with c2: st.metric("GitHub", "✅ Done" if gh_done  else "⬜ Pending")
+    with c3: st.metric("Jobs",   "✅ Done" if job_done else "⬜ Pending")
+
+    if st.button("✨ Write My Career Report", key="btn_report"):
+        parts = []
         if cv_done:
-            a=st.session_state.cv_analysis.get("analysis",{})
-            if isinstance(a,dict): parts.append(f"CV: {a.get('seniority_level')} dev, {a.get('experience_years')} yrs, skills: {', '.join(a.get('skills',[])[:10])}, summary: {a.get('summary','')}")
+            a = st.session_state.cv_analysis.get("analysis",{})
+            if isinstance(a, dict):
+                parts.append(
+                    f"CV: {a.get('seniority_level')} dev, {a.get('experience_years')} yrs, "
+                    f"skills: {', '.join(a.get('skills',[])[:10])}, summary: {a.get('summary','')}"
+                )
         if gh_done:
-            p=st.session_state.github_analysis.get("profile",{})
-            parts.append(f"GitHub: {p.get('public_repos')} repos, languages: {', '.join(list(p.get('languages',{}).keys())[:5])}")
+            p = st.session_state.github_analysis.get("profile",{})
+            parts.append(
+                f"GitHub: {p.get('public_repos')} repos, "
+                f"languages: {', '.join(list(p.get('languages',{}).keys())[:5])}"
+            )
         if job_done:
-            m=st.session_state.job_matches.get("matches",[])
+            m = st.session_state.job_matches.get("matches",[])
             if m:
-                top3=[f"{j.get('title')} at {j.get('company')} ({j.get('match_score')}%)" for j in m[:3] if isinstance(j,dict)]
+                top3 = [f"{j.get('title')} at {j.get('company')} ({j.get('match_score')}%)"
+                        for j in m[:3] if isinstance(j,dict)]
                 parts.append(f"Top jobs: {', '.join(top3)}")
-        prompt=("Write a personalised career assessment. Sound like a mentor — warm, honest, specific. "
-                "Cover: where they are now, strongest assets, best opportunities, 3-5 concrete next steps this month. "
-                "Use markdown headers. Don't be generic.\n\nData:\n"+"\n".join(parts))
+
+        prompt = (
+            "Write a personalised career assessment. Sound like a mentor — warm, honest, specific. "
+            "Cover: where they are now, strongest assets, best opportunities, "
+            "3-5 concrete next steps this month. Use markdown headers. Don't be generic.\n\n"
+            "Data:\n" + "\n".join(parts)
+        )
         with st.spinner("Writing your personalised report…"):
-            text=_llm(_groq(),[{"role":"system","content":"You are an expert career advisor writing a personal assessment."},
-                               {"role":"user","content":prompt}],max_tokens=1100)
-        st.markdown('<div class="aib"><div class="ailbl">🤖 Your Career Report</div></div>',unsafe_allow_html=True)
+            text = _llm(
+                _groq(),
+                [{"role":"system","content":"You are an expert career advisor writing a personal assessment."},
+                 {"role":"user","content":prompt}],
+                max_tokens=1100,
+            )
+        st.markdown(
+            '<div class="aib"><div class="ailbl">🤖 Your Career Report</div></div>',
+            unsafe_allow_html=True,
+        )
         st.markdown(text)
-        st.download_button("📥 Download Report (JSON)",
-            data=json.dumps({"generated_at":datetime.datetime.now().isoformat(),"narrative":text,
-                              "cv":st.session_state.cv_analysis,"github":st.session_state.github_analysis,
-                              "jobs":st.session_state.job_matches},indent=2,default=str),
-            file_name=f"career_report_{datetime.date.today()}.json",mime="application/json",key="dl_full")
+        st.download_button(
+            "📥 Download Report (JSON)",
+            data=json.dumps({
+                "generated_at": datetime.datetime.now().isoformat(),
+                "narrative": text,
+                "cv":     st.session_state.cv_analysis,
+                "github": st.session_state.github_analysis,
+                "jobs":   st.session_state.job_matches,
+            }, indent=2, default=str),
+            file_name=f"career_report_{datetime.date.today()}.json",
+            mime="application/json",
+            key="dl_full",
+        )
     else:
         if cv_done:
-            a=st.session_state.cv_analysis.get("analysis",{})
-            if isinstance(a,dict) and a.get("summary"):
-                st.markdown('<div class="sh">📄 CV Summary</div>',unsafe_allow_html=True)
-                st.markdown(f'<div class="aib">{html.escape(a["summary"])}</div>',unsafe_allow_html=True)
+            a = st.session_state.cv_analysis.get("analysis",{})
+            if isinstance(a, dict) and a.get("summary"):
+                st.markdown('<div class="sh">📄 CV Summary</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="aib">{html.escape(a["summary"])}</div>',
+                            unsafe_allow_html=True)
         if job_done:
-            m=[j for j in st.session_state.job_matches.get("matches",[]) if isinstance(j,dict)][:3]
+            m = [j for j in st.session_state.job_matches.get("matches",[])
+                 if isinstance(j,dict)][:3]
             if m:
-                st.markdown('<div class="sh">💼 Top Job Matches</div>',unsafe_allow_html=True)
+                st.markdown('<div class="sh">💼 Top Job Matches</div>', unsafe_allow_html=True)
                 for j in m:
-                    s=int(j.get("match_score",0))
-                    st.markdown(f'<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--L)">'
-                                f'<div style="font-size:22px;font-weight:800;color:{_sc(s)}">{s}%</div>'
-                                f'<div><div style="font-size:13.5px;font-weight:600;color:var(--t1)">{html.escape(str(j.get("title","—")))}</div>'
-                                f'<div style="font-size:12px;color:var(--t2)">{html.escape(str(j.get("company","—")))}</div></div></div>',unsafe_allow_html=True)
+                    s = int(j.get("match_score",0))
+                    st.markdown(
+                        f'<div style="display:flex;align-items:center;gap:12px;padding:10px 0;'
+                        f'border-bottom:1px solid var(--L)">'
+                        f'<div style="font-size:22px;font-weight:800;color:{_sc(s)}">{s}%</div>'
+                        f'<div>'
+                        f'<div style="font-size:13.5px;font-weight:600;color:var(--t1)">'
+                        f'{html.escape(str(j.get("title","—")))}</div>'
+                        f'<div style="font-size:12px;color:var(--t2)">'
+                        f'{html.escape(str(j.get("company","—")))}</div>'
+                        f'</div></div>',
+                        unsafe_allow_html=True,
+                    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
-    _css(); _init()
+    _css()
+    _init()
     _auto_build()
-    _sidebar(); _header()
 
-    ctx_parts=[]
+    # Build context string for the sidebar chat
+    ctx_parts = []
     if st.session_state.cv_analysis:
-        a=st.session_state.cv_analysis.get("analysis",{})
-        if isinstance(a,dict):
-            ctx_parts.append(f"CV: {a.get('seniority_level','?')}, {a.get('experience_years','?')} yrs exp, skills: {', '.join(a.get('skills',[])[:10])}")
+        a = st.session_state.cv_analysis.get("analysis",{})
+        if isinstance(a, dict):
+            ctx_parts.append(
+                f"CV: {a.get('seniority_level','?')}, {a.get('experience_years','?')} yrs exp, "
+                f"skills: {', '.join(a.get('skills',[])[:10])}"
+            )
     if st.session_state.github_analysis:
-        p=st.session_state.github_analysis.get("profile",{})
-        ctx_parts.append(f"GitHub: {p.get('public_repos',0)} repos, top langs: {', '.join(list(p.get('languages',{}).keys())[:5])}")
+        p = st.session_state.github_analysis.get("profile",{})
+        ctx_parts.append(
+            f"GitHub: {p.get('public_repos',0)} repos, "
+            f"top langs: {', '.join(list(p.get('languages',{}).keys())[:5])}"
+        )
     if st.session_state.job_matches:
-        m=st.session_state.job_matches.get("matches",[])
-        if m and isinstance(m[0],dict):
-            t=m[0]; ctx_parts.append(f"Top job match: {t.get('title','')} at {t.get('company','')} ({t.get('match_score','')}%)")
+        m = st.session_state.job_matches.get("matches",[])
+        if m and isinstance(m[0], dict):
+            t = m[0]
+            ctx_parts.append(
+                f"Top job match: {t.get('title','')} at {t.get('company','')} "
+                f"({t.get('match_score','')}%)"
+            )
+    context = "\n".join(ctx_parts)
 
-    _inject_copilot(_key(), "\n".join(ctx_parts))
+    # Sidebar includes the chat panel (FIX 1)
+    _sidebar(context)
+    _header()
 
-    t1,t2,t3,t4=st.tabs(["📄  CV Analyzer","🐙  GitHub Profile","💼  Job Matcher","📊  Full Assessment"])
+    t1, t2, t3, t4 = st.tabs([
+        "📄  CV Analyzer",
+        "🐙  GitHub Profile",
+        "💼  Job Matcher",
+        "📊  Full Assessment",
+    ])
     with t1: _tab_cv()
     with t2: _tab_github()
     with t3: _tab_jobs()
     with t4: _tab_assessment()
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()
