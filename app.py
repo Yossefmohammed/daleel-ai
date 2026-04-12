@@ -605,7 +605,7 @@ def _tab_jobs():
             value=default_skills,
             placeholder="Python\nReact\nSQL",
             height=120,
-            key="js_skills"
+            key="js_skills_v2"
         )
         exp=st.number_input("Years of Experience",0,50,2,key="js_exp")
     with c2:
