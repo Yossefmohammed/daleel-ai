@@ -104,7 +104,7 @@ def _inject_copilot(api_key: str, context: str):
     safe_ctx = context.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
 
     st.markdown(f"""
-<!-- ─── Copilot Panel ─────────────────────────────────────────── -->
+<!-- ─── Copilot Panel (fixed toggle) ─────────────────────────────────────── -->
 <style>
 #cp-btn{{
   position:fixed;bottom:28px;right:28px;z-index:9999;
@@ -115,7 +115,6 @@ def _inject_copilot(api_key: str, context: str):
   display:flex!important;align-items:center;justify-content:center;
   transition:transform .2s,box-shadow .2s;
   color:#0d1326!important;font-weight:700;
-  transform:none!important;
 }}
 #cp-btn:hover{{transform:scale(1.1)!important;box-shadow:0 8px 30px rgba(0,217,255,.6)!important;}}
 #cp-panel{{
@@ -127,7 +126,7 @@ def _inject_copilot(api_key: str, context: str):
   font-family:'Plus Jakarta Sans',system-ui,sans-serif;
   overflow:hidden;
 }}
-#cp-panel.cp-open{{display:flex!important;animation:cp-in .22s ease;}}
+#cp-panel.cp-open{{display:flex!important;}}
 @keyframes cp-in{{from{{opacity:0;transform:translateY(12px)}}to{{opacity:1;transform:translateY(0)}}}}
 #cp-hdr{{
   background:linear-gradient(135deg,#007acc22,#00d9ff11);
@@ -140,16 +139,12 @@ def _inject_copilot(api_key: str, context: str):
 #cp-close{{
   margin-left:auto;background:none!important;border:none!important;
   color:#3d4a6a;font-size:18px;cursor:pointer;padding:0 4px;
-  box-shadow:none!important;transform:none!important;width:auto!important;height:auto!important;
 }}
-#cp-close:hover{{color:#e8eeff!important;background:none!important;box-shadow:none!important;transform:none!important;}}
+#cp-close:hover{{color:#e8eeff!important;}}
 #cp-msgs{{
   flex:1;overflow-y:auto;padding:14px;
-  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent;
-  display:flex;flex-direction:column;gap:10px;
+  scrollbar-width:thin;display:flex;flex-direction:column;gap:10px;
 }}
-#cp-msgs::-webkit-scrollbar{{width:3px;}}
-#cp-msgs::-webkit-scrollbar-thumb{{background:rgba(255,255,255,.1);border-radius:3px;}}
 .cp-msg{{max-width:88%;font-size:13px;line-height:1.65;padding:10px 13px;border-radius:14px;word-break:break-word;}}
 .cp-msg.bot{{background:#111829;border:1px solid rgba(255,255,255,.06);color:#e8eeff;border-top-left-radius:4px;align-self:flex-start;}}
 .cp-msg.usr{{background:linear-gradient(135deg,#00527a,#007cc2);color:#fff;border-top-right-radius:4px;align-self:flex-end;}}
@@ -163,7 +158,6 @@ def _inject_copilot(api_key: str, context: str):
   font-size:11px;font-weight:600;padding:5px 11px;border-radius:20px;
   background:rgba(0,217,255,.08);border:1px solid rgba(0,217,255,.2);
   color:#00d9ff;cursor:pointer;transition:all .15s;
-  font-family:'Plus Jakarta Sans',system-ui,sans-serif;
 }}
 .cp-chip:hover{{background:rgba(0,217,255,.18);}}
 #cp-form{{
@@ -173,176 +167,89 @@ def _inject_copilot(api_key: str, context: str):
 #cp-input{{
   flex:1;background:#111829;border:1px solid rgba(255,255,255,.10);
   border-radius:10px;padding:9px 12px;color:#e8eeff;
-  font-family:'Plus Jakarta Sans',system-ui,sans-serif;font-size:13px;
-  resize:none;outline:none;max-height:90px;line-height:1.5;
+  font-size:13px;resize:none;outline:none;max-height:90px;
   caret-color:#00d9ff;
 }}
 #cp-input:focus{{border-color:#00d9ff;box-shadow:0 0 0 2px rgba(0,217,255,.1);}}
-#cp-input::placeholder{{color:#3d4a6a;}}
+#cp-send{{
+  background:linear-gradient(135deg,#007acc,#00d9ff)!important;
+  color:#0d1326!important;border:none!important;width:36px;height:36px;
+  border-radius:9px;cursor:pointer;font-size:16px;font-weight:bold;
+  display:flex;align-items:center;justify-content:center;
+}}
+#cp-send:hover{{transform:scale(1.08)!important;}}
 #cp-notif{{
-  position:absolute;top:-4px;right:-4px;
-  width:16px;height:16px;border-radius:50%;background:#f87171;
-  font-size:9px;font-weight:700;color:#fff;
-  display:none;align-items:center;justify-content:center;
+  position:absolute;top:-4px;right:-4px;width:16px;height:16px;
+  border-radius:50%;background:#f87171;font-size:9px;font-weight:700;
+  color:#fff;display:none;align-items:center;justify-content:center;
   border:2px solid #0d1326;pointer-events:none;
 }}
 </style>
 
-<!-- ── FIX 1: NO inline onclick — events are wired in the script below ── -->
-<div id="cp-btn" title="Career AI Chat" aria-label="Open career chat">
-  💬
-  <div id="cp-notif">1</div>
-</div>
-
+<div id="cp-btn" title="Career AI Chat">💬<div id="cp-notif">1</div></div>
 <div id="cp-panel">
   <div id="cp-hdr">
     <div class="cp-gem">🎯</div>
-    <div>
-      <div class="cp-title">Career AI</div>
-      <div class="cp-sub">Your personal career advisor</div>
-    </div>
+    <div><div class="cp-title">Career AI</div><div class="cp-sub">Your personal career advisor</div></div>
     <button id="cp-close">✕</button>
   </div>
   <div id="cp-msgs"></div>
   <div id="cp-chips"></div>
   <div id="cp-form">
     <textarea id="cp-input" placeholder="Ask anything about your career…" rows="1"></textarea>
-    <button id="cp-send" title="Send">➤</button>
+    <button id="cp-send">➤</button>
   </div>
 </div>
 
 <script>
 (function() {{
-  var GROQ_KEY = "{safe_key}";
-  var USER_CTX = "{safe_ctx}";
-  var SYSTEM = "You are a warm, expert career advisor called Career AI. Give honest, specific, actionable advice in a conversational tone — like a smart mentor. Keep answers concise and focused. Use bullet points only for lists of 3 or more items. Never say 'As an AI'. Be direct and real."
-              + (USER_CTX ? "\\n\\nContext about this user:\\n" + USER_CTX : "");
+  const GROQ_KEY = "{safe_key}";
+  const USER_CTX = "{safe_ctx}";
+  const SYSTEM = "You are a warm, expert career advisor called Career AI. Give honest, specific, actionable advice in a conversational tone — like a smart mentor. Keep answers concise and focused. Use bullet points only for lists of 3 or more items. Never say 'As an AI'. Be direct and real." + (USER_CTX ? "\\n\\nContext about this user:\\n" + USER_CTX : "");
 
-  var msgs     = [];
-  var isOpen   = false;
-  var greeted  = false;
-
-  var CHIPS = [
-    "How can I improve my CV?",
-    "What skills should I learn?",
-    "How do I negotiate salary?",
-    "Am I ready for a senior role?"
-  ];
-
-  /* ── FIX 1: wire all clicks via addEventListener, not onclick attributes ── */
-  function attachEvents() {{
-    var btnEl   = document.getElementById("cp-btn");
-    var closeEl = document.getElementById("cp-close");
-    var sendEl  = document.getElementById("cp-send");
-    var inputEl = document.getElementById("cp-input");
-
-    if (!btnEl) {{
-      // Elements not yet in DOM — retry after a short delay
-      setTimeout(attachEvents, 150);
-      return;
-    }}
-
-    btnEl.addEventListener("click",  toggle);
-    if (closeEl) closeEl.addEventListener("click", toggle);
-    if (sendEl)  sendEl.addEventListener("click",  doSend);
-    if (inputEl) {{
-      inputEl.addEventListener("keydown", function(e) {{
-        if (e.key === "Enter" && !e.shiftKey) {{ e.preventDefault(); doSend(); }}
-      }});
-      inputEl.addEventListener("input", function() {{
-        inputEl.style.height = "auto";
-        inputEl.style.height = Math.min(inputEl.scrollHeight, 90) + "px";
-      }});
-    }}
-
-    // notification dot after 3 s if still closed
-    setTimeout(function() {{
-      if (!isOpen) {{
-        var n = document.getElementById("cp-notif");
-        if (n) n.style.display = "flex";
-      }}
-    }}, 3000);
-  }}
-
-  function toggle() {{
-    isOpen = !isOpen;
-    var panel = document.getElementById("cp-panel");
-    var notif = document.getElementById("cp-notif");
-    if (!panel) return;
-    if (isOpen) {{
-      panel.classList.add("cp-open");
-      if (notif) notif.style.display = "none";
-      if (!greeted) {{ greet(); greeted = true; }}
-      var inp = document.getElementById("cp-input");
-      if (inp) setTimeout(function() {{ inp.focus(); }}, 260);
-    }} else {{
-      panel.classList.remove("cp-open");
-    }}
-  }}
-
-  function greet() {{
-    addMsg("bot", USER_CTX
-      ? "Hey! 👋 I can see you've been working through your profile. What would you like to explore?"
-      : "Hey! 👋 I'm your Career AI advisor. Ask me anything — CV tips, job search, salary negotiation, skill gaps, interview prep…");
-    renderChips();
-  }}
-
-  function renderChips() {{
-    var c = document.getElementById("cp-chips");
-    if (!c) return;
-    c.innerHTML = "";
-    CHIPS.forEach(function(q) {{
-      var b = document.createElement("button");
-      b.className = "cp-chip";
-      b.textContent = q;
-      b.addEventListener("click", function() {{ c.innerHTML = ""; cpSendMsg(q); }});
-      c.appendChild(b);
-    }});
-  }}
+  let isOpen = false;
+  let greeted = false;
+  let msgs = [];
 
   function addMsg(role, text) {{
-    var box = document.getElementById("cp-msgs");
-    if (!box) return null;
-    var d = document.createElement("div");
-    d.className = "cp-msg " + role;
-    d.innerHTML = mdToHtml(text);
-    box.appendChild(d);
+    const box = document.getElementById("cp-msgs");
+    if (!box) return;
+    const div = document.createElement("div");
+    div.className = "cp-msg " + role;
+    div.innerHTML = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+                        .replace(/\\*\\*(.*?)\\*\\*/g,"<strong>$1</strong>")
+                        .replace(/\\*(.*?)\\*/g,"<em>$1</em>")
+                        .replace(/(^|\\n)[•\\-\\*] (.+)/g,"$1<li>$2</li>")
+                        .replace(/\\n/g,"<br>");
+    if (div.innerHTML.indexOf("<li>") !== -1)
+      div.innerHTML = '<ul style="padding-left:16px;margin:6px 0">' + div.innerHTML + "</ul>";
+    box.appendChild(div);
     box.scrollTop = box.scrollHeight;
-    return d;
-  }}
-
-  function mdToHtml(t) {{
-    t = t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-    t = t.replace(/\*\*(.*?)\*\*/g,"<strong>$1</strong>");
-    t = t.replace(/\*(.*?)\*/g,"<em>$1</em>");
-    t = t.replace(/(^|\n)[•\-\*] (.+)/g,"$1<li>$2</li>");
-    t = t.replace(/<li>/g,'<li style="margin:3px 0;padding-left:4px">');
-    if (t.indexOf("<li>") !== -1)
-      t = '<ul style="padding-left:16px;margin:6px 0">' + t + "</ul>";
-    t = t.replace(/\n/g,"<br>");
-    return t;
   }}
 
   function showTyping() {{
-    var box = document.getElementById("cp-msgs");
+    const box = document.getElementById("cp-msgs");
     if (!box) return;
-    var d = document.createElement("div");
-    d.className = "cp-typing"; d.id = "cp-typing";
-    d.innerHTML = "<span></span><span></span><span></span>";
-    box.appendChild(d); box.scrollTop = box.scrollHeight;
+    let typing = document.getElementById("cp-typing");
+    if (typing) typing.remove();
+    typing = document.createElement("div");
+    typing.id = "cp-typing";
+    typing.className = "cp-typing";
+    typing.innerHTML = "<span></span><span></span><span></span>";
+    box.appendChild(typing);
+    box.scrollTop = box.scrollHeight;
   }}
   function hideTyping() {{
-    var d = document.getElementById("cp-typing"); if (d) d.remove();
+    const t = document.getElementById("cp-typing");
+    if (t) t.remove();
   }}
 
-  async function cpSendMsg(text) {{
-    var chips = document.getElementById("cp-chips");
-    if (chips) chips.innerHTML = "";
+  async function sendToAI(text) {{
     addMsg("usr", text);
     msgs.push({{role:"user", content:text}});
     showTyping();
     try {{
-      var res = await fetch("https://api.groq.com/openai/v1/chat/completions", {{
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {{
         method: "POST",
         headers: {{"Content-Type":"application/json","Authorization":"Bearer " + GROQ_KEY}},
         body: JSON.stringify({{
@@ -352,10 +259,8 @@ def _inject_copilot(api_key: str, context: str):
           max_tokens: 500
         }})
       }});
-      var data = await res.json();
-      var reply = (data.choices && data.choices[0] && data.choices[0].message
-                   && data.choices[0].message.content)
-                  || "Sorry, something went wrong. Try again!";
+      const data = await res.json();
+      const reply = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "Sorry, something went wrong. Try again!";
       hideTyping();
       addMsg("bot", reply);
       msgs.push({{role:"assistant", content:reply}});
@@ -365,16 +270,112 @@ def _inject_copilot(api_key: str, context: str):
     }}
   }}
 
-  function doSend() {{
-    var inp = document.getElementById("cp-input");
-    if (!inp) return;
-    var text = inp.value.trim();
-    if (!text) return;
-    inp.value = ""; inp.style.height = "auto";
-    cpSendMsg(text);
+  function renderChips() {{
+    const chipsDiv = document.getElementById("cp-chips");
+    if (!chipsDiv) return;
+    chipsDiv.innerHTML = "";
+    const suggestions = ["How can I improve my CV?", "What skills should I learn?", "How do I negotiate salary?", "Am I ready for a senior role?"];
+    suggestions.forEach(q => {{
+      const btn = document.createElement("button");
+      btn.className = "cp-chip";
+      btn.textContent = q;
+      btn.onclick = () => {{
+        chipsDiv.innerHTML = "";
+        sendToAI(q);
+      }};
+      chipsDiv.appendChild(btn);
+    }});
   }}
 
-  // Start attaching — works whether DOM is ready or not
+  function greet() {{
+    if (USER_CTX) {{
+      addMsg("bot", "Hey! 👋 I can see you've been working through your profile. What would you like to explore?");
+    }} else {{
+      addMsg("bot", "Hey! 👋 I'm your Career AI advisor. Ask me anything — CV tips, job search, salary negotiation, skill gaps, interview prep…");
+    }}
+    renderChips();
+  }}
+
+  function togglePanel() {{
+    const panel = document.getElementById("cp-panel");
+    if (!panel) return;
+    isOpen = !isOpen;
+    if (isOpen) {{
+      panel.classList.add("cp-open");
+      panel.style.display = "flex";
+      const notif = document.getElementById("cp-notif");
+      if (notif) notif.style.display = "none";
+      if (!greeted) {{
+        greet();
+        greeted = true;
+      }}
+      const input = document.getElementById("cp-input");
+      if (input) setTimeout(() => input.focus(), 100);
+    }} else {{
+      panel.classList.remove("cp-open");
+      panel.style.display = "none";
+    }}
+  }}
+
+  function attachEvents() {{
+    const btn = document.getElementById("cp-btn");
+    const closeBtn = document.getElementById("cp-close");
+    const sendBtn = document.getElementById("cp-send");
+    const input = document.getElementById("cp-input");
+
+    if (!btn) {{
+      setTimeout(attachEvents, 200);
+      return;
+    }}
+
+    // Remove any previous listener to avoid duplicates
+    btn.removeEventListener("click", togglePanel);
+    btn.addEventListener("click", togglePanel);
+
+    if (closeBtn) {{
+      closeBtn.removeEventListener("click", togglePanel);
+      closeBtn.addEventListener("click", togglePanel);
+    }}
+    if (sendBtn) {{
+      sendBtn.removeEventListener("click", () => {{
+        const val = input.value.trim();
+        if (val) {{ input.value = ""; sendToAI(val); }}
+      }});
+      sendBtn.addEventListener("click", () => {{
+        const val = input.value.trim();
+        if (val) {{ input.value = ""; sendToAI(val); }}
+      }});
+    }}
+    if (input) {{
+      input.removeEventListener("keydown", (e) => {{
+        if (e.key === "Enter" && !e.shiftKey) {{
+          e.preventDefault();
+          const val = input.value.trim();
+          if (val) {{ input.value = ""; sendToAI(val); }}
+        }}
+      }});
+      input.addEventListener("keydown", (e) => {{
+        if (e.key === "Enter" && !e.shiftKey) {{
+          e.preventDefault();
+          const val = input.value.trim();
+          if (val) {{ input.value = ""; sendToAI(val); }}
+        }}
+      }});
+      input.addEventListener("input", () => {{
+        input.style.height = "auto";
+        input.style.height = Math.min(input.scrollHeight, 90) + "px";
+      }});
+    }}
+
+    // Show notification after 3 seconds if still closed
+    setTimeout(() => {{
+      if (!isOpen) {{
+        const notif = document.getElementById("cp-notif");
+        if (notif) notif.style.display = "flex";
+      }}
+    }}, 3000);
+  }}
+
   if (document.readyState === "loading") {{
     document.addEventListener("DOMContentLoaded", attachEvents);
   }} else {{
@@ -382,9 +383,7 @@ def _inject_copilot(api_key: str, context: str):
   }}
 }})();
 </script>
-<!-- ─── End Copilot Panel ─────────────────────────────────────── -->
 """, unsafe_allow_html=True)
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # API key helpers
