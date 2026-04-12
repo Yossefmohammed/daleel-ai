@@ -593,7 +593,20 @@ def _tab_jobs():
         st.markdown(f'<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Searching <strong style="color:var(--c)">{cnt:,} jobs</strong>. Fill in your profile and I\'ll rank the best fits and explain each one.</p>',unsafe_allow_html=True)
     c1,c2=st.columns(2)
     with c1:
-        sr=st.text_area("Your Skills (one per line)",placeholder="Python\nReact\nSQL",height=120,key="js_skills")
+        default_skills = ""
+
+        if st.session_state.cv_analysis:
+            a = st.session_state.cv_analysis.get("analysis", {})
+            if isinstance(a, dict):
+                default_skills = "\n".join(a.get("skills", []))
+
+        sr = st.text_area(
+            "Your Skills (one per line)",
+            value=default_skills,
+            placeholder="Python\nReact\nSQL",
+            height=120,
+            key="js_skills"
+        )
         exp=st.number_input("Years of Experience",0,50,2,key="js_exp")
     with c2:
         sen=st.selectbox("Seniority Level",["Junior","Mid-Level","Senior","Lead","Principal"],key="js_sen")
