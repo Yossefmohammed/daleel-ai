@@ -3,9 +3,13 @@ import os, time, logging, requests
 import pandas as pd
 from bs4 import BeautifulSoup
 from datetime import datetime
-from constant import (REMOTEOK_LIMIT, ARBEITNOW_PAGES, MUSE_PAGES,
-                      WUZZUF_PAGES, CRAWL_DELAY, WUZZUF_DEFAULT_KEYWORDS,
-                      JOB_CSV_PATHS)
+REMOTEOK_LIMIT = 120
+ARBEITNOW_PAGES = 3
+MUSE_PAGES = 3
+WUZZUF_PAGES = 3
+CRAWL_DELAY = 0.5
+WUZZUF_DEFAULT_KEYWORDS = ["AI", "Data Scientist", "Python", "ML Engineer"]
+JOB_CSV_PATHS = []
 
 logger = logging.getLogger(__name__)
 OUTPUT = "data/jobs_combined.csv"
