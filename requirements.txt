@@ -34,3 +34,4 @@ networkx>=3.3
 
 # Data
 numpy>=1.26.0
+pypdf>=5.0.0
