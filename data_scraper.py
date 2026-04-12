@@ -1,219 +1,240 @@
-"""data_scraper.py — multi-source job scraper (RemoteOK · Arbeitnow · The Muse · Wuzzuf)."""
-import os, time, logging, requests
+"""
+data_scraper.py  –  updated
+============================
+Key change: scrape_by_skills(skills, limit) lets the app pass user skills
+as RemoteOK keyword queries, so scraped jobs are targeted to the user.
+Still falls back gracefully if scraping fails.
+"""
+
+import requests
 import pandas as pd
-from bs4 import BeautifulSoup
 from datetime import datetime
-REMOTEOK_LIMIT = 120
-ARBEITNOW_PAGES = 3
-MUSE_PAGES = 3
-WUZZUF_PAGES = 3
-CRAWL_DELAY = 0.5
-WUZZUF_DEFAULT_KEYWORDS = ["AI", "Data Scientist", "Python", "ML Engineer"]
-JOB_CSV_PATHS = []
+from pathlib import Path
+import logging
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-OUTPUT = "data/jobs_combined.csv"
 
-HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                   "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"),
-    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+DATA_DIR = Path("data")
+COMBINED = DATA_DIR / "jobs_combined.csv"
+
+
+# ── Normalise any CSV into standard columns ────────────────────────────────
+COL_MAP = {
+    "job_title":          "title",
+    "position":           "title",
+    "role":               "title",
+    "company_name":       "company",
+    "employer":           "company",
+    "job_description":    "description",
+    "responsibilities":   "description",
+    "required_skills":    "description",   # kaggle column
+    "job_location":       "location",
+    "city":               "location",
+    "salary_in_usd":      "salary",
+    "salary_estimate":    "salary",
+    "annual_salary_usd":  "salary",
+    "avg_salary":         "salary",
+    "salary_range":       "salary",
 }
 
-def _now(): return datetime.now().isoformat()
 
-# ── RemoteOK ───────────────────────────────────────────────────────────────────
-class RemoteOKScraper:
-    URL = "https://remoteok.com/api"
-    def scrape(self, limit=REMOTEOK_LIMIT) -> list:
-        try:
-            data = requests.get(self.URL, headers=HEADERS, timeout=15).json()
-            jobs = []
-            for item in data[1:limit+1]:
-                if not isinstance(item, dict): continue
-                jobs.append({"job_title": item.get("position","Unknown"),
-                             "company":   item.get("company","Unknown"),
-                             "description": item.get("description","")[:500],
-                             "location":  item.get("location","Remote"),
-                             "remote_work":"Fully Remote",
-                             "tags":      ", ".join(item.get("tags",[])),
-                             "url":       item.get("url",""),
-                             "salary_range": item.get("salary","Not specified"),
-                             "posted_date":  item.get("date",_now()),
-                             "source":    "RemoteOK"})
-            logger.info(f"✅ RemoteOK: {len(jobs)}")
-            return jobs
-        except Exception as e:
-            logger.warning(f"⚠️ RemoteOK: {e}"); return []
+def _normalise(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [c.lower().strip() for c in df.columns]
+    return df.rename(columns={k: v for k, v in COL_MAP.items()
+                               if k in df.columns and v not in df.columns})
 
-# ── Arbeitnow ──────────────────────────────────────────────────────────────────
-class ArbeitnowScraper:
-    URL = "https://www.arbeitnow.com/api/job-board-api"
-    def scrape(self, pages=ARBEITNOW_PAGES) -> list:
+
+def _to_standard(jobs: list) -> list:
+    """Ensure every job dict has title/company/description/location/salary/url/source."""
+    out = []
+    for j in jobs:
+        out.append({
+            "title":       str(j.get("title","") or j.get("job_title",""))[:100],
+            "company":     str(j.get("company","") or j.get("company_name",""))[:80],
+            "description": str(j.get("description",""))[:400],
+            "location":    str(j.get("location","") or j.get("city","") or "Remote")[:60],
+            "salary":      str(j.get("salary","") or j.get("salary_range","") or "")[:40],
+            "url":         str(j.get("url",""))[:200],
+            "source":      str(j.get("source","Unknown")),
+        })
+    return out
+
+
+# ── RemoteOK ───────────────────────────────────────────────────────────────
+def scrape_remoteok(keywords: str = "", limit: int = 150) -> list:
+    """
+    Scrape RemoteOK.  Pass skill keywords to search for targeted jobs.
+    keywords can be a single skill like "python" or comma-joined "python,react".
+    """
+    try:
+        params = {}
+        if keywords:
+            params["tags"] = keywords.lower()
+        r = requests.get(
+            "https://remoteok.com/api",
+            params=params,
+            headers={"User-Agent": "CareerAI/1.0"},
+            timeout=14,
+        )
+        r.raise_for_status()
         jobs = []
-        for pg in range(1, pages+1):
-            try:
-                data = requests.get(self.URL, params={"page": pg},
-                                    headers=HEADERS, timeout=15).json().get("data",[])
-                if not data: break
-                for item in data:
-                    jobs.append({"job_title": item.get("title","Unknown"),
-                                 "company":   item.get("company_name","Unknown"),
-                                 "description": item.get("description","")[:500],
-                                 "location":  item.get("location","Unknown"),
-                                 "remote_work": "Fully Remote" if item.get("remote") else "On-site",
-                                 "tags":      ", ".join(item.get("tags",[])),
-                                 "url":       item.get("url",""),
-                                 "salary_range": "Not specified",
-                                 "posted_date":  item.get("created_at",_now()),
-                                 "source":    "Arbeitnow"})
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"⚠️ Arbeitnow p{pg}: {e}"); break
-        logger.info(f"✅ Arbeitnow: {len(jobs)}"); return jobs
-
-# ── The Muse ───────────────────────────────────────────────────────────────────
-class TheMuseScraper:
-    URL  = "https://www.themuse.com/api/public/jobs"
-    CATS = ["Software Engineer","Data Science","Product & UX"]
-    def scrape(self, pages=MUSE_PAGES) -> list:
-        jobs = []
-        for cat in self.CATS:
-            for pg in range(1, pages+1):
-                try:
-                    res = requests.get(self.URL, params={"category":cat,"page":pg},
-                                       headers=HEADERS, timeout=15).json().get("results",[])
-                    if not res: break
-                    for item in res:
-                        loc_list = item.get("locations",[{}])
-                        loc = loc_list[0].get("name","Unknown") if loc_list else "Unknown"
-                        jobs.append({
-                            "job_title": item.get("name","Unknown"),
-                            "company":   item.get("company",{}).get("name","Unknown"),
-                            "description": item.get("contents","")[:500],
-                            "location":  loc,
-                            "remote_work": "Remote" if "remote" in loc.lower() else "On-site",
-                            "tags":      ", ".join(c.get("name","") for c in item.get("categories",[])),
-                            "url":       item.get("refs",{}).get("landing_page",""),
-                            "salary_range": "Not specified",
-                            "posted_date":  item.get("publication_date",_now()),
-                            "source":    "The Muse"})
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.warning(f"⚠️ Muse {cat} p{pg}: {e}"); break
-        logger.info(f"✅ The Muse: {len(jobs)}"); return jobs
-
-# ── Wuzzuf ─────────────────────────────────────────────────────────────────────
-class WuzzufScraper:
-    BASE   = "https://wuzzuf.net"
-    SEARCH = "https://wuzzuf.net/search/jobs/"
-    CITIES = {"Cairo","Giza","Alexandria","Maadi","Nasr City","Heliopolis",
-               "Zamalek","Smart Village","New Cairo","6th of October",
-               "Egypt","Remote","Hybrid"}
-
-    def _fetch(self, kw, page):
-        try:
-            r = requests.get(self.SEARCH, params={"q":kw,"l":"Egypt","start":page},
-                             headers=HEADERS, timeout=20)
-            if r.status_code == 200:
-                return BeautifulSoup(r.text, "lxml")
-        except Exception as e:
-            logger.warning(f"   Wuzzuf fetch: {e}")
-        return None
-
-    def _parse(self, soup) -> list:
-        jobs, cards = [], soup.find_all("article") or []
-        if not cards:
-            cards = [h2.parent.parent for h2 in soup.find_all("h2") if h2.find("a", href=True)]
-        for card in cards:
-            try:
-                h2  = card.find("h2")
-                ta  = (h2.find("a") if h2 else None) or card.find("a", href=lambda h: h and "/jobs/" in (h or ""))
-                if not ta: continue
-                title   = ta.get_text(strip=True)
-                href    = ta.get("href","")
-                url     = href if href.startswith("http") else (self.BASE + href if href else "")
-                co_tag  = card.find("a", href=lambda h: h and "/company/" in (h or "").lower())
-                company = co_tag.get_text(strip=True) if co_tag else "Unknown"
-                location = "Egypt"
-                for sp in card.find_all("span"):
-                    txt = sp.get_text(strip=True)
-                    if any(c.lower() in txt.lower() for c in self.CITIES) and len(txt)<50:
-                        location = txt; break
-                tag_els = card.select("a[href*='/a/']")
-                tags    = ", ".join(t.get_text(strip=True) for t in tag_els[:8])
-                time_el = card.find("time")
-                posted  = time_el.get("datetime", _now()) if time_el else _now()
-                if title and title != "Unknown":
-                    jobs.append({"job_title": title, "company": company,
-                                 "description": tags or title, "location": location,
-                                 "remote_work": "Remote" if "remote" in location.lower() else "On-site",
-                                 "tags": tags, "url": url, "salary_range": "Not specified",
-                                 "posted_date": posted, "source": "Wuzzuf"})
-            except Exception: continue
+        for j in r.json()[:limit]:
+            if not isinstance(j, dict) or "id" not in j:
+                continue
+            tags = j.get("tags", [])
+            desc = j.get("description", "") or (", ".join(tags) if tags else "")
+            jobs.append({
+                "title":       j.get("position") or j.get("title", ""),
+                "company":     j.get("company", ""),
+                "description": str(desc)[:400],
+                "location":    j.get("location", "Remote"),
+                "salary":      str(j.get("salary", "")),
+                "url":         j.get("url", ""),
+                "source":      "RemoteOK",
+            })
+        logger.info(f"RemoteOK: {len(jobs)} jobs (keywords={keywords!r})")
         return jobs
+    except Exception as e:
+        logger.warning(f"RemoteOK failed: {e}")
+        return []
 
-    def scrape(self, keywords=None, pages_per_keyword=WUZZUF_PAGES) -> list:
-        keywords  = keywords or WUZZUF_DEFAULT_KEYWORDS
-        all_jobs  = []
-        for kw in keywords:
-            logger.info(f"📡 Wuzzuf: '{kw}'")
-            for pg in range(0, pages_per_keyword):
-                soup = self._fetch(kw, pg)
-                if not soup: break
-                found = self._parse(soup)
-                if not found: break
-                all_jobs.extend(found)
-                time.sleep(CRAWL_DELAY)
-        seen, unique = set(), []
-        for j in all_jobs:
-            key = (j["job_title"].lower(), j["company"].lower())
-            if key not in seen: seen.add(key); unique.append(j)
-        logger.info(f"✅ Wuzzuf: {len(unique)} unique"); return unique
 
-# ── LinkedIn note ──────────────────────────────────────────────────────────────
-# LinkedIn scraping is NOT implemented:
-#   1. ToS §8.2 explicitly forbids automated data collection
-#   2. Pages are JS-rendered — requests gets a login wall
-#   3. Cloudflare + proprietary bot detection
-#   4. Legal precedent (hiQ v LinkedIn 2022)
-# Use the official LinkedIn Jobs API: https://developer.linkedin.com/product-catalog/jobs
+# ── Arbeitnow ─────────────────────────────────────────────────────────────
+def scrape_arbeitnow(limit: int = 150) -> list:
+    jobs = []
+    try:
+        for page in range(1, 4):
+            r = requests.get(
+                "https://www.arbeitnow.com/api/job-board-api",
+                params={"page": page},
+                headers={"Accept": "application/json"},
+                timeout=14,
+            )
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            if not data:
+                break
+            for j in data:
+                jobs.append({
+                    "title":       j.get("title", ""),
+                    "company":     j.get("company_name", ""),
+                    "description": str(j.get("description") or "")[:400],
+                    "location":    j.get("location", ""),
+                    "salary":      "",
+                    "url":         j.get("url", ""),
+                    "source":      "Arbeitnow",
+                })
+            if len(jobs) >= limit:
+                break
+        logger.info(f"Arbeitnow: {len(jobs)} jobs")
+        return jobs[:limit]
+    except Exception as e:
+        logger.warning(f"Arbeitnow failed: {e}")
+        return []
 
-# ── Merge & save ───────────────────────────────────────────────────────────────
-def _load_existing() -> pd.DataFrame:
-    for path in [OUTPUT] + JOB_CSV_PATHS:
-        if os.path.exists(path):
-            try:
-                df = pd.read_csv(path).fillna("")
-                df.rename(columns={"title":"job_title","position":"job_title",
-                                   "company_name":"company"}, inplace=True)
-                df.setdefault = lambda k,v: None  # no-op, just flag
-                logger.info(f"✅ Loaded {len(df)} existing from {path}")
-                return df
-            except Exception: pass
-    return pd.DataFrame()
 
-def scrape_and_save(include_remoteok=True, include_arbeitnow=True,
-                    include_muse=True, include_wuzzuf=True,
-                    remoteok_limit=REMOTEOK_LIMIT, arbeitnow_pages=ARBEITNOW_PAGES,
-                    muse_pages=MUSE_PAGES, wuzzuf_keywords=None,
-                    wuzzuf_pages=WUZZUF_PAGES) -> pd.DataFrame:
-    os.makedirs("data", exist_ok=True)
-    existing = _load_existing()
-    fresh = []
-    if include_remoteok:  fresh += RemoteOKScraper().scrape(limit=remoteok_limit)
-    if include_arbeitnow: fresh += ArbeitnowScraper().scrape(pages=arbeitnow_pages)
-    if include_muse:      fresh += TheMuseScraper().scrape(pages=muse_pages)
-    if include_wuzzuf:    fresh += WuzzufScraper().scrape(keywords=wuzzuf_keywords,
-                                                          pages_per_keyword=wuzzuf_pages)
-    combined = pd.concat([existing, pd.DataFrame(fresh)], ignore_index=True)
-    before   = len(combined)
-    combined.drop_duplicates(subset=["job_title","company"], keep="first", inplace=True)
-    logger.info(f"🗑️ {before-len(combined)} dupes removed → {len(combined)} total")
-    combined.to_csv(OUTPUT, index=False)
-    logger.info(f"💾 Saved → {OUTPUT}")
-    return combined
+# ── Local Kaggle CSV ───────────────────────────────────────────────────────
+def load_local_csv() -> list:
+    candidates = [
+        DATA_DIR / "jobs.csv",
+        Path("docs") / "ai_jobs_market_2025_2026.csv",
+    ] + list(Path("docs").glob("*.csv"))
+
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            df = pd.read_csv(str(p), on_bad_lines="skip", nrows=2000)
+            df = _normalise(df).fillna("")
+            for col in ["title", "company", "description", "location", "salary"]:
+                if col not in df.columns:
+                    df[col] = ""
+            df["source"] = "Local CSV"
+            df["url"] = ""
+            records = df[["title","company","description","location",
+                           "salary","url","source"]].to_dict("records")
+            logger.info(f"Local CSV: {len(records)} jobs from {p.name}")
+            return records
+        except Exception as e:
+            logger.warning(f"Local CSV {p}: {e}")
+    return []
+
+
+# ── Dedup + save ──────────────────────────────────────────────────────────
+def _dedup(jobs: list) -> list:
+    seen, unique = set(), []
+    for j in jobs:
+        k = (str(j.get("title","")).lower()[:40],
+             str(j.get("company","")).lower()[:30])
+        if k not in seen:
+            seen.add(k)
+            unique.append(j)
+    return unique
+
+def save_jobs(jobs: list) -> int:
+    DATA_DIR.mkdir(exist_ok=True)
+    unique = _dedup(jobs)
+    pd.DataFrame(unique).to_csv(str(COMBINED), index=False)
+    logger.info(f"Saved {len(unique)} unique jobs to {COMBINED}")
+    return len(unique)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Public API used by app.py
+# ══════════════════════════════════════════════════════════════════════════════
+def scrape_and_save(skills: list = None, status_ph=None) -> pd.DataFrame:
+    """
+    Main entry point.
+
+    Parameters
+    ----------
+    skills : list of str, optional
+        User skills from CV analysis.  When provided, RemoteOK is queried with
+        each skill as a keyword so results are relevant to this specific user.
+    status_ph : streamlit placeholder, optional
+        If provided, progress messages are sent here.
+
+    Returns
+    -------
+    pd.DataFrame  –  the combined job dataset.
+    """
+    def say(m):
+        if status_ph:
+            status_ph.info(m)
+        logger.info(m)
+
+    all_jobs = []
+
+    if skills:
+        say(f"📡 Scraping RemoteOK for your skills: {', '.join(skills[:4])}…")
+        for sk in skills[:4]:
+            all_jobs.extend(scrape_remoteok(keywords=sk, limit=60))
+        # combined query
+        all_jobs.extend(scrape_remoteok(keywords=",".join(skills[:4]), limit=80))
+    else:
+        say("📡 Scraping RemoteOK (general search)…")
+        all_jobs.extend(scrape_remoteok(limit=150))
+
+    say(f"✅ RemoteOK done ({len(all_jobs)} so far). Fetching Arbeitnow…")
+    all_jobs.extend(scrape_arbeitnow())
+    say(f"✅ Arbeitnow done. Loading local CSV…")
+    all_jobs.extend(load_local_csv())
+
+    all_jobs = _to_standard(all_jobs)
+    n = save_jobs(all_jobs)
+    say(f"✅ Database built — {n:,} unique jobs saved.")
+    return pd.read_csv(str(COMBINED))
+
+
+# ── Legacy compat (old app.py called get_combined_jobs) ───────────────────
+def get_combined_jobs(kaggle_path: str = "docs/ai_jobs_market_2025_2026.csv",
+                      output_path: str = "data/jobs_combined.csv") -> pd.DataFrame:
+    """Backward-compatible wrapper."""
+    return scrape_and_save()
+
 
 if __name__ == "__main__":
     df = scrape_and_save()
-    print(f"✅ {len(df)} jobs total")
+    print(f"Total jobs: {len(df)}")
+    print(df[["title","company","location","source"]].head(10).to_string())

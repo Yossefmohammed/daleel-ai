@@ -1,14 +1,11 @@
 """
-Career AI Assistant  –  fully self-contained
-=============================================
-No imports from cv_analyzer.py / job_matcher.py / data_scraper.py.
-All analysis logic lives here, so there are zero ImportError surprises.
-
-Auto-scraping
-─────────────
-On first load (or when cache > 24 h old) the app silently scrapes
-RemoteOK + Arbeitnow (both free, no API key needed) and saves to
-data/jobs_combined.csv.  Scraping does NOT run on every job search.
+Career AI Assistant  –  fully self-contained + Copilot floating chat
+=====================================================================
+Changes vs previous version:
+  • Career Chat is now a floating Copilot panel (bottom-right, always available)
+  • CV skills auto-populate the Job Matcher AND trigger a targeted skill scrape
+  • data_scraper.scrape_by_skills() is called with user skills for relevant jobs
+  • 4 tabs only: CV / GitHub / Jobs / Assessment
 """
 
 import os, re, json, html, datetime, time
@@ -17,12 +14,9 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
-from data_scraper import scrape_and_save
 
-# ── page config (must be the very first Streamlit call) ────────────────────
 st.set_page_config(page_title="Career AI", page_icon="🎯",
                    layout="wide", initial_sidebar_state="expanded")
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CSS
@@ -68,13 +62,6 @@ section.main>div{padding:0!important}
 [data-testid="stMetricValue"]{color:var(--t1)!important;font-size:22px!important}
 [data-testid="stExpander"]{background:var(--n3)!important;border:1px solid var(--L)!important;border-radius:var(--R)!important}
 [data-testid="stExpander"] summary{color:var(--t2)!important;font-size:12.5px!important}
-[data-testid="stChatInput"]{background:var(--n3)!important;border:1px solid var(--L2)!important;border-radius:var(--R)!important;margin:0 0 12px!important}
-[data-testid="stChatInput"]:focus-within{border-color:var(--c)!important;box-shadow:0 0 0 2px var(--cd)!important}
-[data-testid="stChatInput"] textarea{background:transparent!important;border:none!important;color:var(--t1)!important;font-family:var(--ff)!important;font-size:13.5px!important;caret-color:var(--c)!important}
-[data-testid="stChatInput"] textarea::placeholder{color:var(--t3)!important}
-[data-testid="stChatInput"] button{background:linear-gradient(135deg,#007acc,#00d9ff)!important;border:none!important;border-radius:9px!important;color:var(--n)!important}
-[data-testid="stChatMessageContent"]{color:var(--t1)!important;font-size:13.5px!important;line-height:1.7!important;font-family:var(--ff)!important}
-[data-testid="stChatMessage"]{background:var(--n3)!important;border:1px solid var(--L)!important;border-radius:16px!important;padding:4px 8px!important;margin:6px 0!important}
 .stProgress>div>div{background:var(--c)!important}
 [data-testid="stDownloadButton"]>button{background:transparent!important;border:1px solid var(--L2)!important;box-shadow:none!important;color:var(--t2)!important}
 [data-testid="stDownloadButton"]>button:hover{border-color:var(--cb)!important;color:var(--c)!important;transform:none!important;box-shadow:none!important}
@@ -93,10 +80,273 @@ hr{border-color:var(--L)!important}
 .sh{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--t3);margin:22px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--L)}
 .sdiv{height:1px;background:var(--L);margin:12px 0}
 .slbl{font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--t3);padding-bottom:6px}
+/* leave room for the floating panel */
+[data-testid="stTabPanel"]{padding-right:32px!important}
 </style>""", unsafe_allow_html=True)
 
 
-# ── API key helpers ────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Floating Copilot Chat Panel  (pure HTML/CSS/JS — no Streamlit reruns)
+# ══════════════════════════════════════════════════════════════════════════════
+def _inject_copilot(api_key: str, context: str):
+    """Inject a fixed floating chat panel at bottom-right that calls Groq directly."""
+    safe_key = api_key.replace('"', '')
+    safe_ctx = context.replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+
+    st.markdown(f"""
+<!-- ─── Copilot Panel ─────────────────────────────────────────── -->
+<style>
+#cp-btn{{
+  position:fixed;bottom:28px;right:28px;z-index:9999;
+  width:54px;height:54px;border-radius:50%;
+  background:linear-gradient(135deg,#007acc,#00d9ff);
+  border:none;cursor:pointer;font-size:22px;
+  box-shadow:0 6px 24px rgba(0,217,255,.45);
+  display:flex;align-items:center;justify-content:center;
+  transition:transform .2s,box-shadow .2s;
+}}
+#cp-btn:hover{{transform:scale(1.1);box-shadow:0 8px 30px rgba(0,217,255,.6);}}
+#cp-panel{{
+  position:fixed;bottom:96px;right:28px;z-index:9998;
+  width:360px;height:520px;
+  background:#0d1326;border:1px solid rgba(0,217,255,.25);
+  border-radius:18px;display:none;flex-direction:column;
+  box-shadow:0 20px 60px rgba(0,0,0,.6);
+  font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+  overflow:hidden;animation:cp-in .22s ease;
+}}
+@keyframes cp-in{{from{{opacity:0;transform:translateY(12px)}}to{{opacity:1;transform:translateY(0)}}}}
+#cp-hdr{{
+  background:linear-gradient(135deg,#007acc22,#00d9ff11);
+  border-bottom:1px solid rgba(0,217,255,.15);
+  padding:14px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0;
+}}
+#cp-hdr .cp-gem{{
+  width:32px;height:32px;border-radius:9px;
+  background:linear-gradient(135deg,#007acc,#00d9ff);
+  display:flex;align-items:center;justify-content:center;font-size:15px;
+}}
+#cp-hdr .cp-title{{font-size:13.5px;font-weight:700;color:#e8eeff;}}
+#cp-hdr .cp-sub{{font-size:10px;color:#3d4a6a;margin-top:1px;}}
+#cp-hdr .cp-close{{margin-left:auto;background:none;border:none;color:#3d4a6a;font-size:18px;cursor:pointer;padding:0 4px;}}
+#cp-hdr .cp-close:hover{{color:#e8eeff;}}
+#cp-msgs{{
+  flex:1;overflow-y:auto;padding:14px;
+  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent;
+  display:flex;flex-direction:column;gap:10px;
+}}
+#cp-msgs::-webkit-scrollbar{{width:3px;}}
+#cp-msgs::-webkit-scrollbar-thumb{{background:rgba(255,255,255,.1);border-radius:3px;}}
+.cp-msg{{max-width:88%;font-size:13px;line-height:1.65;padding:10px 13px;border-radius:14px;word-break:break-word;}}
+.cp-msg.bot{{background:#111829;border:1px solid rgba(255,255,255,.06);color:#e8eeff;border-top-left-radius:4px;align-self:flex-start;}}
+.cp-msg.usr{{background:linear-gradient(135deg,#00527a,#007cc2);color:#fff;border-top-right-radius:4px;align-self:flex-end;}}
+.cp-typing{{display:flex;gap:4px;padding:12px 14px;align-items:center;align-self:flex-start;}}
+.cp-typing span{{width:6px;height:6px;border-radius:50%;background:#00d9ff;animation:cp-blink 1.2s ease-in-out infinite;}}
+.cp-typing span:nth-child(2){{animation-delay:.2s;}}
+.cp-typing span:nth-child(3){{animation-delay:.4s;}}
+@keyframes cp-blink{{0%,100%{{opacity:.2}}50%{{opacity:1}}}}
+#cp-chips{{padding:0 14px 8px;display:flex;flex-wrap:wrap;gap:6px;}}
+.cp-chip{{
+  font-size:11px;font-weight:600;padding:5px 11px;border-radius:20px;
+  background:rgba(0,217,255,.08);border:1px solid rgba(0,217,255,.2);
+  color:#00d9ff;cursor:pointer;transition:all .15s;
+}}
+.cp-chip:hover{{background:rgba(0,217,255,.18);}}
+#cp-form{{
+  border-top:1px solid rgba(255,255,255,.06);
+  padding:10px 12px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0;
+}}
+#cp-input{{
+  flex:1;background:#111829;border:1px solid rgba(255,255,255,.10);
+  border-radius:10px;padding:9px 12px;color:#e8eeff;
+  font-family:'Plus Jakarta Sans',system-ui,sans-serif;font-size:13px;
+  resize:none;outline:none;max-height:90px;line-height:1.5;
+  caret-color:#00d9ff;
+}}
+#cp-input:focus{{border-color:#00d9ff;box-shadow:0 0 0 2px rgba(0,217,255,.1);}}
+#cp-input::placeholder{{color:#3d4a6a;}}
+#cp-send{{
+  width:36px;height:36px;border-radius:9px;flex-shrink:0;
+  background:linear-gradient(135deg,#007acc,#00d9ff);
+  border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  font-size:15px;transition:transform .15s;
+}}
+#cp-send:hover{{transform:scale(1.08);}}
+#cp-notif{{
+  position:absolute;top:-4px;right:-4px;
+  width:16px;height:16px;border-radius:50%;background:#f87171;
+  font-size:9px;font-weight:700;color:#fff;
+  display:none;align-items:center;justify-content:center;
+  border:2px solid #0d1326;
+}}
+</style>
+
+<div id="cp-btn" onclick="cpToggle()" title="Career AI Chat" aria-label="Open career chat">
+  💬
+  <div id="cp-notif" id="cp-notif">1</div>
+</div>
+
+<div id="cp-panel">
+  <div id="cp-hdr">
+    <div class="cp-gem">🎯</div>
+    <div>
+      <div class="cp-title">Career AI</div>
+      <div class="cp-sub">Your personal career advisor</div>
+    </div>
+    <button class="cp-close" onclick="cpToggle()">✕</button>
+  </div>
+  <div id="cp-msgs"></div>
+  <div id="cp-chips"></div>
+  <div id="cp-form">
+    <textarea id="cp-input" placeholder="Ask anything about your career…" rows="1"
+      onkeydown="cpKey(event)" oninput="cpResize(this)"></textarea>
+    <button id="cp-send" onclick="cpSend()" title="Send">➤</button>
+  </div>
+</div>
+
+<script>
+(function(){{
+  const GROQ_KEY = "{safe_key}";
+  const USER_CTX = "{safe_ctx}";
+  const SYSTEM   = `You are a warm, expert career advisor called Career AI. Give honest, specific, actionable advice in a conversational tone — like a smart mentor. Keep answers concise and focused. Use bullet points only for lists of 3 or more items. Never say "As an AI". Be direct and real.${{USER_CTX ? "\\n\\nContext about this user:\\n" + USER_CTX : ""}}`;
+  const msgs     = [];
+  let   open     = false;
+  let   greeting = false;
+
+  const CHIPS = [
+    "How can I improve my CV?",
+    "What skills should I learn?",
+    "How do I negotiate salary?",
+    "Am I ready for a senior role?"
+  ];
+
+  function cpToggle(){{
+    open = !open;
+    const p = document.getElementById("cp-panel");
+    const n = document.getElementById("cp-notif");
+    p.style.display = open ? "flex" : "none";
+    if(n) n.style.display = "none";
+    if(open && !greeting){{ greet(); greeting=true; }}
+    if(open) document.getElementById("cp-input").focus();
+  }}
+  window.cpToggle = cpToggle;
+
+  function greet(){{
+    addMsg("bot", USER_CTX
+      ? "Hey! 👋 I can see you've been working through your profile. What would you like to explore?"
+      : "Hey! 👋 I'm your Career AI advisor. Ask me anything — CV tips, job search, salary negotiation, skill gaps, interview prep…");
+    renderChips();
+  }}
+
+  function renderChips(){{
+    const c = document.getElementById("cp-chips");
+    c.innerHTML = "";
+    CHIPS.forEach(q => {{
+      const btn = document.createElement("button");
+      btn.className = "cp-chip";
+      btn.textContent = q;
+      btn.onclick = () => {{ c.innerHTML=""; cpSendMsg(q); }};
+      c.appendChild(btn);
+    }});
+  }}
+
+  function addMsg(role, text){{
+    const container = document.getElementById("cp-msgs");
+    const div = document.createElement("div");
+    div.className = "cp-msg " + role;
+    div.innerHTML = mdToHtml(text);
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+    return div;
+  }}
+
+  function mdToHtml(t){{
+    // simple markdown: bold, bullets
+    t = t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    t = t.replace(/\*\*(.*?)\*\*/g,"<strong>$1</strong>");
+    t = t.replace(/\*(.*?)\*/g,"<em>$1</em>");
+    // bullet lists
+    t = t.replace(/(^|\n)[•\-\*] (.+)/g, '$1<li>$2</li>');
+    t = t.replace(/<li>/g,'<li style="margin:3px 0;padding-left:4px">');
+    if(t.includes('<li>')) t = '<ul style="padding-left:16px;margin:6px 0">'+t+'</ul>';
+    // line breaks
+    t = t.replace(/\n/g,"<br>");
+    return t;
+  }}
+
+  function showTyping(){{
+    const c = document.getElementById("cp-msgs");
+    const d = document.createElement("div");
+    d.className = "cp-typing"; d.id="cp-typing";
+    d.innerHTML="<span></span><span></span><span></span>";
+    c.appendChild(d); c.scrollTop=c.scrollHeight;
+  }}
+  function hideTyping(){{ const d=document.getElementById("cp-typing"); if(d) d.remove(); }}
+
+  async function cpSendMsg(text){{
+    document.getElementById("cp-chips").innerHTML="";
+    addMsg("usr", text);
+    msgs.push({{"role":"user","content":text}});
+    showTyping();
+
+    try{{
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {{
+        method:"POST",
+        headers:{{"Content-Type":"application/json","Authorization":"Bearer "+GROQ_KEY}},
+        body: JSON.stringify({{
+          model: "llama-3.3-70b-versatile",
+          messages: [{{"role":"system","content":SYSTEM}}, ...msgs.slice(-12)],
+          temperature: 0.75,
+          max_tokens: 500
+        }})
+      }});
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content || "Sorry, something went wrong. Try again!";
+      hideTyping();
+      addMsg("bot", reply);
+      msgs.push({{"role":"assistant","content":reply}});
+    }}catch(e){{
+      hideTyping();
+      addMsg("bot", "Hmm, couldn't reach the AI right now. Check your connection and try again.");
+    }}
+  }}
+
+  function cpSend(){{
+    const inp = document.getElementById("cp-input");
+    const text = inp.value.trim();
+    if(!text) return;
+    inp.value=""; inp.style.height="auto";
+    cpSendMsg(text);
+  }}
+  window.cpSend = cpSend;
+
+  function cpKey(e){{
+    if(e.key==="Enter" && !e.shiftKey){{ e.preventDefault(); cpSend(); }}
+  }}
+  window.cpKey = cpKey;
+
+  function cpResize(el){{
+    el.style.height="auto";
+    el.style.height=Math.min(el.scrollHeight,90)+"px";
+  }}
+  window.cpResize = cpResize;
+
+  // Show notification dot after 3s if panel is closed
+  setTimeout(()=>{{
+    if(!open){{
+      const n=document.getElementById("cp-notif");
+      if(n){{ n.style.display="flex"; }}
+    }}
+  }}, 3000);
+}})();
+</script>
+<!-- ─── End Copilot Panel ─────────────────────────────────────── -->
+""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# API key helpers
+# ══════════════════════════════════════════════════════════════════════════════
 def _key():
     try:
         if "GROQ_API_KEY" in st.secrets: return st.secrets["GROQ_API_KEY"]
@@ -138,61 +388,71 @@ def _parse_json(text):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Job database
+# Job database  (scraping + caching)
 # ══════════════════════════════════════════════════════════════════════════════
 DATA_DIR    = Path("data")
 COMBINED    = DATA_DIR / "jobs_combined.csv"
 CACHE_HOURS = 24
 
-def _scrape_remoteok(limit=120):
+def _scrape_remoteok(keywords: str = "", limit: int = 150) -> list:
     import requests
     try:
+        params = {"tags": keywords} if keywords else {}
         r = requests.get("https://remoteok.com/api",
-                         headers={"User-Agent":"CareerAI/1.0"}, timeout=12)
+                         params=params,
+                         headers={"User-Agent": "CareerAI/1.0"}, timeout=14)
         r.raise_for_status()
         jobs = []
         for j in r.json()[:limit]:
             if not isinstance(j, dict) or "id" not in j: continue
-            jobs.append({"title": j.get("position") or j.get("title",""),
-                         "company": j.get("company",""),
-                         "description": str(j.get("description") or j.get("tags",""))[:400],
-                         "location": j.get("location","Remote"),
-                         "salary": str(j.get("salary","")), "url": j.get("url",""),
-                         "source": "RemoteOK"})
+            jobs.append({
+                "title":       j.get("position") or j.get("title", ""),
+                "company":     j.get("company", ""),
+                "description": str(j.get("description") or " ".join(j.get("tags",[])))[:400],
+                "location":    j.get("location", "Remote"),
+                "salary":      str(j.get("salary", "")),
+                "url":         j.get("url", ""),
+                "source":      "RemoteOK",
+            })
         return jobs
     except Exception: return []
 
-def _scrape_arbeitnow(limit=120):
+def _scrape_arbeitnow(limit: int = 150) -> list:
     import requests
     jobs = []
     try:
         for page in range(1, 4):
             r = requests.get("https://www.arbeitnow.com/api/job-board-api",
                              params={"page": page},
-                             headers={"Accept":"application/json"}, timeout=12)
+                             headers={"Accept": "application/json"}, timeout=14)
             r.raise_for_status()
             data = r.json().get("data", [])
             if not data: break
             for j in data:
-                jobs.append({"title": j.get("title",""), "company": j.get("company_name",""),
-                              "description": str(j.get("description") or "")[:400],
-                              "location": j.get("location",""), "salary": "",
-                              "url": j.get("url",""), "source": "Arbeitnow"})
+                jobs.append({
+                    "title":       j.get("title", ""),
+                    "company":     j.get("company_name", ""),
+                    "description": str(j.get("description") or "")[:400],
+                    "location":    j.get("location", ""),
+                    "salary":      "",
+                    "url":         j.get("url", ""),
+                    "source":      "Arbeitnow",
+                })
             if len(jobs) >= limit: break
         return jobs[:limit]
     except Exception: return []
 
-def _load_local_csv():
+def _load_local_csv() -> list:
     import pandas as pd
-    col_map = {"job_title":"title","position":"title","role":"title",
-               "company_name":"company","employer":"company",
-               "job_description":"description","responsibilities":"description",
-               "job_location":"location","city":"location",
-               "salary_in_usd":"salary","salary_estimate":"salary",
-               "annual_salary_usd":"salary","avg_salary":"salary"}
-    candidates = [DATA_DIR/"jobs.csv", Path("docs")/"ai_jobs_market_2025_2026.csv"]
-    candidates += list(Path("docs").glob("*.csv"))
-    for p in candidates:
+    col_map = {
+        "job_title":"title","position":"title","role":"title",
+        "company_name":"company","employer":"company",
+        "job_description":"description","responsibilities":"description",
+        "job_location":"location","city":"location",
+        "salary_in_usd":"salary","salary_estimate":"salary",
+        "annual_salary_usd":"salary","avg_salary":"salary",
+    }
+    for p in [DATA_DIR/"jobs.csv", Path("docs")/"ai_jobs_market_2025_2026.csv"] + list(Path("docs").glob("*.csv")):
         if not p.exists(): continue
         try:
             df = pd.read_csv(str(p), on_bad_lines="skip", nrows=2000)
@@ -206,18 +466,18 @@ def _load_local_csv():
         except Exception: continue
     return []
 
-def _cache_fresh():
+def _cache_fresh() -> bool:
     if not COMBINED.exists(): return False
     age = (datetime.datetime.now() -
            datetime.datetime.fromtimestamp(COMBINED.stat().st_mtime)).total_seconds()
     return age < CACHE_HOURS * 3600
 
-def _save_combined(jobs):
+def _save_combined(jobs: list):
     import pandas as pd
     DATA_DIR.mkdir(exist_ok=True)
     pd.DataFrame(jobs).to_csv(str(COMBINED), index=False)
 
-def _load_combined():
+def _load_combined() -> list:
     import pandas as pd
     if not COMBINED.exists(): return []
     try:
@@ -225,20 +485,44 @@ def _load_combined():
         return df.fillna("").to_dict("records")
     except Exception: return []
 
-def build_job_database(status_ph=None):
+def build_job_database(skills: list = None, status_ph=None) -> int:
+    """
+    Build or refresh the job database.
+    If `skills` is given, scrape RemoteOK with those skills as keywords
+    so results are targeted to the user. Otherwise do a general scrape.
+    """
     def say(m):
-        if status_ph:
-            status_ph.info(m)
+        if status_ph: status_ph.info(m)
 
-    say("📡 Scraping all sources (RemoteOK + Arbeitnow + The Muse + Wuzzuf)...")
+    all_jobs = []
 
-    try:
-        df = scrape_and_save()
-        say(f"✅ Done — {len(df)} jobs collected")
-        return len(df)
-    except Exception as e:
-        say(f"⚠️ Scraping failed: {e}")
-        return 0
+    # ── RemoteOK: search by skills if provided ────────────────────────────
+    if skills:
+        # Search each skill and merge (top 3 skills to keep it fast)
+        for sk in skills[:3]:
+            say(f"📡 RemoteOK: searching '{sk}'…")
+            all_jobs.extend(_scrape_remoteok(keywords=sk, limit=60))
+        # Also do a combined query
+        combined_kw = "+".join(skills[:4])
+        all_jobs.extend(_scrape_remoteok(keywords=combined_kw, limit=60))
+    else:
+        say("📡 Scraping RemoteOK (general)…")
+        all_jobs.extend(_scrape_remoteok(limit=150))
+
+    say(f"✅ RemoteOK: {len(all_jobs)} jobs. Trying Arbeitnow…")
+    anow = _scrape_arbeitnow()
+    all_jobs.extend(anow)
+    say(f"✅ Arbeitnow: {len(anow)} jobs. Loading local CSV…")
+    local = _load_local_csv()
+    all_jobs.extend(local)
+    say("🔧 Deduplicating…")
+
+    seen, unique = set(), []
+    for j in all_jobs:
+        k = (str(j.get("title","")).lower()[:40], str(j.get("company","")).lower()[:30])
+        if k not in seen: seen.add(k); unique.append(j)
+    _save_combined(unique)
+    return len(unique)
 
 def _auto_build():
     if st.session_state.get("db_checked"): return
@@ -258,21 +542,21 @@ def _auto_build():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CV analysis
+# CV analysis  (inline)
 # ══════════════════════════════════════════════════════════════════════════════
-def _pdf_text(path):
+def _pdf_text(path: str) -> str:
     from pypdf import PdfReader
     return "\n".join(p.extract_text() or "" for p in PdfReader(path).pages)
 
-def analyze_cv(pdf_path):
+def analyze_cv(pdf_path: str) -> dict:
     text = _pdf_text(pdf_path)
     if not text.strip():
-        return {"success": False,
-                "error": "Could not read text from this PDF. Make sure it's not a scanned image."}
+        return {"success":False,
+                "error":"Could not read text from this PDF. Make sure it is not a scanned image."}
     client = _groq()
     prompt = (
         "Analyze this CV. Return ONLY a valid JSON object — no markdown, no text outside the JSON.\n\n"
-        '{"name":"candidate name or empty","summary":"2-3 sentence honest professional summary",'
+        '{"name":"","summary":"2-3 sentence honest professional summary",'
         '"seniority_level":"Junior|Mid-Level|Senior|Lead","experience_years":<integer>,'
         '"skills":["skill1"],"technologies":["framework"],'
         '"experience":[{"title":"Job Title","company":"Company","duration":"2021-2023"}],'
@@ -282,14 +566,14 @@ def analyze_cv(pdf_path):
     raw = _llm(client, [{"role":"user","content":prompt}], max_tokens=1200)
     parsed = _parse_json(raw)
     if not parsed or "skills" not in parsed:
-        return {"success":False,"error":"AI could not parse your CV. Try a cleaner, text-based PDF."}
+        return {"success":False,"error":"AI could not parse your CV. Try a cleaner text-based PDF."}
     return {"success":True,"analysis":parsed}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GitHub analysis
+# GitHub analysis  (inline)
 # ══════════════════════════════════════════════════════════════════════════════
-def analyze_github(username):
+def analyze_github(username: str) -> dict:
     import requests
     hdrs = {"Accept":"application/vnd.github+json"}
     tok = _gh_token()
@@ -307,39 +591,41 @@ def analyze_github(username):
                           params={"per_page":30,"sort":"pushed"}, timeout=10)
         repos = rr.json() if rr.ok else []
     except Exception: repos = []
-    lang_counts = {}
+    lang_counts: dict = {}
     for repo in repos[:20]:
         if repo.get("language"):
             lang_counts[repo["language"]] = lang_counts.get(repo["language"],0)+1
-    profile = {"login":user.get("login",""),"name":user.get("name",""),
-               "bio":user.get("bio",""),"followers":user.get("followers",0),
-               "following":user.get("following",0),"public_repos":user.get("public_repos",0),
-               "languages":dict(sorted(lang_counts.items(),key=lambda x:-x[1])[:8]),
-               "top_repos":[{"name":r.get("name"),"stars":r.get("stargazers_count",0),
-                              "description":r.get("description","")} for r in repos[:5]]}
+    profile = {
+        "login": user.get("login",""), "name": user.get("name",""),
+        "bio": user.get("bio",""), "followers": user.get("followers",0),
+        "following": user.get("following",0), "public_repos": user.get("public_repos",0),
+        "languages": dict(sorted(lang_counts.items(),key=lambda x:-x[1])[:8]),
+        "top_repos": [{"name":r.get("name"),"stars":r.get("stargazers_count",0),
+                       "description":r.get("description","")} for r in repos[:5]],
+    }
     client = _groq()
     prompt = (
         "You are a tech recruiter. Assess this GitHub profile.\n"
         "Return ONLY valid JSON — no markdown.\n\n"
         '{"profile_score":<integer 0-100>,"summary":"3-4 honest sentences",'
         '"strengths":["point1","point2"],"recommendations":["tip1","tip2","tip3"]}\n\n'
-        f"Username: {profile['login']}, Bio: {profile.get('bio','—')}, "
-        f"Repos: {profile['public_repos']}, Followers: {profile['followers']}, "
-        f"Top languages: {', '.join(profile['languages'].keys())}, "
-        f"Top repos: {json.dumps(profile['top_repos'][:3])}"
+        f"Username:{profile['login']},Bio:{profile.get('bio','—')},"
+        f"Repos:{profile['public_repos']},Followers:{profile['followers']},"
+        f"Top languages:{', '.join(profile['languages'].keys())},"
+        f"Top repos:{json.dumps(profile['top_repos'][:3])}"
     )
     raw = _llm(client, [{"role":"user","content":prompt}], max_tokens=600)
     return {"success":True,"profile":profile,"analysis":_parse_json(raw)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Job matching
+# Job matching  (inline)
 # ══════════════════════════════════════════════════════════════════════════════
-def match_jobs(user_profile, limit=8):
+def match_jobs(user_profile: dict, limit: int = 8) -> dict:
     jobs = _load_combined()
     if not jobs:
         return {"success":False,
-                "error":"Job database is empty. Click Refresh Job Database in the sidebar."}
+                "error":"Job database is empty. Click 🔄 Refresh Job Database in the sidebar."}
     skills = [s.lower() for s in user_profile.get("skills",[])]
     roles  = [r.lower() for r in user_profile.get("interested_roles",[])]
     def _score(j):
@@ -355,7 +641,7 @@ def match_jobs(user_profile, limit=8):
     client = _groq()
     prompt = (
         f"You are a career advisor. Return ONLY a valid JSON array of top {limit} best-matching jobs.\n"
-        "No markdown. Each object must have exactly:\n"
+        "No markdown. Each object:\n"
         '{"title":"","company":"","location":"","salary":"","match_score":<0-100>,'
         '"matched_skills":[],"missing_skills":[],"why_good_fit":"one sentence"}\n\n'
         f"User: skills={user_profile.get('skills',[])}, "
@@ -364,11 +650,12 @@ def match_jobs(user_profile, limit=8):
         f"roles={user_profile.get('interested_roles',[])}\n\n"
         f"Jobs:\n{json.dumps(compact,indent=2)[:4000]}\n\nReturn ONLY the JSON array."
     )
-    raw = _llm(client, [{"role":"user","content":prompt}], max_tokens=1400)
+    raw = _llm(client,[{"role":"user","content":prompt}],max_tokens=1400)
     matches = _parse_json(raw)
     if isinstance(matches,dict) and "jobs" in matches: matches=matches["jobs"]
     if not isinstance(matches,list): matches=[]
-    return {"success":True,"matches":matches,"total_in_db":len(jobs),"candidates_evaluated":len(compact)}
+    return {"success":True,"matches":matches,
+            "total_in_db":len(jobs),"candidates_evaluated":len(compact)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -376,12 +663,12 @@ def match_jobs(user_profile, limit=8):
 # ══════════════════════════════════════════════════════════════════════════════
 def _init():
     for k,v in {"cv_analysis":None,"github_analysis":None,"job_matches":None,
-                "chat_messages":[],"db_checked":False}.items():
+                "db_checked":False,"skill_scrape_done":False}.items():
         if k not in st.session_state: st.session_state[k]=v
 
 
 # ── Render helpers ─────────────────────────────────────────────────────────
-def _pill(t, k="skill"):
+def _pill(t,k="skill"):
     cls={"skill":"pill","tech":"pill tech","miss":"pill miss"}.get(k,"pill")
     return f'<span class="{cls}">{html.escape(str(t))}</span>'
 def _pills(items,k="skill"):
@@ -409,7 +696,9 @@ def _sidebar():
             '<div><div style="font-size:15px;font-weight:800;color:#e8eeff;letter-spacing:-.3px">Career AI</div>'
             '<div style="font-size:10px;color:#00d9ff;background:rgba(0,217,255,.08);padding:2px 8px;border-radius:20px;'
             'border:1px solid rgba(0,217,255,.2);display:inline-block;font-weight:600;margin-top:2px">Phase 1 · MVP</div>'
-            '</div></div></div>', unsafe_allow_html=True)
+            '</div></div></div>',
+            unsafe_allow_html=True,
+        )
         st.markdown("<div style='padding:14px 14px 0'>", unsafe_allow_html=True)
         st.markdown('<div class="slbl">Status</div>', unsafe_allow_html=True)
         c1,c2=st.columns(2)
@@ -425,8 +714,13 @@ def _sidebar():
             st.caption(f"Cache: {age_h:.0f}h old  ·  refreshes every {CACHE_HOURS}h")
         if st.button("🔄 Refresh Job Database",key="sb_ref",use_container_width=True):
             ph=st.empty()
+            skills=[]
+            if st.session_state.cv_analysis:
+                a=st.session_state.cv_analysis.get("analysis",{})
+                if isinstance(a,dict): skills=a.get("skills",[])[:6]
             try:
-                n=build_job_database(ph); ph.success(f"✅ Done — {n:,} jobs saved")
+                n=build_job_database(skills=skills,status_ph=ph)
+                ph.success(f"✅ Done — {n:,} jobs saved{' (targeted to your skills)' if skills else ''}")
             except Exception as e: ph.error(f"❌ {e}")
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
         st.markdown('<div class="slbl">Your Progress</div>', unsafe_allow_html=True)
@@ -437,7 +731,8 @@ def _sidebar():
             st.markdown(f'<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12.5px;color:{col}">{"✅" if done else "⬜"} {lbl}</div>',unsafe_allow_html=True)
         if st.button("🗑 Clear Session",key="sb_clear",use_container_width=True):
             st.session_state.cv_analysis=None; st.session_state.github_analysis=None
-            st.session_state.job_matches=None; st.session_state.chat_messages=[]; st.rerun()
+            st.session_state.job_matches=None; st.session_state.skill_scrape_done=False
+            st.rerun()
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
         if any([st.session_state.cv_analysis,st.session_state.github_analysis,st.session_state.job_matches]):
             st.download_button("📥 Download Report",
@@ -459,9 +754,8 @@ GITHUB_TOKEN=ghp_...
 ```toml
 GROQ_API_KEY = "gsk_..."
 ```
-**Job database** — optional  
-Save any Kaggle jobs CSV as `data/jobs.csv`.  
-App auto-scrapes RemoteOK + Arbeitnow on first load.
+**Tip:** After analyzing your CV, the job database
+will automatically re-scrape with your skills as keywords.
 """)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -475,10 +769,12 @@ def _header():
         '<div class="hdr"><div style="display:flex;align-items:center;gap:14px">'
         '<div class="hgem">🎯</div>'
         '<div><div style="font-size:17px;font-weight:800;color:var(--t1);letter-spacing:-.3px">Career AI Assistant</div>'
-        '<div style="font-size:11px;color:var(--t3);margin-top:2px">CV · GitHub · Job Matching · Career Chat</div>'
+        '<div style="font-size:11px;color:var(--t3);margin-top:2px">CV · GitHub · Job Matching · Assessment  —  💬 Chat always available bottom-right</div>'
         '</div></div><div style="display:flex;gap:8px">'
         +('<div class="badge live">● Session Active</div>' if ready else '<div class="badge">○ No Data Yet</div>')
-        +'<div class="badge">Groq · LLaMA 3.3</div></div></div>',unsafe_allow_html=True)
+        +'<div class="badge">Groq · LLaMA 3.3</div></div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -486,7 +782,7 @@ def _header():
 # ══════════════════════════════════════════════════════════════════════════════
 def _tab_cv():
     st.markdown('<div class="sh">📄 CV Analyzer</div>',unsafe_allow_html=True)
-    st.markdown('<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Upload your PDF and I\'ll give you a plain-English breakdown — skills, experience, strengths, and what to work on.</p>',unsafe_allow_html=True)
+    st.markdown('<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Upload your PDF and I\'ll give you a plain-English breakdown. Your skills will automatically populate the Job Matcher and trigger a targeted job scrape.</p>',unsafe_allow_html=True)
     cu,cb=st.columns([3,1])
     with cu: f=st.file_uploader("Choose your CV (PDF)",type=["pdf"],key="cv_file")
     with cb:
@@ -498,10 +794,31 @@ def _tab_cv():
             tmp=f"temp_{f.name}"
             with open(tmp,"wb") as fh: fh.write(f.getbuffer())
             res=analyze_cv(tmp); os.remove(tmp)
-            if res.get("success"): st.session_state.cv_analysis=res
-            else: st.error(f"❌ {res.get('error')}"); return
+            if res.get("success"):
+                st.session_state.cv_analysis=res
+                st.session_state.skill_scrape_done=False  # trigger re-scrape with new skills
+                st.success("✅ CV analyzed! Your skills have been sent to the Job Matcher.")
+            else:
+                st.error(f"❌ {res.get('error')}"); return
+
+    # ── Trigger targeted scrape when CV is analyzed and DB hasn't been refreshed yet
+    if (st.session_state.cv_analysis and
+        not st.session_state.skill_scrape_done and
+        not _cache_fresh()):
+        a = st.session_state.cv_analysis.get("analysis",{})
+        skills = a.get("skills",[])[:6] if isinstance(a,dict) else []
+        if skills:
+            with st.spinner(f"🔍 Scraping jobs matching your skills: {', '.join(skills[:3])}…"):
+                try:
+                    n = build_job_database(skills=skills)
+                    st.session_state.skill_scrape_done = True
+                    st.toast(f"✅ Found {n:,} jobs matching your skills!", icon="💼")
+                except Exception:
+                    st.session_state.skill_scrape_done = True
+
     if not st.session_state.cv_analysis:
         st.info("Upload your CV and click **Analyze CV** to get started."); return
+
     a=st.session_state.cv_analysis.get("analysis",{})
     if isinstance(a,str): a=_parse_json(a) or {}
     c1,c2,c3=st.columns(3)
@@ -588,31 +905,32 @@ def _tab_jobs():
     st.markdown('<div class="sh">💼 Job Matcher</div>',unsafe_allow_html=True)
     cnt=len(_load_combined())
     if cnt==0:
-        st.warning("**Job database is empty.** Click **🔄 Refresh Job Database** in the sidebar to auto-scrape free jobs.")
+        st.warning("**Job database is empty.** Click **🔄 Refresh Job Database** in the sidebar, or analyze your CV first — it will trigger an automatic targeted scrape.")
     else:
-        st.markdown(f'<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Searching <strong style="color:var(--c)">{cnt:,} jobs</strong>. Fill in your profile and I\'ll rank the best fits and explain each one.</p>',unsafe_allow_html=True)
+        st.markdown(f'<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Searching <strong style="color:var(--c)">{cnt:,} jobs</strong>. Fill in your profile — skills are auto-filled from your CV if you\'ve analyzed it.</p>',unsafe_allow_html=True)
+
+    # Auto-fill skills from CV analysis
+    default_skills = ""
+    if st.session_state.cv_analysis:
+        a=st.session_state.cv_analysis.get("analysis",{})
+        if isinstance(a,dict):
+            default_skills="\n".join(a.get("skills",[]))
+    if default_skills and not st.session_state.get("_jobs_skills_shown"):
+        st.success("✅ Skills auto-filled from your CV analysis!")
+        st.session_state._jobs_skills_shown = True
+
     c1,c2=st.columns(2)
     with c1:
-        default_skills = ""
-
-        if st.session_state.cv_analysis:
-            a = st.session_state.cv_analysis.get("analysis", {})
-            if isinstance(a, dict):
-                default_skills = "\n".join(a.get("skills", []))
-
-        sr = st.text_area(
-            "Your Skills (one per line)",
-            value=default_skills,
-            placeholder="Python\nReact\nSQL",
-            height=120,
-            key="js_skills_v2"
-        )
+        sr=st.text_area("Your Skills (one per line)",
+                        value=default_skills,
+                        placeholder="Python\nReact\nSQL",height=140,key="js_skills_v3")
         exp=st.number_input("Years of Experience",0,50,2,key="js_exp")
     with c2:
         sen=st.selectbox("Seniority Level",["Junior","Mid-Level","Senior","Lead","Principal"],key="js_sen")
         roles=st.multiselect("Interested Roles",
             ["Full Stack Developer","Backend Engineer","Frontend Developer","Data Scientist",
              "ML Engineer","DevOps Engineer","Product Manager","Mobile Developer","Cloud Architect"],key="js_roles")
+
     go=st.button("🔍 Find My Best Jobs",key="btn_jobs",disabled=(cnt==0))
     if go:
         if not _key(): return
@@ -623,9 +941,11 @@ def _tab_jobs():
                             "seniority_level":sen.lower().replace("-","_"),"interested_roles":roles})
         if res.get("success"): st.session_state.job_matches=res
         else: st.error(f"❌ {res.get('error')}"); return
+
     if not st.session_state.job_matches:
         if cnt>0: st.info("Fill in your profile and click **Find My Best Jobs**."); return
         return
+
     res=st.session_state.job_matches; matches=res.get("matches",[]); total=res.get("total_in_db","?"); evald=res.get("candidates_evaluated","?")
     if not matches: st.warning("No matches found. Try broadening your skills."); return
     st.markdown(f'<div class="aib"><div class="ailbl">Results</div>Out of <strong>{total:,}</strong> jobs, the AI shortlisted <strong>{evald}</strong> candidates and picked these <strong>{len(matches)}</strong> best fits for you.</div>',unsafe_allow_html=True)
@@ -638,10 +958,14 @@ def _tab_jobs():
         xp="".join(_pill(s,"miss") for s in missing) if missing else ""
         sal_txt=f'  ·  💰 {html.escape(salary)}' if salary not in ("N/A","","nan") else ""
         loc_txt=f'  📍 {html.escape(loc)}' if loc else ""
+        url=str(job.get("url",""))
+        title_html=(f'<a href="{html.escape(url)}" target="_blank" style="color:var(--t1);text-decoration:none">'
+                    f'{html.escape(str(job.get("title","—")))}</a>'
+                    if url else html.escape(str(job.get("title","—"))))
         st.markdown(f"""
 <div class="jcard">
   <div style="display:flex;justify-content:space-between;align-items:flex-start">
-    <div><div style="font-size:15px;font-weight:700;color:var(--t1)">{html.escape(str(job.get('title','—')))}</div>
+    <div><div style="font-size:15px;font-weight:700">{title_html}</div>
     <div style="font-size:12px;color:var(--t2);margin-top:2px">🏢 {html.escape(str(job.get('company','—')))}{loc_txt}{sal_txt}</div></div>
     <div style="text-align:right;flex-shrink:0;margin-left:16px">
       <div style="font-size:22px;font-weight:800;color:{colour}">{score}%</div>
@@ -651,49 +975,8 @@ def _tab_jobs():
   {f'<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3);letter-spacing:.07em">Matched  </span>{mp}</div>' if mp else ""}
   {f'<div style="margin-bottom:8px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3);letter-spacing:.07em">Skills to learn  </span>{xp}</div>' if xp else ""}
   {f'<div style="font-size:13px;color:var(--t2);line-height:1.6;margin-top:6px">💬 {html.escape(str(why))}</div>' if why else ""}
+  {f'<div style="margin-top:10px"><a href="{html.escape(url)}" target="_blank" style="font-size:11px;color:var(--c);text-decoration:none;font-weight:600">🔗 View Job →</a></div>' if url else ""}
 </div>""",unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Tab: Career Chat
-# ══════════════════════════════════════════════════════════════════════════════
-def _tab_chat():
-    st.markdown('<div class="sh">💬 Career Chat</div>',unsafe_allow_html=True)
-    st.markdown('<p style="color:var(--t2);font-size:13px;margin-bottom:18px">Ask me anything — interview prep, which skills to learn, salary negotiation, career pivots. I\'ll use your data if you\'ve already run any analyses.</p>',unsafe_allow_html=True)
-    if not st.session_state.chat_messages:
-        starters=["How can I improve my CV?","What skills should I learn next?","How do I negotiate my salary?","Am I ready for a senior role?"]
-        cols=st.columns(len(starters))
-        for col,q in zip(cols,starters):
-            with col:
-                if st.button(q,key=f"chip_{q[:12]}",use_container_width=True):
-                    st.session_state.chat_messages.append({"role":"user","content":q}); st.rerun()
-    for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"],avatar="🧑" if msg["role"]=="user" else "🎯"): st.markdown(msg["content"])
-    user_input=st.chat_input("Ask me anything about your career…")
-    if user_input and user_input.strip():
-        q=user_input.strip()
-        st.session_state.chat_messages.append({"role":"user","content":q})
-        ctx=[]
-        if st.session_state.cv_analysis:
-            a=st.session_state.cv_analysis.get("analysis",{})
-            if isinstance(a,dict): ctx.append(f"CV: {a.get('seniority_level','?')}, {a.get('experience_years','?')} yrs, skills: {', '.join(a.get('skills',[])[:10])}")
-        if st.session_state.github_analysis:
-            p=st.session_state.github_analysis.get("profile",{})
-            ctx.append(f"GitHub: {p.get('public_repos',0)} repos, languages: {', '.join(list(p.get('languages',{}).keys())[:5])}")
-        if st.session_state.job_matches:
-            m=st.session_state.job_matches.get("matches",[])
-            if m and isinstance(m[0],dict):
-                t=m[0]; ctx.append(f"Top job: {t.get('title','')} at {t.get('company','')} ({t.get('match_score','')}%)")
-        system=("You are a warm, expert career advisor. Give honest, specific, actionable advice in a conversational tone. "
-                "Like a smart mentor, not a chatbot. Use bullet points only for lists of 3+. Never say 'As an AI'. Be direct."
-                +(f"\n\nUser context:\n"+"\n".join(ctx) if ctx else ""))
-        messages=[{"role":"system","content":system}]
-        for m in st.session_state.chat_messages[-12:]: messages.append({"role":m["role"],"content":m["content"]})
-        with st.chat_message("assistant",avatar="🎯"):
-            with st.spinner("Thinking…"):
-                reply=_llm(_groq(),messages,max_tokens=700)
-            st.markdown(reply)
-            st.session_state.chat_messages.append({"role":"assistant","content":reply})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -705,7 +988,7 @@ def _tab_assessment():
     gh_done=st.session_state.github_analysis is not None
     job_done=st.session_state.job_matches is not None
     if not any([cv_done,gh_done,job_done]):
-        st.info("Complete at least one analysis in the other tabs first."); return
+        st.info("Complete at least one analysis in the other tabs first, then come back for your full report."); return
     c1,c2,c3=st.columns(3)
     with c1: st.metric("CV","✅ Done" if cv_done else "⬜ Pending")
     with c2: st.metric("GitHub","✅ Done" if gh_done else "⬜ Pending")
@@ -761,12 +1044,30 @@ def main():
     _css(); _init()
     _auto_build()   # scrape on first load if cache stale
     _sidebar(); _header()
-    t1,t2,t3,t4,t5=st.tabs(["📄  CV Analyzer","🐙  GitHub Profile","💼  Job Matcher","💬  Career Chat","📊  Full Assessment"])
+
+    # Build copilot context from session data
+    ctx_parts=[]
+    if st.session_state.cv_analysis:
+        a=st.session_state.cv_analysis.get("analysis",{})
+        if isinstance(a,dict):
+            ctx_parts.append(f"CV: {a.get('seniority_level','?')}, {a.get('experience_years','?')} yrs exp, skills: {', '.join(a.get('skills',[])[:10])}")
+    if st.session_state.github_analysis:
+        p=st.session_state.github_analysis.get("profile",{})
+        ctx_parts.append(f"GitHub: {p.get('public_repos',0)} repos, top langs: {', '.join(list(p.get('languages',{}).keys())[:5])}")
+    if st.session_state.job_matches:
+        m=st.session_state.job_matches.get("matches",[])
+        if m and isinstance(m[0],dict):
+            t=m[0]; ctx_parts.append(f"Top job match: {t.get('title','')} at {t.get('company','')} ({t.get('match_score','')}%)")
+    context="\n".join(ctx_parts)
+
+    # Inject floating copilot panel
+    _inject_copilot(_key(), context)
+
+    t1,t2,t3,t4=st.tabs(["📄  CV Analyzer","🐙  GitHub Profile","💼  Job Matcher","📊  Full Assessment"])
     with t1: _tab_cv()
     with t2: _tab_github()
     with t3: _tab_jobs()
-    with t4: _tab_chat()
-    with t5: _tab_assessment()
+    with t4: _tab_assessment()
 
 if __name__=="__main__":
     main()
