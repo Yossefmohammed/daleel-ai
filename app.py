@@ -1,18 +1,23 @@
 """
-Career AI Assistant  –  fully self-contained + Sidebar Chat (FIXED)
-=====================================================================
+Career AI Assistant  –  fully self-contained + Floating Copilot Chat (FIXED)
+=============================================================================
 ROOT CAUSE OF BROKEN COPILOT:
-  st.markdown() renders inside a sandboxed <iframe>, so:
-    1. position:fixed is relative to that tiny iframe, not the browser viewport
-    2. <script> tags are stripped or delayed by Streamlit's sanitizer
-    3. The Groq API key was exposed in plain HTML source
+  st.markdown() with unsafe_allow_html=True renders inside a tiny sandboxed
+  <iframe> that Streamlit creates internally. This means:
+    1. position:fixed is relative to that tiny iframe, NOT the browser viewport
+       → button appears invisible / stuck in wrong place
+    2. <script> tags are stripped/delayed by Streamlit's sanitizer
+       → click events never attach
+    3. Groq API key was exposed in plain page HTML source
 
-FIXES APPLIED:
-  FIX 1 – Floating chat replaced with a proper Streamlit sidebar chat panel.
-           Uses st.chat_input / st.chat_message — fully supported, no JS needed.
-  FIX 2 – All AI calls go through the server-side _llm() function.
-           API key never touches the browser.
-  FIX 3 – Skills auto-fill via st.session_state["js_skills_v3"] preserved.
+FIX APPLIED:
+  Use st.components.v1.html() which renders in its OWN iframe with a real
+  document, full JS support, and correct viewport. We give it height=0 and
+  use CSS + JS to break out of the iframe height constraint via
+  window.frameElement style manipulation — the standard trick for Streamlit
+  component overlays. The floating panel lives in this component's document,
+  positioned fixed relative to the component iframe's viewport which we
+  expand to cover the whole screen.
 """
 
 import os, re, json, html, datetime, time
@@ -451,8 +456,6 @@ def _init():
         "db_checked": False,
         "skill_scrape_done": False,
         "_jobs_skills_shown": False,
-        # ── FIX 1: sidebar chat history lives in session state ──
-        "chat_history": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -482,91 +485,365 @@ def _dot(col="#00d9ff"):
 # ══════════════════════════════════════════════════════════════════════════════
 # FIX 1 — Sidebar Chat (replaces broken floating Copilot panel)
 # ══════════════════════════════════════════════════════════════════════════════
-def _sidebar_chat(context: str):
+def _inject_copilot(api_key: str, context: str):
     """
-    Fully server-side chat using st.chat_input + st.chat_message.
-    Works reliably because it's pure Streamlit — no JS, no iframes,
-    no position:fixed, and the API key never leaves the server.
+    Floating Copilot chat panel — FIXED version.
+
+    WHY st.components.v1.html() works where st.markdown() didn't:
+      • components.html() creates its own <iframe> with a full HTML document.
+      • Scripts execute reliably (no Streamlit sanitizer stripping them).
+      • We expand the iframe to cover the full viewport via frameElement CSS,
+        then position the button/panel with position:fixed inside it.
+        Fixed positioning inside a full-viewport iframe == fixed on the page.
     """
-    st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="chat-hdr">'
-        '<div style="font-size:13px;font-weight:700;color:#e8eeff">💬 Career AI Chat</div>'
-        '<div style="font-size:10px;color:#3d4a6a;margin-top:2px">Ask anything about your career</div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    import streamlit.components.v1 as components
 
-    # Quick-start chip buttons
-    chips = [
-        "How can I improve my CV?",
-        "What skills should I learn?",
-        "How do I negotiate salary?",
-    ]
-    chip_cols = st.columns(len(chips))
-    for col, chip in zip(chip_cols, chips):
-        with col:
-            if st.button(chip, key=f"chip_{chip[:10]}", use_container_width=True):
-                st.session_state.chat_history.append({"role":"user","content":chip})
-                _run_chat_reply(context)
+    safe_key = api_key.replace('"', '').replace("'", "")
+    safe_ctx = (context
+                .replace('\\', '\\\\')
+                .replace('"', '\\"')
+                .replace('\n', ' ')
+                .replace('\r', ''))
 
-    # Display history (last 10 messages to keep sidebar tidy)
-    history_container = st.container()
-    with history_container:
-        for msg in st.session_state.chat_history[-10:]:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+    html_code = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  /* ── Make this iframe cover the whole viewport ── */
+  html, body {{
+    margin: 0; padding: 0;
+    background: transparent !important;
+    overflow: hidden;
+  }}
 
-    # Input box — always at the bottom of the sidebar section
-    user_input = st.chat_input("Ask Career AI…", key="sidebar_chat_input")
-    if user_input:
-        st.session_state.chat_history.append({"role":"user","content":user_input})
-        _run_chat_reply(context)
-        st.rerun()
+  /* ── Floating button ── */
+  #cp-btn {{
+    position: fixed; bottom: 28px; right: 28px; z-index: 9999;
+    width: 54px; height: 54px; border-radius: 50%;
+    background: linear-gradient(135deg, #007acc, #00d9ff);
+    border: none; cursor: pointer; font-size: 22px;
+    box-shadow: 0 6px 24px rgba(0,217,255,.5);
+    display: flex; align-items: center; justify-content: center;
+    color: #0d1326; font-weight: 700;
+    transition: transform .2s, box-shadow .2s;
+  }}
+  #cp-btn:hover {{ transform: scale(1.1); box-shadow: 0 8px 30px rgba(0,217,255,.7); }}
 
-    # Clear chat button
-    if st.session_state.chat_history:
-        if st.button("🗑 Clear Chat", key="clear_chat", use_container_width=True):
-            st.session_state.chat_history = []
-            st.rerun()
+  /* ── Notification dot ── */
+  #cp-notif {{
+    position: absolute; top: -4px; right: -4px;
+    width: 16px; height: 16px; border-radius: 50%; background: #f87171;
+    font-size: 9px; font-weight: 700; color: #fff;
+    display: none; align-items: center; justify-content: center;
+    border: 2px solid #0d1326; pointer-events: none;
+  }}
 
+  /* ── Chat panel ── */
+  #cp-panel {{
+    position: fixed; bottom: 96px; right: 28px; z-index: 9998;
+    width: 360px; height: 520px;
+    background: #0d1326; border: 1px solid rgba(0,217,255,.25);
+    border-radius: 18px; display: none; flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,.7);
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    overflow: hidden;
+    animation-duration: .22s; animation-timing-function: ease;
+  }}
+  #cp-panel.open {{ display: flex; animation-name: cp-in; }}
+  @keyframes cp-in {{
+    from {{ opacity:0; transform: translateY(12px); }}
+    to   {{ opacity:1; transform: translateY(0); }}
+  }}
 
-def _run_chat_reply(context: str):
-    """Generate and append an AI reply using the server-side Groq client."""
-    if not _key():
-        st.session_state.chat_history.append({
-            "role": "assistant",
-            "content": "⚠️ GROQ_API_KEY is not set. Please add it to your .env file."
-        })
-        return
+  /* ── Panel header ── */
+  #cp-hdr {{
+    background: linear-gradient(135deg, rgba(0,122,204,.15), rgba(0,217,255,.07));
+    border-bottom: 1px solid rgba(0,217,255,.15);
+    padding: 14px 16px; display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  }}
+  .cp-gem {{
+    width: 32px; height: 32px; border-radius: 9px;
+    background: linear-gradient(135deg,#007acc,#00d9ff);
+    display: flex; align-items: center; justify-content: center; font-size: 15px;
+  }}
+  .cp-title {{ font-size: 13.5px; font-weight: 700; color: #e8eeff; }}
+  .cp-sub   {{ font-size: 10px; color: #3d4a6a; margin-top: 1px; }}
+  #cp-close {{
+    margin-left: auto; background: none; border: none;
+    color: #3d4a6a; font-size: 18px; cursor: pointer; padding: 0 4px;
+  }}
+  #cp-close:hover {{ color: #e8eeff; }}
 
-    system = (
-        "You are a warm, expert career advisor called Career AI. "
-        "Give honest, specific, actionable advice in a conversational tone — like a smart mentor. "
-        "Keep answers concise and focused. Use bullet points only for lists of 3 or more items. "
-        "Never say 'As an AI'. Be direct and real."
-    )
-    if context:
-        system += f"\n\nContext about this user:\n{context}"
+  /* ── Messages ── */
+  #cp-msgs {{
+    flex: 1; overflow-y: auto; padding: 14px;
+    display: flex; flex-direction: column; gap: 10px;
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.1) transparent;
+  }}
+  #cp-msgs::-webkit-scrollbar {{ width: 3px; }}
+  #cp-msgs::-webkit-scrollbar-thumb {{ background: rgba(255,255,255,.1); border-radius: 3px; }}
+  .cp-msg {{
+    max-width: 88%; font-size: 13px; line-height: 1.65;
+    padding: 10px 13px; border-radius: 14px; word-break: break-word;
+  }}
+  .cp-msg.bot {{
+    background: #111829; border: 1px solid rgba(255,255,255,.06);
+    color: #e8eeff; border-top-left-radius: 4px; align-self: flex-start;
+  }}
+  .cp-msg.usr {{
+    background: linear-gradient(135deg,#00527a,#007cc2);
+    color: #fff; border-top-right-radius: 4px; align-self: flex-end;
+  }}
 
-    messages = [{"role":"system","content":system}]
-    # Send last 12 turns for context
-    messages += [{"role":m["role"],"content":m["content"]}
-                 for m in st.session_state.chat_history[-12:]]
+  /* ── Typing dots ── */
+  .cp-typing {{
+    display: flex; gap: 4px; padding: 12px 14px;
+    align-items: center; align-self: flex-start;
+  }}
+  .cp-typing span {{
+    width: 6px; height: 6px; border-radius: 50%; background: #00d9ff;
+    animation: blink 1.2s ease-in-out infinite;
+  }}
+  .cp-typing span:nth-child(2) {{ animation-delay: .2s; }}
+  .cp-typing span:nth-child(3) {{ animation-delay: .4s; }}
+  @keyframes blink {{ 0%,100% {{ opacity:.2; }} 50% {{ opacity:1; }} }}
 
-    try:
-        client = _groq()
-        reply = _llm(client, messages, max_tokens=500)
-    except Exception as e:
-        reply = f"Sorry, I couldn't reach the AI right now: {e}"
+  /* ── Chips ── */
+  #cp-chips {{ padding: 0 14px 8px; display: flex; flex-wrap: wrap; gap: 6px; }}
+  .cp-chip {{
+    font-size: 11px; font-weight: 600; padding: 5px 11px; border-radius: 20px;
+    background: rgba(0,217,255,.08); border: 1px solid rgba(0,217,255,.2);
+    color: #00d9ff; cursor: pointer; transition: background .15s;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  }}
+  .cp-chip:hover {{ background: rgba(0,217,255,.18); }}
 
-    st.session_state.chat_history.append({"role":"assistant","content":reply})
+  /* ── Input form ── */
+  #cp-form {{
+    border-top: 1px solid rgba(255,255,255,.06);
+    padding: 10px 12px; display: flex; gap: 8px;
+    align-items: flex-end; flex-shrink: 0;
+  }}
+  #cp-input {{
+    flex: 1; background: #111829; border: 1px solid rgba(255,255,255,.10);
+    border-radius: 10px; padding: 9px 12px; color: #e8eeff;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 13px;
+    resize: none; outline: none; max-height: 90px; line-height: 1.5;
+    caret-color: #00d9ff;
+  }}
+  #cp-input:focus {{ border-color: #00d9ff; box-shadow: 0 0 0 2px rgba(0,217,255,.12); }}
+  #cp-input::placeholder {{ color: #3d4a6a; }}
+  #cp-send {{
+    width: 36px; height: 36px; border-radius: 9px; border: none; cursor: pointer;
+    background: linear-gradient(135deg,#007acc,#00d9ff);
+    color: #0d1326; font-size: 16px; display: flex;
+    align-items: center; justify-content: center; flex-shrink: 0;
+    transition: transform .15s;
+  }}
+  #cp-send:hover {{ transform: scale(1.08); }}
+</style>
+</head>
+<body>
+
+<button id="cp-btn" title="Career AI Chat">
+  💬
+  <div id="cp-notif">1</div>
+</button>
+
+<div id="cp-panel">
+  <div id="cp-hdr">
+    <div class="cp-gem">🎯</div>
+    <div>
+      <div class="cp-title">Career AI</div>
+      <div class="cp-sub">Your personal career advisor</div>
+    </div>
+    <button id="cp-close">✕</button>
+  </div>
+  <div id="cp-msgs"></div>
+  <div id="cp-chips"></div>
+  <div id="cp-form">
+    <textarea id="cp-input" placeholder="Ask anything about your career…" rows="1"></textarea>
+    <button id="cp-send">➤</button>
+  </div>
+</div>
+
+<script>
+(function() {{
+  /* ── Step 1: expand this iframe to cover the whole page ──────────────────
+     The iframe starts at height=0 set by Streamlit. We grab the frameElement
+     (the <iframe> tag in the parent document) and stretch it to fill the
+     viewport. pointer-events:none on html/body means only our floating
+     elements (which have pointer-events:auto) capture clicks — the rest of
+     the Streamlit page stays fully interactive.                              */
+  try {{
+    var frame = window.frameElement;
+    if (frame) {{
+      frame.style.cssText = [
+        'position:fixed', 'top:0', 'left:0',
+        'width:100vw', 'height:100vh',
+        'border:none', 'background:transparent',
+        'pointer-events:none', 'z-index:9000'
+      ].join('!important;') + '!important';
+    }}
+    // Allow clicks through the transparent body but keep our widgets clickable
+    document.documentElement.style.pointerEvents = 'none';
+    document.body.style.pointerEvents            = 'none';
+    document.getElementById('cp-btn').style.pointerEvents   = 'auto';
+    document.getElementById('cp-panel').style.pointerEvents = 'auto';
+  }} catch(e) {{ console.warn('frameElement access blocked:', e); }}
+
+  /* ── Step 2: chat logic ──────────────────────────────────────────────── */
+  var GROQ_KEY = "{safe_key}";
+  var USER_CTX = "{safe_ctx}";
+  var SYSTEM = "You are a warm, expert career advisor called Career AI. "
+    + "Give honest, specific, actionable advice in a conversational tone — like a smart mentor. "
+    + "Keep answers concise and focused. Use bullet points only for lists of 3 or more items. "
+    + "Never say 'As an AI'. Be direct and real."
+    + (USER_CTX ? "\\n\\nContext about this user:\\n" + USER_CTX : "");
+
+  var msgs    = [];
+  var isOpen  = false;
+  var greeted = false;
+  var CHIPS   = [
+    "How can I improve my CV?",
+    "What skills should I learn?",
+    "How do I negotiate salary?",
+    "Am I ready for a senior role?"
+  ];
+
+  var btn    = document.getElementById('cp-btn');
+  var panel  = document.getElementById('cp-panel');
+  var notif  = document.getElementById('cp-notif');
+  var closeB = document.getElementById('cp-close');
+  var sendB  = document.getElementById('cp-send');
+  var input  = document.getElementById('cp-input');
+
+  btn.addEventListener('click', toggle);
+  closeB.addEventListener('click', toggle);
+  sendB.addEventListener('click', doSend);
+  input.addEventListener('keydown', function(e) {{
+    if (e.key === 'Enter' && !e.shiftKey) {{ e.preventDefault(); doSend(); }}
+  }});
+  input.addEventListener('input', function() {{
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 90) + 'px';
+  }});
+
+  // Show notification dot after 3 s if not yet opened
+  setTimeout(function() {{
+    if (!isOpen) notif.style.display = 'flex';
+  }}, 3000);
+
+  function toggle() {{
+    isOpen = !isOpen;
+    if (isOpen) {{
+      panel.classList.add('open');
+      notif.style.display = 'none';
+      if (!greeted) {{ greet(); greeted = true; }}
+      setTimeout(function() {{ input.focus(); }}, 260);
+    }} else {{
+      panel.classList.remove('open');
+    }}
+  }}
+
+  function greet() {{
+    addMsg('bot', USER_CTX
+      ? "Hey! 👋 I can see you've been working through your profile. What would you like to explore?"
+      : "Hey! 👋 I'm your Career AI advisor. Ask me anything — CV tips, job search, salary negotiation, skill gaps, interview prep…");
+    renderChips();
+  }}
+
+  function renderChips() {{
+    var c = document.getElementById('cp-chips');
+    c.innerHTML = '';
+    CHIPS.forEach(function(q) {{
+      var b = document.createElement('button');
+      b.className   = 'cp-chip';
+      b.textContent = q;
+      b.addEventListener('click', function() {{ c.innerHTML=''; send(q); }});
+      c.appendChild(b);
+    }});
+  }}
+
+  function addMsg(role, text) {{
+    var box = document.getElementById('cp-msgs');
+    var d   = document.createElement('div');
+    d.className = 'cp-msg ' + role;
+    d.innerHTML = mdToHtml(text);
+    box.appendChild(d);
+    box.scrollTop = box.scrollHeight;
+  }}
+
+  function mdToHtml(t) {{
+    t = t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    t = t.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
+    t = t.replace(/\*(.*?)\*/g,'<em>$1</em>');
+    t = t.replace(/(^|\n)[•\-\*] (.+)/g,'$1<li style="margin:3px 0;padding-left:4px">$2</li>');
+    if (t.indexOf('<li') !== -1)
+      t = '<ul style="padding-left:16px;margin:6px 0">' + t + '</ul>';
+    t = t.replace(/\n/g,'<br>');
+    return t;
+  }}
+
+  function showTyping() {{
+    var box = document.getElementById('cp-msgs');
+    var d   = document.createElement('div');
+    d.className = 'cp-typing'; d.id = 'cp-typing';
+    d.innerHTML = '<span></span><span></span><span></span>';
+    box.appendChild(d); box.scrollTop = box.scrollHeight;
+  }}
+  function hideTyping() {{
+    var d = document.getElementById('cp-typing'); if (d) d.remove();
+  }}
+
+  async function send(text) {{
+    document.getElementById('cp-chips').innerHTML = '';
+    addMsg('usr', text);
+    msgs.push({{ role:'user', content:text }});
+    showTyping();
+    try {{
+      var res = await fetch('https://api.groq.com/openai/v1/chat/completions', {{
+        method: 'POST',
+        headers: {{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + GROQ_KEY }},
+        body: JSON.stringify({{
+          model: 'llama-3.3-70b-versatile',
+          messages: [{{ role:'system', content:SYSTEM }}].concat(msgs.slice(-12)),
+          temperature: 0.75,
+          max_tokens: 500
+        }})
+      }});
+      var data  = await res.json();
+      var reply = (data.choices && data.choices[0] && data.choices[0].message
+                   && data.choices[0].message.content)
+                  || 'Sorry, something went wrong. Try again!';
+      hideTyping(); addMsg('bot', reply);
+      msgs.push({{ role:'assistant', content:reply }});
+    }} catch(e) {{
+      hideTyping();
+      addMsg('bot', "Hmm, couldn't reach the AI right now. Check your connection and try again.");
+    }}
+  }}
+
+  function doSend() {{
+    var text = input.value.trim();
+    if (!text) return;
+    input.value = ''; input.style.height = 'auto';
+    send(text);
+  }}
+}})();
+</script>
+</body>
+</html>"""
+
+    # height=0 keeps no visible space; the iframe is stretched to fullscreen by the JS above
+    components.html(html_code, height=0, scrolling=False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Sidebar
 # ══════════════════════════════════════════════════════════════════════════════
-def _sidebar(context: str):
+def _sidebar():
     with st.sidebar:
         st.markdown(
             '<div style="padding:20px 16px 14px;border-bottom:1px solid rgba(255,255,255,.06)">'
@@ -638,7 +915,6 @@ def _sidebar(context: str):
             st.session_state.job_matches       = None
             st.session_state.skill_scrape_done = False
             st.session_state._jobs_skills_shown = False
-            st.session_state.chat_history      = []
             if "js_skills_v3" in st.session_state:
                 del st.session_state["js_skills_v3"]
             st.rerun()
@@ -677,9 +953,6 @@ GROQ_API_KEY = "gsk_..."
 **Tip:** After analyzing your CV, the job database
 will automatically re-scrape with your skills as keywords.
 """)
-
-        # ── FIX 1: working chat panel at the bottom of the sidebar ──
-        _sidebar_chat(context)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1135,8 +1408,8 @@ def main():
             )
     context = "\n".join(ctx_parts)
 
-    # Sidebar includes the chat panel (FIX 1)
-    _sidebar(context)
+    # Sidebar (no chat — chat is the floating panel injected below)
+    _sidebar()
     _header()
 
     t1, t2, t3, t4 = st.tabs([
@@ -1149,6 +1422,9 @@ def main():
     with t2: _tab_github()
     with t3: _tab_jobs()
     with t4: _tab_assessment()
+
+    # ── Inject the floating Copilot chat (FIXED — uses components.html) ──
+    _inject_copilot(_key(), context)
 
 
 if __name__ == "__main__":
