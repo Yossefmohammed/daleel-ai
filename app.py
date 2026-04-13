@@ -17,8 +17,12 @@ import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
 
-st.set_page_config(page_title="Career AI", page_icon="🎯",
-                   layout="wide", initial_sidebar_bar="expanded")
+st.set_page_config(
+    page_title="Career AI",
+    page_icon="🎯",
+    layout="wide",
+    initial_sidebar_state="expanded"  # ✅ صح
+)
 
 # ── Try importing data_scraper ────────────────────────────────────────────────
 try:
