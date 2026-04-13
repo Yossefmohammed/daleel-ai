@@ -1,13 +1,17 @@
 """
-Career AI Assistant  –  v5
+Career AI Assistant  –  v6
 ============================
-Changes vs v4:
-  • Job Matcher: location / region selector (Egypt, Remote, Worldwide, custom)
-  • Passes location to scrape_by_skills so Wuzzuf Egypt is queried
-  • match_jobs: source-diverse candidate selection (no single-source domination)
-  • Results show source badge + source breakdown summary
-  • Sidebar shows per-source job counts from live DB
-  • data_scraper v3 imported (7 sources incl. Wuzzuf + Himalayas)
+Changes vs v5:
+  • 3-stage matching pipeline (semantic → engine → LLM):
+      Stage 0  semantic_matcher  – cosine similarity on all-MiniLM-L6-v2
+                                   embeddings → top-100 semantically relevant
+      Stage 1  matching_engine   – deterministic skill/exp/location scoring
+                                   → diverse top-30
+      Stage 2  Groq LLM          – explanation + final rank → top-8
+  • "CV" now matches "computer vision", "ML" matches "machine learning", etc.
+  • Semantic score shown on each job card
+  • Status indicator: which pipeline stages are active
+  • Graceful degradation: works even if sentence-transformers not installed
 """
 
 import os, re, json, html, datetime, time
@@ -17,12 +21,8 @@ import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
 
-st.set_page_config(
-    page_title="Career AI",
-    page_icon="🎯",
-    layout="wide",
-    initial_sidebar_state="expanded"  # ✅ صح
-)
+st.set_page_config(page_title="Career AI", page_icon="🎯",
+                   layout="wide", initial_sidebar_bar="expanded")
 
 # ── Try importing data_scraper ────────────────────────────────────────────────
 try:
@@ -37,6 +37,20 @@ try:
     HAS_CV_ANALYZER = True
 except ImportError:
     HAS_CV_ANALYZER = False
+
+# ── Try importing matching engine ─────────────────────────────────────────────
+try:
+    from matching_engine import score_and_rank
+    HAS_ENGINE = True
+except ImportError:
+    HAS_ENGINE = False
+
+# ── Try importing semantic matcher ────────────────────────────────────────────
+try:
+    from semantic_matcher import semantic_rank
+    HAS_SEMANTIC = True
+except ImportError:
+    HAS_SEMANTIC = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CSS  (identical to v4 — no visual changes)
@@ -320,49 +334,120 @@ def _diverse_candidates(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Job matching  (app-level, uses Groq directly)
+# Job matching  —  3-stage pipeline
 # ══════════════════════════════════════════════════════════════════════════════
 def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> dict:
-    jobs = _load_combined()
-    if not jobs:
+    """
+    3-stage pipeline:
+      Stage 0  semantic_rank()   – all-MiniLM-L6-v2 cosine similarity → top-100
+      Stage 1  score_and_rank()  – deterministic engine → diverse top-30
+      Stage 2  Groq LLM          – why_good_fit + final rank → top-8
+
+    Degrades gracefully:
+      if sentence-transformers absent → skip Stage 0
+      if matching_engine absent       → skip Stage 1
+      Groq LLM is always the final step
+    """
+    all_jobs = _load_combined()
+    if not all_jobs:
         return {"success": False,
                 "error": "Job database is empty. Click 🔄 Refresh Job Database in the sidebar."}
 
     skills = [s.lower() for s in user_profile.get("skills", [])]
     roles  = [r.lower() for r in user_profile.get("interested_roles", [])]
+    pipeline_stages: list[str] = []
 
-    # Source-diverse candidate list
-    candidates = _diverse_candidates(jobs, skills, roles, location_pref=location_pref, n=30)
+    # ── Stage 0: Semantic filtering  ──────────────────────────────────────
+    # Embeds the user profile and every job; keeps the 100 most semantically
+    # similar jobs so Stage 1 and 2 never see irrelevant candidates.
+    # "CV" matches "computer vision", "ML" matches "machine learning", etc.
+    if HAS_SEMANTIC:
+        try:
+            pool = semantic_rank(
+                all_jobs, user_profile,
+                location_pref=location_pref,
+                top_n=100,
+            )
+            pipeline_stages.append("🧠 Semantic")
+        except Exception as e:
+            logger.warning(f"Semantic stage failed: {e}")
+            pool = all_jobs
+    else:
+        pool = all_jobs
 
-    sources_present = sorted({j.get("source","?") for j in candidates})
+    # ── Stage 1: Deterministic engine  ────────────────────────────────────
+    # Scores each candidate on skill synonyms, experience, role, seniority,
+    # and location.  Enforces source diversity (round-robin).
+    if HAS_ENGINE:
+        try:
+            candidates = score_and_rank(
+                pool, user_profile,
+                location_pref=location_pref,
+                top_n=30, source_cap=6,
+            )
+            pipeline_stages.append("⚙️ Engine")
+        except Exception as e:
+            logger.warning(f"Engine stage failed: {e}")
+            candidates = _diverse_candidates(pool, skills, roles,
+                                             location_pref=location_pref, n=30)
+    else:
+        candidates = _diverse_candidates(pool, skills, roles,
+                                         location_pref=location_pref, n=30)
 
-    compact = [{
-        "title":       str(j.get("title",""))[:60],
-        "company":     str(j.get("company",""))[:40],
-        "location":    str(j.get("location",""))[:40],
-        "description": str(j.get("description",""))[:200],
-        "salary":      str(j.get("salary",""))[:30],
-        "url":         str(j.get("url","")),
-        "source":      str(j.get("source","")),
-    } for j in candidates]
+    pipeline_stages.append("🤖 LLM")
+    sources_present = sorted({j.get("source", "?") for j in candidates})
+
+    # ── Build compact payload for the LLM ─────────────────────────────────
+    compact = []
+    for j in candidates:
+        entry = {
+            "title":       str(j.get("title",       ""))[:60],
+            "company":     str(j.get("company",     ""))[:40],
+            "location":    str(j.get("location",    ""))[:40],
+            "description": str(j.get("description", ""))[:200],
+            "salary":      str(j.get("salary",      ""))[:30],
+            "url":         str(j.get("url",         "")),
+            "source":      str(j.get("source",      "")),
+        }
+        # Pass pre-computed scores as hints to the LLM
+        if "_engine_score" in j:
+            entry["pre_score"]      = j["_engine_score"]
+            entry["matched_skills"] = j.get("_matched_skills", [])
+        if "_semantic_score" in j:
+            entry["semantic_score"] = round(j["_semantic_score"] * 100)
+        compact.append(entry)
+
+    # ── Stage 2: Groq LLM  ────────────────────────────────────────────────
+    pipeline_note = (
+        "Candidates were pre-filtered by a semantic embedding model (all-MiniLM-L6-v2) "
+        "and a deterministic scoring engine before reaching you.\n"
+        "'semantic_score' (0-100) = cosine similarity of job embedding to user profile.\n"
+        "'pre_score' (0-100) = deterministic skill/exp/location score.\n"
+        "Use both as strong signals.\n\n"
+        if pipeline_stages else ""
+    )
 
     client = _groq()
     prompt = (
         f"You are a career advisor. Return ONLY a valid JSON array of the top {limit} best-matching jobs.\n"
-        "No markdown. Each object must have:\n"
+        "No markdown. Each object must have exactly these keys:\n"
         '{"title":"","company":"","location":"","salary":"","url":"","source":"",'
-        '"match_score":<0-100>,"matched_skills":[],"missing_skills":[],'
-        '"why_good_fit":"one sentence"}\n\n'
-        "IMPORTANT:\n"
-        "- Recommend jobs from DIFFERENT sources when equal matches exist.\n"
+        '"match_score":<0-100>,"matched_skills":["skill1"],"missing_skills":["skill1"],'
+        '"why_good_fit":"one or two sentences"}\n\n'
+        f"{pipeline_note}"
+        "RULES:\n"
+        "- Recommend jobs from DIFFERENT sources when scores are close.\n"
         f"- Preferred location: {location_pref or 'open to remote and on-site'}. "
-        "Prioritise matching location but also include remote options.\n"
-        f"- Available sources: {', '.join(sources_present)}\n\n"
-        f"User: skills={user_profile.get('skills',[])},"
-        f"exp={user_profile.get('experience_years',0)} yrs,"
-        f"seniority={user_profile.get('seniority_level','')},"
-        f"roles={user_profile.get('interested_roles',[])}\n\n"
-        f"Jobs:\n{json.dumps(compact, indent=2)[:4500]}\n\nReturn ONLY the JSON array."
+        "Prioritise matching location but also include strong remote options.\n"
+        f"- Sources available: {', '.join(sources_present)}\n\n"
+        f"User profile:\n"
+        f"  Skills: {user_profile.get('skills', [])}\n"
+        f"  Experience: {user_profile.get('experience_years', 0)} years\n"
+        f"  Seniority: {user_profile.get('seniority_level', '')}\n"
+        f"  Interested roles: {user_profile.get('interested_roles', [])}\n\n"
+        f"Pre-screened candidates ({len(compact)} jobs):\n"
+        f"{json.dumps(compact, indent=2)[:4500]}\n\n"
+        "Return ONLY the JSON array."
     )
 
     raw     = _llm(client, [{"role": "user", "content": prompt}], max_tokens=1500)
@@ -379,9 +464,10 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
     return {
         "success":               True,
         "matches":               matches,
-        "total_in_db":           len(jobs),
+        "total_in_db":           len(all_jobs),
         "candidates_evaluated":  len(compact),
         "sources_in_candidates": sources_present,
+        "pipeline_stages":       pipeline_stages,
     }
 
 
@@ -646,19 +732,37 @@ def _sidebar():
             '<div><div style="font-size:14px;font-weight:800;color:#e8eeff">Career AI</div>'
             '<div style="font-size:10px;color:#00d9ff;background:rgba(0,217,255,.08);'
             'padding:2px 8px;border-radius:20px;border:1px solid rgba(0,217,255,.2);'
-            'display:inline-block;font-weight:600;margin-top:2px">v5 · 7 Sources</div>'
+            'display:inline-block;font-weight:600;margin-top:2px">v6 · 3-Stage Pipeline</div>'
             '</div></div></div>',
             unsafe_allow_html=True,
         )
         st.markdown("<div style='padding:12px 14px 0'>", unsafe_allow_html=True)
         st.markdown('<div class="slbl">Status</div>', unsafe_allow_html=True)
         c1, c2 = st.columns(2)
-        with c1: st.metric("Groq AI",  "🟢 Ready" if _key()        else "🔴 Missing")
-        with c2: st.metric("Scraper",  "🟢 Ready" if HAS_SCRAPER   else "⚪ Basic")
+        with c1: st.metric("Groq AI",  "🟢 Ready"  if _key()        else "🔴 Missing")
+        with c2: st.metric("Scraper",  "🟢 Ready"  if HAS_SCRAPER   else "⚪ Basic")
         cnt = len(_load_combined())
         c3, c4 = st.columns(2)
-        with c3: st.metric("Jobs DB",  f"🟢 {cnt:,}" if cnt        else "🔴 Empty")
-        with c4: st.metric("GitHub",   "🟢" if _gh_token()         else "⚪ Optional")
+        with c3: st.metric("Jobs DB",  f"🟢 {cnt:,}" if cnt          else "🔴 Empty")
+        with c4: st.metric("GitHub",   "🟢"          if _gh_token()  else "⚪ Optional")
+
+        # ── Pipeline status ───────────────────────────────────────────────
+        st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="slbl">Matching Pipeline</div>', unsafe_allow_html=True)
+        for stage_lbl, active, tip in [
+            ("🧠 Semantic (embeddings)", HAS_SEMANTIC, "pip install sentence-transformers"),
+            ("⚙️ Keyword Engine",        HAS_ENGINE,   "matching_engine.py required"),
+            ("🤖 Groq LLM",             bool(_key()), "GROQ_API_KEY required"),
+        ]:
+            col  = "#34d399" if active else "#f87171"
+            stat = "Active" if active else f"Install: {tip}"
+            st.markdown(
+                f'<div style="font-size:12px;color:{col};padding:2px 0">'
+                f'{"✅" if active else "❌"} {stage_lbl}</div>'
+                + (f'<div style="font-size:10px;color:var(--t3);padding-left:18px;margin-bottom:2px">{stat}</div>'
+                   if not active else ""),
+                unsafe_allow_html=True,
+            )
         if not _key(): st.error("GROQ_API_KEY missing.\nAdd to .env or secrets.toml.")
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
@@ -1010,12 +1114,16 @@ def _tab_jobs():
     skills = [s.strip() for s in (sr or "").split("\n") if s.strip()]
 
     if cnt > 0:
+        # Show which pipeline stages are active
+        stages = []
+        if HAS_SEMANTIC: stages.append("🧠 Semantic")
+        if HAS_ENGINE:   stages.append("⚙️ Engine")
+        stages.append("🤖 LLM")
+        pipeline_str = " → ".join(stages)
         st.markdown(
             f'<p style="color:var(--t2);font-size:12.5px;margin:8px 0">'
-            f'Current DB: <strong style="color:var(--c)">{cnt:,} jobs</strong> across '
-            f'<strong style="color:var(--c)">7 sources</strong>. '
-            f'Clicking below will scrape fresh targeted jobs (incl. Wuzzuf 🇪🇬 if Egypt selected), '
-            f'then run AI matching.</p>',
+            f'DB: <strong style="color:var(--c)">{cnt:,} jobs</strong> · 7 sources · '
+            f'Pipeline: <strong style="color:var(--c)">{pipeline_str}</strong></p>',
             unsafe_allow_html=True,
         )
     else:
@@ -1086,23 +1194,32 @@ def _tab_jobs():
     if not st.session_state.job_matches:
         st.info("Fill in your skills and click **Find My Best Jobs**."); return
 
-    res     = st.session_state.job_matches
-    matches = res.get("matches", [])
-    total   = res.get("total_in_db", "?")
-    evald   = res.get("candidates_evaluated", "?")
-    sources = res.get("sources_in_candidates", [])
+    res      = st.session_state.job_matches
+    matches  = res.get("matches", [])
+    total    = res.get("total_in_db", "?")
+    evald    = res.get("candidates_evaluated", "?")
+    sources  = res.get("sources_in_candidates", [])
+    p_stages = res.get("pipeline_stages", [])
 
     if not matches:
         st.warning("No matches found. Try broadening your skills."); return
 
-    # ── Results header with source diversity summary ─────────────────────
-    src_pills = "".join(_src_badge(s) for s in sources) if sources else ""
+    # ── Results header with pipeline + source summary ─────────────────────
+    src_pills     = "".join(_src_badge(s) for s in sources) if sources else ""
+    pipeline_html = (
+        '<div style="margin-top:6px;font-size:11px;color:var(--t3)">'
+        'Pipeline: <strong style="color:var(--g)">'
+        + " → ".join(p_stages) +
+        '</strong></div>'
+    ) if p_stages else ""
+
     st.markdown(
         f'<div class="aib"><div class="ailbl">🎯 Results</div>'
-        f'Searched <strong>{total:,}</strong> jobs, shortlisted <strong>{evald}</strong> '
-        f'candidates from {len(sources)} sources, AI picked '
-        f'<strong>{len(matches)}</strong> best fits.'
-        f'<div style="margin-top:8px">Sources in candidates: {src_pills}</div>'
+        f'Searched <strong>{total:,}</strong> jobs · shortlisted '
+        f'<strong>{evald}</strong> candidates from <strong>{len(sources)}</strong> sources · '
+        f'AI picked <strong>{len(matches)}</strong> best fits.'
+        f'{pipeline_html}'
+        f'<div style="margin-top:8px">Sources: {src_pills}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -1110,13 +1227,14 @@ def _tab_jobs():
     # ── Job cards ─────────────────────────────────────────────────────────
     for job in matches:
         if not isinstance(job, dict): continue
-        score   = int(job.get("match_score", 0)); colour = _sc(score)
-        matched = job.get("matched_skills", []);  missing = job.get("missing_skills", [])
-        why     = job.get("why_good_fit", "")
-        salary  = str(job.get("salary", ""))
-        loc     = str(job.get("location", ""))
-        url     = str(job.get("url", ""))
-        source  = str(job.get("source", ""))
+        score    = int(job.get("match_score", 0)); colour = _sc(score)
+        sem_s    = job.get("semantic_score")   # int 0-100 or None
+        matched  = job.get("matched_skills", []);  missing = job.get("missing_skills", [])
+        why      = job.get("why_good_fit", "")
+        salary   = str(job.get("salary", ""))
+        loc      = str(job.get("location", ""))
+        url      = str(job.get("url", ""))
+        source   = str(job.get("source", ""))
 
         mp  = "".join(_pill(s, "skill") for s in matched) if matched else ""
         xp  = "".join(_pill(s, "miss")  for s in missing) if missing else ""
@@ -1129,21 +1247,31 @@ def _tab_jobs():
             f'{html.escape(str(job.get("title","—")))}</a>'
             if url else html.escape(str(job.get("title","—")))
         )
-
         src_b = _src_badge(source) if source else ""
+
+        # Semantic score chip (shown only when semantic stage was active)
+        sem_html = ""
+        if sem_s is not None:
+            sem_col = _sc(sem_s)
+            sem_html = (
+                f'<span style="font-size:9px;font-weight:700;padding:2px 7px;'
+                f'border-radius:8px;border:1px solid {sem_col}40;'
+                f'color:{sem_col};background:{sem_col}14;margin-left:6px" '
+                f'title="Semantic similarity score">🧠 {sem_s}%</span>'
+            )
 
         st.markdown(f"""
 <div class="jcard">
   <div style="display:flex;justify-content:space-between;align-items:flex-start">
     <div style="flex:1">
-      <div style="font-size:15px;font-weight:700">{title_html}{src_b}</div>
+      <div style="font-size:15px;font-weight:700">{title_html}{src_b}{sem_html}</div>
       <div style="font-size:12px;color:var(--t2);margin-top:2px">
         🏢 {html.escape(str(job.get('company','—')))}{loc_txt}{sal_txt}
       </div>
     </div>
     <div style="text-align:right;flex-shrink:0;margin-left:16px">
       <div style="font-size:22px;font-weight:800;color:{colour}">{score}%</div>
-      <div style="font-size:10px;color:var(--t3)">match</div>
+      <div style="font-size:10px;color:var(--t3)">LLM match</div>
     </div>
   </div>
   <div style="background:var(--n5);border-radius:4px;height:6px;width:100%;margin:8px 0">
