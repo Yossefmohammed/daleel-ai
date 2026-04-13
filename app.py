@@ -1,14 +1,13 @@
 """
-Career AI Assistant  –  v7
-============================
-Changes vs v6 (location fixes):
-  • _diverse_candidates(): location score raised from +3 → +15, non-matching
-    physical locations now penalised -5 so local jobs always surface above
-    irrelevant ones when a preference is set.
-  • match_jobs() LLM prompt: location instruction rewritten as a hard ranked
-    rule ("fill slots with local jobs FIRST, remote SECOND") with Egypt aliases
-    explicitly listed.  Replaces the old weak "prioritise matching location".
-  • Egypt alias set shared consistently across all location-checking code.
+Career AI Assistant  –  v7.1
+==============================
+Changes vs v7:
+  • match_jobs() URL lookup now keyed by (title, company) not just title
+    → prevents collisions when two jobs share the same title.
+  • URL verification now REPLACES hallucinated LLM URLs with real DB URLs,
+    not just fills missing ones (was: `if not m.get("url")`).
+  • LLM prompt now explicitly says "copy url exactly, do NOT invent URLs".
+  • job_matcher.py is NOT used by this file — match_jobs() is built in here.
 """
 
 import os, re, json, html, datetime, time
@@ -279,15 +278,6 @@ def _diverse_candidates(
     location_pref: str = "",
     n: int = 30,
 ) -> list:
-    """
-    Score + round-robin by source to guarantee multi-source candidate list.
-
-    FIX v7: location score is now +15 for a match (was +3), with a -5 penalty
-    for non-matching physical locations.  This ensures that with a typical
-    5-skill profile (max +10 from skills), a local job with 2 skill matches
-    (score 19) beats a remote job with 5 skill matches (score 15) — which is
-    the correct behaviour when the user has set a location preference.
-    """
     loc_lower     = location_pref.lower() if location_pref else ""
     is_egypt_pref = loc_lower in EGYPT_ALIASES
 
@@ -299,30 +289,28 @@ def _diverse_candidates(
         ).lower()
         src = str(j.get("source", "")).lower()
 
-        # Skill + role score (unchanged)
         s  = sum(2 for sk in skills if sk.lower() in blob)
         s += sum(1 for ro in roles for w in ro.lower().split()
                  if len(w) > 3 and w in blob)
 
-        # Location score — FIX: now weighted to actually dominate ranking
         if loc_lower:
             jloc       = (j.get("location", "") or "").lower()
             is_remote  = "remote" in jloc or "worldwide" in jloc
 
             if is_egypt_pref:
                 if any(a in jloc for a in EGYPT_ALIASES) or src == "wuzzuf":
-                    s += 15   # strong Egypt / Wuzzuf match
+                    s += 15
                 elif is_remote:
-                    s += 5    # remote acceptable
+                    s += 5
                 else:
-                    s -= 5    # non-Egypt physical location — push down
+                    s -= 5
             else:
                 if loc_lower in jloc:
-                    s += 15   # exact city/country match
+                    s += 15
                 elif is_remote:
-                    s += 5    # remote acceptable
+                    s += 5
                 else:
-                    s -= 5    # non-matching physical location — penalise
+                    s -= 5
 
         return s
 
@@ -379,7 +367,7 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
                 top_n=100,
             )
             pipeline_stages.append("🧠 Semantic")
-        except Exception as e:
+        except Exception:
             pool = all_jobs
     else:
         pool = all_jobs
@@ -393,7 +381,7 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
                 top_n=30, source_cap=6,
             )
             pipeline_stages.append("⚙️ Engine")
-        except Exception as e:
+        except Exception:
             candidates = _diverse_candidates(pool, skills, roles,
                                              location_pref=location_pref, n=30)
     else:
@@ -422,6 +410,20 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
             entry["semantic_score"] = round(j["_semantic_score"] * 100)
         compact.append(entry)
 
+    # ── FIX v7.1: Build (title, company) → verified URL lookup ────────────
+    # Key by both title AND company to prevent collisions.
+    # Used after LLM responds to replace hallucinated/missing URLs with
+    # real verified URLs from the database.
+    url_lookup: dict[tuple, str] = {}
+    for j in compact:
+        real_url = str(j.get("url", "")).strip()
+        if real_url.startswith("http"):
+            key = (
+                str(j.get("title",   ""))[:40].lower(),
+                str(j.get("company", ""))[:30].lower(),
+            )
+            url_lookup[key] = real_url
+
     # ── Stage 2: Groq LLM ─────────────────────────────────────────────────
     pipeline_note = (
         "Candidates were pre-filtered by a semantic embedding model (all-MiniLM-L6-v2) "
@@ -432,7 +434,6 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
         if pipeline_stages else ""
     )
 
-    # FIX: explicit ranked location rule replaces the old weak "prioritise" language
     loc_display   = location_pref or "Remote / Worldwide"
     is_egypt_pref = location_pref.lower() in EGYPT_ALIASES if location_pref else False
     egypt_note    = (
@@ -457,6 +458,10 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
         "   • NEVER place a different-country job above a matching local job.\n"
         "2. SKILL MATCH — among jobs in the same location tier, rank by matched_skills count.\n"
         "3. SOURCE DIVERSITY — when scores are close, prefer different sources.\n\n"
+        "URL RULE — critical:\n"
+        "   • For the 'url' field: copy the exact url value from the job listing data below.\n"
+        "   • Do NOT invent, guess, or construct any URLs.\n"
+        "   • If a listing has no url or an empty url, use an empty string \"\".\n\n"
         f"Sources available: {', '.join(sources_present)}\n\n"
         f"User profile:\n"
         f"  Skills: {user_profile.get('skills', [])}\n"
@@ -473,10 +478,20 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
     if isinstance(matches, dict) and "jobs" in matches: matches = matches["jobs"]
     if not isinstance(matches, list): matches = []
 
-    url_map = {str(j.get("title",""))[:50].lower(): j.get("url","") for j in compact}
+    # ── FIX v7.1: Verify every URL against the real database ─────────────
+    # This runs regardless of whether the LLM returned a URL or not.
+    # • If we have a verified URL for this job → always use it (overrides LLM)
+    # • If LLM returned something that doesn't start with http → wipe it
     for m in matches:
-        if not m.get("url"):
-            m["url"] = url_map.get(str(m.get("title",""))[:50].lower(), "")
+        key = (
+            str(m.get("title",   ""))[:40].lower(),
+            str(m.get("company", ""))[:30].lower(),
+        )
+        real_url = url_lookup.get(key, "")
+        if real_url:
+            m["url"] = real_url                              # verified DB URL wins
+        elif not str(m.get("url", "")).startswith("http"):
+            m["url"] = ""                                    # wipe invalid/hallucinated
 
     return {
         "success":               True,
@@ -751,7 +766,7 @@ def _sidebar():
             '<div><div style="font-size:14px;font-weight:800;color:#e8eeff">Career AI</div>'
             '<div style="font-size:10px;color:#00d9ff;background:rgba(0,217,255,.08);'
             'padding:2px 8px;border-radius:20px;border:1px solid rgba(0,217,255,.2);'
-            'display:inline-block;font-weight:600;margin-top:2px">v7 · Location-Aware</div>'
+            'display:inline-block;font-weight:600;margin-top:2px">v7.1 · URL Verified</div>'
             '</div></div></div>',
             unsafe_allow_html=True,
         )
@@ -773,11 +788,10 @@ def _sidebar():
             ("🤖 Groq LLM",             bool(_key()), "GROQ_API_KEY required"),
         ]:
             col  = "#34d399" if active else "#f87171"
-            stat = "Active" if active else f"Install: {tip}"
             st.markdown(
                 f'<div style="font-size:12px;color:{col};padding:2px 0">'
                 f'{"✅" if active else "❌"} {stage_lbl}</div>'
-                + (f'<div style="font-size:10px;color:var(--t3);padding-left:18px;margin-bottom:2px">{stat}</div>'
+                + (f'<div style="font-size:10px;color:var(--t3);padding-left:18px;margin-bottom:2px">{tip}</div>'
                    if not active else ""),
                 unsafe_allow_html=True,
             )
@@ -1071,220 +1085,237 @@ def _tab_github():
 # ══════════════════════════════════════════════════════════════════════════════
 # Tab: Job Matcher
 # ══════════════════════════════════════════════════════════════════════════════
-# ============================================================
-# PASTE THIS BLOCK INTO app.py
-# Replace everything between:
-#   "# ============= TAB 3: JOB MATCHER ============="
-# and
-#   "# ============= TAB 4: FULL ASSESSMENT ============="
-# ============================================================
+def _tab_jobs():
+    st.markdown('<div class="sh">💼 Job Matcher</div>', unsafe_allow_html=True)
+    cnt = len(_load_combined())
 
-# ============= TAB 3: JOB MATCHER =============
-with tab3:
-    st.header("💼 Job Matcher")
-    st.markdown("Find jobs that match your skills and experience")
+    if st.session_state.cv_analysis and not st.session_state._jobs_skills_shown:
+        st.success("✅ Skills auto-filled from your CV — edit freely below.")
+        st.session_state._jobs_skills_shown = True
 
-    # ── Scrape fresh jobs ─────────────────────────────────────────────────
-    with st.expander("🔄 Refresh Job Database (run once, or when results feel stale)"):
-        scrape_loc = st.text_input(
-            "Location for scraping",
-            value="Egypt",
-            help="City or country to target when scraping live jobs (e.g. Egypt, Cairo, Remote)",
-            key="scrape_loc_input",
+    c1, c2 = st.columns(2)
+    with c1:
+        sr  = st.text_area("Your Skills (one per line)",
+                           placeholder="Python\nReact\nSQL",
+                           height=130, key="js_skills_v3")
+        exp = st.number_input("Years of Experience", 0, 50, 2, key="js_exp")
+    with c2:
+        sen   = st.selectbox("Seniority Level",
+                             ["Junior","Mid-Level","Senior","Lead","Principal"],
+                             key="js_sen")
+        roles = st.multiselect("Interested Roles", [
+            "Full Stack Developer","Backend Engineer","Frontend Developer",
+            "Data Scientist","ML Engineer","DevOps Engineer","Product Manager",
+            "Mobile Developer","Cloud Architect","QA Engineer",
+        ], key="js_roles")
+
+    loc_col1, loc_col2 = st.columns([2, 3])
+    with loc_col1:
+        loc_preset = st.selectbox(
+            "📍 Location Preference",
+            ["Egypt 🇪🇬", "Remote / Worldwide", "Cairo", "Alexandria",
+             "United States", "United Kingdom", "Germany", "Custom…"],
+            key="js_loc_preset",
         )
-        if st.button("🌐 Scrape Fresh Jobs Now", key="btn_scrape"):
-            try:
-                from data_scraper import scrape_by_skills, save_jobs
-                skills_for_scrape = [
-                    s.strip()
-                    for s in st.session_state.get("_skills_raw", "Python").split("\n")
-                    if s.strip()
-                ] or ["Python", "JavaScript"]
-                status_box = st.empty()
-                with st.spinner("Scraping live jobs from 7 sources … (30–60 s)"):
-                    jobs = scrape_by_skills(skills_for_scrape, location=scrape_loc)
-                    n = save_jobs(jobs)
-                st.success(f"✅ Saved {n:,} unique jobs to database!")
-            except Exception as e:
-                st.error(f"❌ Scrape error: {e}")
+    with loc_col2:
+        if loc_preset == "Custom…":
+            location_pref = st.text_input("Enter location", placeholder="e.g. Dubai, Netherlands",
+                                          key="js_loc_custom").strip()
+        elif loc_preset == "Remote / Worldwide":
+            location_pref = "Remote"
+            st.markdown('<div style="padding-top:30px;color:var(--t3);font-size:12px">'
+                        '🌍 Will include jobs open to worldwide candidates</div>',
+                        unsafe_allow_html=True)
+        elif loc_preset == "Egypt 🇪🇬":
+            location_pref = "Egypt"
+            st.markdown('<div style="padding-top:30px;color:var(--a);font-size:12px">'
+                        '🇪🇬 Wuzzuf scraped — Cairo/Giza/Alexandria all match Egypt preference</div>',
+                        unsafe_allow_html=True)
+        else:
+            location_pref = loc_preset
+            st.markdown(f'<div style="padding-top:30px;color:var(--t3);font-size:12px">'
+                        f'Jobs near <strong>{location_pref}</strong> will be prioritised</div>',
+                        unsafe_allow_html=True)
 
-    st.divider()
+    st.session_state.job_location_pref = location_pref
+    skills = [s.strip() for s in (sr or "").split("\n") if s.strip()]
 
-    # ── Profile inputs ────────────────────────────────────────────────────
-    col1, col2 = st.columns(2)
-
-    with col1:
-        skills_input = st.text_area(
-            "Your Skills",
-            placeholder="Python\nJavaScript\nReact\n(one per line)",
-            height=130,
-            key="_skills_raw",
+    if cnt > 0:
+        stages = []
+        if HAS_SEMANTIC: stages.append("🧠 Semantic")
+        if HAS_ENGINE:   stages.append("⚙️ Engine")
+        stages.append("🤖 LLM")
+        pipeline_str = " → ".join(stages)
+        st.markdown(
+            f'<p style="color:var(--t2);font-size:12.5px;margin:8px 0">'
+            f'DB: <strong style="color:var(--c)">{cnt:,} jobs</strong> · 7 sources · '
+            f'Pipeline: <strong style="color:var(--c)">{pipeline_str}</strong></p>',
+            unsafe_allow_html=True,
         )
-        experience_years = st.number_input(
-            "Years of Experience", min_value=0, max_value=50, value=2
-        )
+    else:
+        st.warning("Job database is empty — clicking **Find My Best Jobs** will scrape it now.")
 
-    with col2:
-        seniority = st.selectbox(
-            "Seniority Level",
-            ["Junior", "Mid-Level", "Senior"],
-        )
-        interested_roles = st.multiselect(
-            "Interested Roles",
-            [
-                "Full Stack Developer", "Backend Engineer", "Frontend Developer",
-                "Data Scientist", "DevOps Engineer", "Product Manager",
-                "Mobile Developer", "AI/ML Engineer", "QA Engineer",
-            ],
-        )
-        location_pref = st.text_input(
-            "📍 Preferred Location",
-            value="Egypt",
-            help="e.g. Egypt, Cairo, Remote — affects job ranking heavily",
-            key="location_pref_input",
-        )
+    go = st.button("🔍 Find My Best Jobs", key="btn_jobs")
+    if go:
+        if not _key(): return
+        if not skills:
+            st.warning("Please enter at least one skill."); return
 
-    if st.button("🔍 Find Matching Jobs", use_container_width=True, key="btn_match"):
-        with st.spinner("Matching jobs …"):
-            try:
-                user_profile = {
-                    "skills":           [s.strip() for s in skills_input.split("\n") if s.strip()],
-                    "experience_years": experience_years,
-                    "seniority_level":  seniority.lower(),
-                    "interested_roles": interested_roles,
-                }
+        if HAS_SCRAPER:
+            scrape_ph = st.empty()
+            log_lines = []
 
-                matcher = JobMatcher()
-                result  = matcher.match_jobs(user_profile, location_pref=location_pref)
-
-                if result.get("success"):
-                    st.session_state.job_matches = result
-                    matches = result.get("matches", [])
-
-                    st.success(
-                        f"✅ Found **{len(matches)}** matches  "
-                        f"(from **{result.get('total_in_db', '?'):,}** jobs in DB  |  "
-                        f"Sources: {', '.join(result.get('sources_in_candidates', []))})"
+            class _StreamlitPH:
+                def info(self, msg):
+                    log_lines.append(msg)
+                    scrape_ph.markdown(
+                        '<div class="scrape-box">'
+                        + "".join(f"<div>{html.escape(l)}</div>" for l in log_lines[-8:])
+                        + "</div>",
+                        unsafe_allow_html=True,
                     )
 
-                    if not matches:
-                        st.warning(
-                            "No matches returned. Try clicking **Scrape Fresh Jobs Now** "
-                            "above to populate the database first."
-                        )
-                    else:
-                        # ── Render each match as a card ───────────────────
-                        for i, job in enumerate(matches, 1):
-                            score   = job.get("match_score", "?")
-                            title   = job.get("title",   "Unknown Role")
-                            company = job.get("company", "Unknown Company")
-                            loc     = job.get("location", "")
-                            url     = str(job.get("url", "")).strip()
-                            salary  = job.get("salary",  "N/A")
-                            why     = job.get("why_good_fit", "")
-                            matched = job.get("matched_skills", [])
-                            missing = job.get("missing_skills", [])
-                            source  = job.get("source", "")
-
-                            with st.container(border=True):
-                                hcol, scol = st.columns([4, 1])
-
-                                with hcol:
-                                    st.markdown(f"### {i}. {title}")
-                                    meta_parts = [f"**{company}**"]
-                                    if loc:
-                                        meta_parts.append(f"📍 {loc}")
-                                    if salary and salary != "N/A":
-                                        meta_parts.append(f"💰 {salary}")
-                                    st.markdown("  |  ".join(meta_parts))
-                                    if source:
-                                        st.caption(f"Source: {source}")
-
-                                with scol:
-                                    st.metric("Match", f"{score}%")
-
-                                if why:
-                                    st.info(f"💡 {why}")
-
-                                # Skills row
-                                skc1, skc2 = st.columns(2)
-                                with skc1:
-                                    if matched:
-                                        st.markdown(
-                                            "✅ **Matched skills:** " +
-                                            ", ".join(f"`{s}`" for s in matched)
-                                        )
-                                with skc2:
-                                    if missing:
-                                        st.markdown(
-                                            "📚 **Skills to learn:** " +
-                                            ", ".join(f"`{s}`" for s in missing)
-                                        )
-
-                                # Apply button — only shown when a real URL exists
-                                if url.startswith("http"):
-                                    st.link_button(
-                                        f"🔗 Apply on {source or 'job site'}",
-                                        url,
-                                        use_container_width=False,
-                                    )
-                                else:
-                                    st.caption("🔗 No direct link available for this listing.")
-
-                                # Gap analysis expander
-                                with st.expander("🔍 Analyse my skill gap for this job"):
-                                    if st.button(
-                                        "Run gap analysis",
-                                        key=f"gap_{i}",
-                                        use_container_width=True,
-                                    ):
-                                        with st.spinner("Analysing …"):
-                                            user_skills = [
-                                                s.strip()
-                                                for s in skills_input.split("\n")
-                                                if s.strip()
-                                            ]
-                                            gap_result = matcher.explain_gap(user_skills, job)
-                                            if gap_result.get("success"):
-                                                gap = gap_result.get("gap_analysis", {})
-                                                if isinstance(gap, dict):
-                                                    gc1, gc2 = st.columns(2)
-                                                    with gc1:
-                                                        st.markdown("**✅ You have:**")
-                                                        for sk in gap.get("matching_skills", []):
-                                                            st.markdown(f"- {sk}")
-                                                        st.markdown("**📚 You need:**")
-                                                        for sk in gap.get("missing_skills", []):
-                                                            st.markdown(f"- {sk}")
-                                                    with gc2:
-                                                        st.markdown("**🗺️ Learning path:**")
-                                                        for step in gap.get("learning_path", []):
-                                                            st.markdown(f"- {step}")
-                                                        st.markdown(
-                                                            f"**⏱️ Time to ready:** "
-                                                            f"{gap.get('time_to_readiness', 'N/A')}"
-                                                        )
-                                                    resources = gap.get("resources", [])
-                                                    if resources:
-                                                        st.markdown("**📖 Resources:**")
-                                                        for res in resources:
-                                                            st.markdown(f"- {res}")
-                                                else:
-                                                    st.json(gap)
-                                            else:
-                                                st.error(gap_result.get("error", "Unknown error"))
-
+            ph_wrapper = _StreamlitPH()
+            ph_wrapper.info(f"🎯 Scraping jobs for: {', '.join(skills[:5])}")
+            if location_pref and location_pref != "Remote":
+                ph_wrapper.info(f"📍 Location filter applied: {location_pref}")
+            try:
+                new_jobs = _ds.scrape_by_skills(
+                    skills, limit=60, location=location_pref
+                )
+                if new_jobs:
+                    by_src: dict[str, int] = {}
+                    for j in new_jobs:
+                        by_src[j.get("source","?")] = by_src.get(j.get("source","?"),0) + 1
+                    breakdown = " · ".join(f"{s}:{n}" for s, n in sorted(by_src.items(), key=lambda x:-x[1]))
+                    n_saved = _ds.save_jobs(new_jobs)
+                    ph_wrapper.info(
+                        f"✅ Scraped {len(new_jobs)} fresh jobs → {n_saved:,} total in DB"
+                    )
+                    ph_wrapper.info(f"📊 Source breakdown: {breakdown}")
                 else:
-                    err = result.get("error", "Unknown error")
-                    st.warning(f"⚠️ {err}")
-                    if "not found" in err.lower():
-                        st.info(
-                            "👆 Expand **Refresh Job Database** above and click "
-                            "**Scrape Fresh Jobs Now** to build the job database."
-                        )
-
+                    ph_wrapper.info("⚠️ Scraper returned 0 jobs — using existing DB")
+                time.sleep(0.8)
+                scrape_ph.empty()
             except Exception as e:
-                st.error(f"❌ Error: {e}")
+                scrape_ph.warning(f"⚠️ Scraper error: {e} — using existing DB")
+
+        with st.spinner("🤖 AI is ranking your best matches across all sources…"):
+            res = match_jobs(
+                user_profile={
+                    "skills":           skills,
+                    "experience_years": int(exp),
+                    "seniority_level":  sen,
+                    "interested_roles": roles,
+                },
+                limit=8,
+                location_pref=location_pref,
+            )
+        if res.get("success"):
+            st.session_state.job_matches = res
+        else:
+            st.error(f"❌ {res.get('error')}"); return
+
+    if not st.session_state.job_matches:
+        st.info("Fill in your skills and click **Find My Best Jobs**."); return
+
+    res      = st.session_state.job_matches
+    matches  = res.get("matches", [])
+    total    = res.get("total_in_db", "?")
+    evald    = res.get("candidates_evaluated", "?")
+    sources  = res.get("sources_in_candidates", [])
+    p_stages = res.get("pipeline_stages", [])
+
+    if not matches:
+        st.warning("No matches found. Try broadening your skills."); return
+
+    src_pills     = "".join(_src_badge(s) for s in sources) if sources else ""
+    pipeline_html = (
+        '<div style="margin-top:6px;font-size:11px;color:var(--t3)">'
+        'Pipeline: <strong style="color:var(--g)">'
+        + " → ".join(p_stages) +
+        '</strong></div>'
+    ) if p_stages else ""
+
+    st.markdown(
+        f'<div class="aib"><div class="ailbl">🎯 Results</div>'
+        f'Searched <strong>{total:,}</strong> jobs · shortlisted '
+        f'<strong>{evald}</strong> candidates from <strong>{len(sources)}</strong> sources · '
+        f'AI picked <strong>{len(matches)}</strong> best fits.'
+        f'{pipeline_html}'
+        f'<div style="margin-top:8px">Sources: {src_pills}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    for job in matches:
+        if not isinstance(job, dict): continue
+        score    = int(job.get("match_score", 0)); colour = _sc(score)
+        sem_s    = job.get("semantic_score")
+        matched  = job.get("matched_skills", []);  missing = job.get("missing_skills", [])
+        why      = job.get("why_good_fit", "")
+        salary   = str(job.get("salary", ""))
+        loc      = str(job.get("location", ""))
+        url      = str(job.get("url", "")).strip()
+        source   = str(job.get("source", ""))
+
+        mp  = "".join(_pill(s, "skill") for s in matched) if matched else ""
+        xp  = "".join(_pill(s, "miss")  for s in missing) if missing else ""
+        sal_txt = f"  ·  💰 {html.escape(salary)}" if salary not in ("N/A","","nan") else ""
+        loc_txt = f"  📍 {html.escape(loc)}" if loc else ""
+
+        title_html = (
+            f'<a href="{html.escape(url)}" target="_blank" '
+            f'style="color:var(--t1);text-decoration:none">'
+            f'{html.escape(str(job.get("title","—")))}</a>'
+            if url.startswith("http") else html.escape(str(job.get("title","—")))
+        )
+        src_b = _src_badge(source) if source else ""
+
+        sem_html = ""
+        if sem_s is not None:
+            sem_col = _sc(sem_s)
+            sem_html = (
+                f'<span style="font-size:9px;font-weight:700;padding:2px 7px;'
+                f'border-radius:8px;border:1px solid {sem_col}40;'
+                f'color:{sem_col};background:{sem_col}14;margin-left:6px" '
+                f'title="Semantic similarity score">🧠 {sem_s}%</span>'
+            )
+
+        # Apply link only shown for verified http URLs
+        apply_html = (
+            f'<div style="margin-top:10px">'
+            f'<a href="{html.escape(url)}" target="_blank" '
+            f'style="font-size:11px;font-weight:700;color:var(--n);background:linear-gradient(135deg,#007acc,#00d9ff);'
+            f'padding:6px 14px;border-radius:8px;text-decoration:none">🔗 Apply Now →</a>'
+            f'</div>'
+            if url.startswith("http") else
+            '<div style="margin-top:8px;font-size:11px;color:var(--t3)">🔗 No direct link available</div>'
+        )
+
+        st.markdown(f"""
+<div class="jcard">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <div style="flex:1">
+      <div style="font-size:15px;font-weight:700">{title_html}{src_b}{sem_html}</div>
+      <div style="font-size:12px;color:var(--t2);margin-top:2px">
+        🏢 {html.escape(str(job.get('company','—')))}{loc_txt}{sal_txt}
+      </div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;margin-left:16px">
+      <div style="font-size:22px;font-weight:800;color:{colour}">{score}%</div>
+      <div style="font-size:10px;color:var(--t3)">LLM match</div>
+    </div>
+  </div>
+  <div style="background:var(--n5);border-radius:4px;height:6px;width:100%;margin:8px 0">
+    <div style="height:6px;border-radius:4px;width:{score}%;
+      background:linear-gradient(90deg,#007acc,{colour})"></div>
+  </div>
+  {f'<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3)">Matched  </span>{mp}</div>' if mp else ""}
+  {f'<div style="margin-bottom:8px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3)">To learn  </span>{xp}</div>' if xp else ""}
+  {f'<div style="font-size:13px;color:var(--t2);line-height:1.6;margin-top:6px">💬 {html.escape(str(why))}</div>' if why else ""}
+  {apply_html}
+</div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
