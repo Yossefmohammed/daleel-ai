@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(page_title="Career AI", page_icon="🎯",
-                   layout="wide", initial_sidebar_bar="expanded")
+                   layout="wide", initial_sidebar_state="expanded")
 
 # ── Try importing data_scraper ────────────────────────────────────────────────
 try:
