@@ -1071,226 +1071,220 @@ def _tab_github():
 # ══════════════════════════════════════════════════════════════════════════════
 # Tab: Job Matcher
 # ══════════════════════════════════════════════════════════════════════════════
-def _tab_jobs():
-    st.markdown('<div class="sh">💼 Job Matcher</div>', unsafe_allow_html=True)
-    cnt = len(_load_combined())
+# ============================================================
+# PASTE THIS BLOCK INTO app.py
+# Replace everything between:
+#   "# ============= TAB 3: JOB MATCHER ============="
+# and
+#   "# ============= TAB 4: FULL ASSESSMENT ============="
+# ============================================================
 
-    if st.session_state.cv_analysis and not st.session_state._jobs_skills_shown:
-        st.success("✅ Skills auto-filled from your CV — edit freely below.")
-        st.session_state._jobs_skills_shown = True
+# ============= TAB 3: JOB MATCHER =============
+with tab3:
+    st.header("💼 Job Matcher")
+    st.markdown("Find jobs that match your skills and experience")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        sr  = st.text_area("Your Skills (one per line)",
-                           placeholder="Python\nReact\nSQL",
-                           height=130, key="js_skills_v3")
-        exp = st.number_input("Years of Experience", 0, 50, 2, key="js_exp")
-    with c2:
-        sen   = st.selectbox("Seniority Level",
-                             ["Junior","Mid-Level","Senior","Lead","Principal"],
-                             key="js_sen")
-        roles = st.multiselect("Interested Roles", [
-            "Full Stack Developer","Backend Engineer","Frontend Developer",
-            "Data Scientist","ML Engineer","DevOps Engineer","Product Manager",
-            "Mobile Developer","Cloud Architect","QA Engineer",
-        ], key="js_roles")
-
-    loc_col1, loc_col2 = st.columns([2, 3])
-    with loc_col1:
-        loc_preset = st.selectbox(
-            "📍 Location Preference",
-            ["Egypt 🇪🇬", "Remote / Worldwide", "Cairo", "Alexandria",
-             "United States", "United Kingdom", "Germany", "Custom…"],
-            key="js_loc_preset",
+    # ── Scrape fresh jobs ─────────────────────────────────────────────────
+    with st.expander("🔄 Refresh Job Database (run once, or when results feel stale)"):
+        scrape_loc = st.text_input(
+            "Location for scraping",
+            value="Egypt",
+            help="City or country to target when scraping live jobs (e.g. Egypt, Cairo, Remote)",
+            key="scrape_loc_input",
         )
-    with loc_col2:
-        if loc_preset == "Custom…":
-            location_pref = st.text_input("Enter location", placeholder="e.g. Dubai, Netherlands",
-                                          key="js_loc_custom").strip()
-        elif loc_preset == "Remote / Worldwide":
-            location_pref = "Remote"
-            st.markdown('<div style="padding-top:30px;color:var(--t3);font-size:12px">'
-                        '🌍 Will include jobs open to worldwide candidates</div>',
-                        unsafe_allow_html=True)
-        elif loc_preset == "Egypt 🇪🇬":
-            location_pref = "Egypt"
-            st.markdown('<div style="padding-top:30px;color:var(--a);font-size:12px">'
-                        '🇪🇬 Wuzzuf scraped — Cairo/Giza/Alexandria all match Egypt preference</div>',
-                        unsafe_allow_html=True)
-        else:
-            location_pref = loc_preset
-            st.markdown(f'<div style="padding-top:30px;color:var(--t3);font-size:12px">'
-                        f'Jobs near <strong>{location_pref}</strong> will be prioritised</div>',
-                        unsafe_allow_html=True)
-
-    st.session_state.job_location_pref = location_pref
-    skills = [s.strip() for s in (sr or "").split("\n") if s.strip()]
-
-    if cnt > 0:
-        stages = []
-        if HAS_SEMANTIC: stages.append("🧠 Semantic")
-        if HAS_ENGINE:   stages.append("⚙️ Engine")
-        stages.append("🤖 LLM")
-        pipeline_str = " → ".join(stages)
-        st.markdown(
-            f'<p style="color:var(--t2);font-size:12.5px;margin:8px 0">'
-            f'DB: <strong style="color:var(--c)">{cnt:,} jobs</strong> · 7 sources · '
-            f'Pipeline: <strong style="color:var(--c)">{pipeline_str}</strong></p>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.warning("Job database is empty — clicking **Find My Best Jobs** will scrape it now.")
-
-    go = st.button("🔍 Find My Best Jobs", key="btn_jobs")
-    if go:
-        if not _key(): return
-        if not skills:
-            st.warning("Please enter at least one skill."); return
-
-        if HAS_SCRAPER:
-            scrape_ph = st.empty()
-            log_lines = []
-
-            class _StreamlitPH:
-                def info(self, msg):
-                    log_lines.append(msg)
-                    scrape_ph.markdown(
-                        '<div class="scrape-box">'
-                        + "".join(f"<div>{html.escape(l)}</div>" for l in log_lines[-8:])
-                        + "</div>",
-                        unsafe_allow_html=True,
-                    )
-
-            ph_wrapper = _StreamlitPH()
-            ph_wrapper.info(f"🎯 Scraping jobs for: {', '.join(skills[:5])}")
-            if location_pref and location_pref != "Remote":
-                ph_wrapper.info(f"📍 Location filter applied: {location_pref}")
+        if st.button("🌐 Scrape Fresh Jobs Now", key="btn_scrape"):
             try:
-                new_jobs = _ds.scrape_by_skills(
-                    skills, limit=60, location=location_pref
-                )
-                if new_jobs:
-                    by_src: dict[str, int] = {}
-                    for j in new_jobs:
-                        by_src[j.get("source","?")] = by_src.get(j.get("source","?"),0) + 1
-                    breakdown = " · ".join(f"{s}:{n}" for s, n in sorted(by_src.items(), key=lambda x:-x[1]))
-                    n_saved = _ds.save_jobs(new_jobs)
-                    ph_wrapper.info(
-                        f"✅ Scraped {len(new_jobs)} fresh jobs → {n_saved:,} total in DB"
-                    )
-                    ph_wrapper.info(f"📊 Source breakdown: {breakdown}")
-                else:
-                    ph_wrapper.info("⚠️ Scraper returned 0 jobs — using existing DB")
-                time.sleep(0.8)
-                scrape_ph.empty()
+                from data_scraper import scrape_by_skills, save_jobs
+                skills_for_scrape = [
+                    s.strip()
+                    for s in st.session_state.get("_skills_raw", "Python").split("\n")
+                    if s.strip()
+                ] or ["Python", "JavaScript"]
+                status_box = st.empty()
+                with st.spinner("Scraping live jobs from 7 sources … (30–60 s)"):
+                    jobs = scrape_by_skills(skills_for_scrape, location=scrape_loc)
+                    n = save_jobs(jobs)
+                st.success(f"✅ Saved {n:,} unique jobs to database!")
             except Exception as e:
-                scrape_ph.warning(f"⚠️ Scraper error: {e} — using existing DB")
+                st.error(f"❌ Scrape error: {e}")
 
-        with st.spinner("🤖 AI is ranking your best matches across all sources…"):
-            res = match_jobs(
-                user_profile={
-                    "skills":           skills,
-                    "experience_years": int(exp),
-                    "seniority_level":  sen,
-                    "interested_roles": roles,
-                },
-                limit=8,
-                location_pref=location_pref,
-            )
-        if res.get("success"):
-            st.session_state.job_matches = res
-        else:
-            st.error(f"❌ {res.get('error')}"); return
+    st.divider()
 
-    if not st.session_state.job_matches:
-        st.info("Fill in your skills and click **Find My Best Jobs**."); return
+    # ── Profile inputs ────────────────────────────────────────────────────
+    col1, col2 = st.columns(2)
 
-    res      = st.session_state.job_matches
-    matches  = res.get("matches", [])
-    total    = res.get("total_in_db", "?")
-    evald    = res.get("candidates_evaluated", "?")
-    sources  = res.get("sources_in_candidates", [])
-    p_stages = res.get("pipeline_stages", [])
-
-    if not matches:
-        st.warning("No matches found. Try broadening your skills."); return
-
-    src_pills     = "".join(_src_badge(s) for s in sources) if sources else ""
-    pipeline_html = (
-        '<div style="margin-top:6px;font-size:11px;color:var(--t3)">'
-        'Pipeline: <strong style="color:var(--g)">'
-        + " → ".join(p_stages) +
-        '</strong></div>'
-    ) if p_stages else ""
-
-    st.markdown(
-        f'<div class="aib"><div class="ailbl">🎯 Results</div>'
-        f'Searched <strong>{total:,}</strong> jobs · shortlisted '
-        f'<strong>{evald}</strong> candidates from <strong>{len(sources)}</strong> sources · '
-        f'AI picked <strong>{len(matches)}</strong> best fits.'
-        f'{pipeline_html}'
-        f'<div style="margin-top:8px">Sources: {src_pills}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    for job in matches:
-        if not isinstance(job, dict): continue
-        score    = int(job.get("match_score", 0)); colour = _sc(score)
-        sem_s    = job.get("semantic_score")
-        matched  = job.get("matched_skills", []);  missing = job.get("missing_skills", [])
-        why      = job.get("why_good_fit", "")
-        salary   = str(job.get("salary", ""))
-        loc      = str(job.get("location", ""))
-        url      = str(job.get("url", ""))
-        source   = str(job.get("source", ""))
-
-        mp  = "".join(_pill(s, "skill") for s in matched) if matched else ""
-        xp  = "".join(_pill(s, "miss")  for s in missing) if missing else ""
-        sal_txt = f"  ·  💰 {html.escape(salary)}" if salary not in ("N/A","","nan") else ""
-        loc_txt = f"  📍 {html.escape(loc)}" if loc else ""
-
-        title_html = (
-            f'<a href="{html.escape(url)}" target="_blank" '
-            f'style="color:var(--t1);text-decoration:none">'
-            f'{html.escape(str(job.get("title","—")))}</a>'
-            if url else html.escape(str(job.get("title","—")))
+    with col1:
+        skills_input = st.text_area(
+            "Your Skills",
+            placeholder="Python\nJavaScript\nReact\n(one per line)",
+            height=130,
+            key="_skills_raw",
         )
-        src_b = _src_badge(source) if source else ""
+        experience_years = st.number_input(
+            "Years of Experience", min_value=0, max_value=50, value=2
+        )
 
-        sem_html = ""
-        if sem_s is not None:
-            sem_col = _sc(sem_s)
-            sem_html = (
-                f'<span style="font-size:9px;font-weight:700;padding:2px 7px;'
-                f'border-radius:8px;border:1px solid {sem_col}40;'
-                f'color:{sem_col};background:{sem_col}14;margin-left:6px" '
-                f'title="Semantic similarity score">🧠 {sem_s}%</span>'
-            )
+    with col2:
+        seniority = st.selectbox(
+            "Seniority Level",
+            ["Junior", "Mid-Level", "Senior"],
+        )
+        interested_roles = st.multiselect(
+            "Interested Roles",
+            [
+                "Full Stack Developer", "Backend Engineer", "Frontend Developer",
+                "Data Scientist", "DevOps Engineer", "Product Manager",
+                "Mobile Developer", "AI/ML Engineer", "QA Engineer",
+            ],
+        )
+        location_pref = st.text_input(
+            "📍 Preferred Location",
+            value="Egypt",
+            help="e.g. Egypt, Cairo, Remote — affects job ranking heavily",
+            key="location_pref_input",
+        )
 
-        st.markdown(f"""
-<div class="jcard">
-  <div style="display:flex;justify-content:space-between;align-items:flex-start">
-    <div style="flex:1">
-      <div style="font-size:15px;font-weight:700">{title_html}{src_b}{sem_html}</div>
-      <div style="font-size:12px;color:var(--t2);margin-top:2px">
-        🏢 {html.escape(str(job.get('company','—')))}{loc_txt}{sal_txt}
-      </div>
-    </div>
-    <div style="text-align:right;flex-shrink:0;margin-left:16px">
-      <div style="font-size:22px;font-weight:800;color:{colour}">{score}%</div>
-      <div style="font-size:10px;color:var(--t3)">LLM match</div>
-    </div>
-  </div>
-  <div style="background:var(--n5);border-radius:4px;height:6px;width:100%;margin:8px 0">
-    <div style="height:6px;border-radius:4px;width:{score}%;
-      background:linear-gradient(90deg,#007acc,{colour})"></div>
-  </div>
-  {f'<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3)">Matched  </span>{mp}</div>' if mp else ""}
-  {f'<div style="margin-bottom:8px"><span style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--t3)">To learn  </span>{xp}</div>' if xp else ""}
-  {f'<div style="font-size:13px;color:var(--t2);line-height:1.6;margin-top:6px">💬 {html.escape(str(why))}</div>' if why else ""}
-  {f'<div style="margin-top:10px"><a href="{html.escape(url)}" target="_blank" style="font-size:11px;color:var(--c);font-weight:600">🔗 View Job →</a></div>' if url else ""}
-</div>""", unsafe_allow_html=True)
+    if st.button("🔍 Find Matching Jobs", use_container_width=True, key="btn_match"):
+        with st.spinner("Matching jobs …"):
+            try:
+                user_profile = {
+                    "skills":           [s.strip() for s in skills_input.split("\n") if s.strip()],
+                    "experience_years": experience_years,
+                    "seniority_level":  seniority.lower(),
+                    "interested_roles": interested_roles,
+                }
+
+                matcher = JobMatcher()
+                result  = matcher.match_jobs(user_profile, location_pref=location_pref)
+
+                if result.get("success"):
+                    st.session_state.job_matches = result
+                    matches = result.get("matches", [])
+
+                    st.success(
+                        f"✅ Found **{len(matches)}** matches  "
+                        f"(from **{result.get('total_in_db', '?'):,}** jobs in DB  |  "
+                        f"Sources: {', '.join(result.get('sources_in_candidates', []))})"
+                    )
+
+                    if not matches:
+                        st.warning(
+                            "No matches returned. Try clicking **Scrape Fresh Jobs Now** "
+                            "above to populate the database first."
+                        )
+                    else:
+                        # ── Render each match as a card ───────────────────
+                        for i, job in enumerate(matches, 1):
+                            score   = job.get("match_score", "?")
+                            title   = job.get("title",   "Unknown Role")
+                            company = job.get("company", "Unknown Company")
+                            loc     = job.get("location", "")
+                            url     = str(job.get("url", "")).strip()
+                            salary  = job.get("salary",  "N/A")
+                            why     = job.get("why_good_fit", "")
+                            matched = job.get("matched_skills", [])
+                            missing = job.get("missing_skills", [])
+                            source  = job.get("source", "")
+
+                            with st.container(border=True):
+                                hcol, scol = st.columns([4, 1])
+
+                                with hcol:
+                                    st.markdown(f"### {i}. {title}")
+                                    meta_parts = [f"**{company}**"]
+                                    if loc:
+                                        meta_parts.append(f"📍 {loc}")
+                                    if salary and salary != "N/A":
+                                        meta_parts.append(f"💰 {salary}")
+                                    st.markdown("  |  ".join(meta_parts))
+                                    if source:
+                                        st.caption(f"Source: {source}")
+
+                                with scol:
+                                    st.metric("Match", f"{score}%")
+
+                                if why:
+                                    st.info(f"💡 {why}")
+
+                                # Skills row
+                                skc1, skc2 = st.columns(2)
+                                with skc1:
+                                    if matched:
+                                        st.markdown(
+                                            "✅ **Matched skills:** " +
+                                            ", ".join(f"`{s}`" for s in matched)
+                                        )
+                                with skc2:
+                                    if missing:
+                                        st.markdown(
+                                            "📚 **Skills to learn:** " +
+                                            ", ".join(f"`{s}`" for s in missing)
+                                        )
+
+                                # Apply button — only shown when a real URL exists
+                                if url.startswith("http"):
+                                    st.link_button(
+                                        f"🔗 Apply on {source or 'job site'}",
+                                        url,
+                                        use_container_width=False,
+                                    )
+                                else:
+                                    st.caption("🔗 No direct link available for this listing.")
+
+                                # Gap analysis expander
+                                with st.expander("🔍 Analyse my skill gap for this job"):
+                                    if st.button(
+                                        "Run gap analysis",
+                                        key=f"gap_{i}",
+                                        use_container_width=True,
+                                    ):
+                                        with st.spinner("Analysing …"):
+                                            user_skills = [
+                                                s.strip()
+                                                for s in skills_input.split("\n")
+                                                if s.strip()
+                                            ]
+                                            gap_result = matcher.explain_gap(user_skills, job)
+                                            if gap_result.get("success"):
+                                                gap = gap_result.get("gap_analysis", {})
+                                                if isinstance(gap, dict):
+                                                    gc1, gc2 = st.columns(2)
+                                                    with gc1:
+                                                        st.markdown("**✅ You have:**")
+                                                        for sk in gap.get("matching_skills", []):
+                                                            st.markdown(f"- {sk}")
+                                                        st.markdown("**📚 You need:**")
+                                                        for sk in gap.get("missing_skills", []):
+                                                            st.markdown(f"- {sk}")
+                                                    with gc2:
+                                                        st.markdown("**🗺️ Learning path:**")
+                                                        for step in gap.get("learning_path", []):
+                                                            st.markdown(f"- {step}")
+                                                        st.markdown(
+                                                            f"**⏱️ Time to ready:** "
+                                                            f"{gap.get('time_to_readiness', 'N/A')}"
+                                                        )
+                                                    resources = gap.get("resources", [])
+                                                    if resources:
+                                                        st.markdown("**📖 Resources:**")
+                                                        for res in resources:
+                                                            st.markdown(f"- {res}")
+                                                else:
+                                                    st.json(gap)
+                                            else:
+                                                st.error(gap_result.get("error", "Unknown error"))
+
+                else:
+                    err = result.get("error", "Unknown error")
+                    st.warning(f"⚠️ {err}")
+                    if "not found" in err.lower():
+                        st.info(
+                            "👆 Expand **Refresh Job Database** above and click "
+                            "**Scrape Fresh Jobs Now** to build the job database."
+                        )
+
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

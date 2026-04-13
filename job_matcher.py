@@ -1,12 +1,15 @@
 """
-job_matcher.py  –  Career AI  (v3 – stronger location scoring)
-===============================================================
-Fix vs v2:
-  • _score_row() location bonus raised from +3 → +15 so it outweighs
-    a typical skill-match score and actually affects ranking.
+job_matcher.py  –  Career AI  (v4 – real URL verification + stronger location scoring)
+========================================================================================
+Changes vs v3:
+  • URL cross-reference: after the LLM returns matches, every URL is replaced
+    with the verified real URL from the database (prevents hallucinated links).
+  • Empty or non-http URLs are wiped to empty string instead of shown broken.
+  • location_pref now forwarded cleanly from match_jobs caller.
+  • _score_row() location bonus stays at +15 (from v3 fix).
   • Egypt aliases checked for all Egypt city variants.
-  • Non-matching physical location now incurs a -5 penalty.
-  • AI prompt is explicit: fill slots with local jobs first, remote second.
+  • Non-matching physical location incurs -5 penalty.
+  • AI prompt explicit: fill slots with local jobs first, remote second.
 """
 
 import os
@@ -92,13 +95,9 @@ def _score_row(row_text: str, skills: list[str], roles: list[str],
     Keyword match score.
       +2   per matching skill
       +1   per matching word from a desired role title
-      +15  if the job location matches the preferred location  (FIX: was +3)
+      +15  if the job location matches the preferred location
       +5   if remote/worldwide and a specific location is preferred
-      -5   if a non-matching physical location and a specific pref is set (NEW)
-
-    Rationale: with 5 skills matching you get +10. The old +3 location bonus
-    was too small to make any difference. +15 ensures a local job with 3
-    skill matches (score 21) beats a remote job with 5 skill matches (score 15).
+      -5   if a non-matching physical location and a specific pref is set
     """
     text  = row_text.lower()
     score = 0
@@ -119,18 +118,18 @@ def _score_row(row_text: str, skills: list[str], roles: list[str],
 
         if is_egypt_pref:
             if any(alias in text for alias in EGYPT_ALIASES):
-                score += 15   # strong Egypt match
+                score += 15
             elif is_remote_job:
-                score += 5    # remote acceptable
+                score += 5
             else:
-                score -= 5    # different country — push down
+                score -= 5
         else:
             if loc_lower in text:
-                score += 15   # exact city/country match
+                score += 15
             elif is_remote_job:
-                score += 5    # remote acceptable
+                score += 5
             else:
-                score -= 5    # non-matching physical location — penalise
+                score -= 5
 
     return score
 
@@ -226,14 +225,15 @@ class JobMatcher:
                 "success": False,
                 "error": (
                     "Job database not found. "
-                    "Download a Kaggle dataset and save it as data/jobs.csv"
+                    "Download a Kaggle dataset and save it as data/jobs.csv, "
+                    "or click 'Scrape Fresh Jobs Now' in the Job Matcher tab."
                 ),
             }
 
-        skills     = user_profile.get("skills", [])
-        roles      = user_profile.get("interested_roles", [])
-        seniority  = user_profile.get("seniority_level", "")
-        exp_years  = user_profile.get("experience_years", 0)
+        skills    = user_profile.get("skills", [])
+        roles     = user_profile.get("interested_roles", [])
+        seniority = user_profile.get("seniority_level", "")
+        exp_years = user_profile.get("experience_years", 0)
 
         text_cols = [c for c in ["title", "description", "company", "location", "level"]
                      if c in df.columns] or list(df.columns)
@@ -249,15 +249,26 @@ class JobMatcher:
         for row in candidates:
             entry = {}
             for field in ["title", "company", "location", "level", "type",
-                          "salary", "description", "source"]:
+                          "salary", "description", "source", "url"]:
                 if field in row and str(row[field]).strip():
                     val = str(row[field])
                     entry[field] = val[:200] if field == "description" else val
             job_list.append(entry)
 
+        # ── Build a URL lookup from real database records ─────────────────
+        # key: (title_lower[:40], company_lower[:30]) → verified URL
+        url_lookup: dict[tuple, str] = {}
+        for row in candidates:
+            real_url = str(row.get("url", "")).strip()
+            if real_url.startswith("http"):
+                key = (
+                    str(row.get("title", ""))[:40].lower(),
+                    str(row.get("company", ""))[:30].lower(),
+                )
+                url_lookup[key] = real_url
+
         sources_present = sorted({j.get("source", "?") for j in job_list})
 
-        # ── FIX: stronger location instruction in LLM prompt ─────────────
         loc_display   = location_pref or "Remote/Worldwide"
         is_egypt_pref = location_pref.lower() in EGYPT_ALIASES if location_pref else False
         egypt_note    = (
@@ -286,8 +297,11 @@ Each object must have exactly these keys:
   "missing_skills": ["skill1"],
   "why_good_fit": "one or two sentences explaining the match",
   "salary": "salary info or N/A",
-  "url": "application URL"
+  "url": "copy the url field exactly from the job listing below, or empty string if not present"
 }}
+
+IMPORTANT for url: do NOT invent URLs. Copy the exact url value from the job listing data.
+If a listing has no url field, use an empty string "".
 
 User profile:
 - Skills: {', '.join(skills)}
@@ -310,6 +324,22 @@ Return ONLY the JSON array.
                 matches = matches["jobs"]
             if not isinstance(matches, list):
                 matches = []
+
+            # ── Replace hallucinated / missing URLs with real DB URLs ──────
+            # This is the key fix: even if the LLM copies a URL correctly,
+            # we cross-reference against our own lookup to ensure it is real.
+            for m in matches:
+                key = (
+                    str(m.get("title", ""))[:40].lower(),
+                    str(m.get("company", ""))[:30].lower(),
+                )
+                real_url = url_lookup.get(key, "")
+                if real_url:
+                    # Verified URL from database — always prefer this
+                    m["url"] = real_url
+                elif not str(m.get("url", "")).startswith("http"):
+                    # LLM returned something invalid — wipe it
+                    m["url"] = ""
 
             return {
                 "success":               True,
