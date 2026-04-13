@@ -620,15 +620,19 @@ def _chat_context() -> str:
 def _chat_reply(user_msg: str) -> str:
     client = _groq()
     ctx    = _chat_context()
+
     system = (
-        "You are Career AI — a warm, expert career advisor. "
-        "Give honest, specific, actionable advice. Be concise, direct, mentorly. "
-        "Use bullet points only for 3+ items. Never say 'As an AI'."
+        "You are Career AI, a real human-like career mentor. "
+        "Speak naturally like an experienced friend in tech. "
+        "Be helpful, honest, and practical. Avoid robotic or generic replies. "
+        "Keep it conversational. Only use bullet points when necessary."
         + (f"\n\nUser context:\n{ctx}" if ctx else "")
     )
+
     history = st.session_state.chat_history[-12:]
     msgs    = [{"role": "system", "content": system}] + history + \
               [{"role": "user", "content": user_msg}]
+
     return _llm(client, msgs, max_tokens=500)
 
 def _render_chat():
@@ -649,15 +653,9 @@ def _render_chat():
 </div>""", unsafe_allow_html=True)
 
     chat_html = '<div style="overflow-y:auto;max-height:52vh;padding:12px;display:flex;flex-direction:column;gap:10px">'
-    if not st.session_state.chat_history:
-        ctx   = _chat_context()
-        greet = ("Hey! 👋 I can see your profile data. What would you like to explore?"
-                 if ctx else
-                 "Hey! 👋 I'm Career AI. Ask me anything — CV, job search, salary, skills, interview prep…")
-        chat_html += (f'<div style="background:var(--n3);border:1px solid var(--L);'
-                      f'border-top-left-radius:4px;border-radius:14px;padding:10px 13px;'
-                      f'font-size:13px;line-height:1.65;color:var(--t1);max-width:90%">'
-                      f'{html.escape(greet)}</div>')
+
+    # ❌ REMOVED greeting 
+
     for m in st.session_state.chat_history:
         txt = html.escape(m["content"])
         if m["role"] == "assistant":
@@ -669,43 +667,45 @@ def _render_chat():
                           f'color:#fff;border-top-right-radius:4px;border-radius:14px;'
                           f'padding:10px 13px;font-size:13px;line-height:1.65;'
                           f'max-width:90%;margin-left:auto">{txt}</div>')
+
     chat_html += "</div>"
     st.markdown(chat_html, unsafe_allow_html=True)
-
-    chips = ["Improve my CV ✍️", "What skills to learn? 📚",
-             "Salary negotiation 💰", "Am I senior-ready? 🚀"]
-    c1, c2 = st.columns(2)
-    for i, chip in enumerate(chips):
-        with (c1 if i % 2 == 0 else c2):
-            if st.button(chip, key=f"chip_{i}", use_container_width=True):
-                with st.spinner("Thinking…"):
-                    reply = _chat_reply(chip)
-                st.session_state.chat_history.append({"role": "user",      "content": chip})
-                st.session_state.chat_history.append({"role": "assistant", "content": reply})
-                st.rerun()
 
     with st.form(key="chat_form", clear_on_submit=True):
         user_input = st.text_input(
             "Message",
-            placeholder="e.g. Which jobs match my Python skills?",
+            placeholder="Type your message...",
             label_visibility="collapsed",
             key="chat_input_field",
         )
+
         col_send, col_clear = st.columns([3, 1])
-        with col_send:   submitted = st.form_submit_button("Send ➤", use_container_width=True)
-        with col_clear:  cleared   = st.form_submit_button("🗑",    use_container_width=True)
+
+        with col_send:
+            submitted = st.form_submit_button("Send ➤", use_container_width=True)
+
+        with col_clear:
+            cleared = st.form_submit_button("🗑", use_container_width=True)
 
     if submitted and (user_input or "").strip():
         with st.spinner("Thinking…"):
             reply = _chat_reply(user_input.strip())
-        st.session_state.chat_history.append({"role": "user",      "content": user_input.strip()})
-        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": user_input.strip()
+        })
+
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": reply
+        })
+
         st.rerun()
 
     if cleared:
         st.session_state.chat_history = []
         st.rerun()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Session state

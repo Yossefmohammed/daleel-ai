@@ -277,6 +277,8 @@ def _scrape_remotive_located(keywords: str = "", location: str = "", limit: int 
         params = {"limit": min(limit, 100)}
         if category:
             params["category"] = category
+        # Combine skill keywords + location into the search string so the API
+        # surfaces results mentioning that location in title/description.
         search = f"{keywords} {location}".strip() if location else keywords
         if search:
             params["search"] = search
@@ -520,7 +522,7 @@ def scrape_by_skills(
     """
     Balanced multi-source scrape based on user skills + location.
 
-    location is now passed to ALL sources that support text search,
+    FIX v4: location is now passed to ALL sources that support text search,
     not only to Wuzzuf.  This ensures the raw candidate pool already contains
     location-relevant jobs before the scoring/LLM stages run.
 
@@ -541,13 +543,17 @@ def scrape_by_skills(
 
     is_local = location and location.lower() not in ("remote", "worldwide", "")
 
+    # For text-search APIs, append location to the query so results mention
+    # the city/country in their titles or descriptions.
     location_kw = f"{search_str} {location}".strip() if is_local else search_str
 
     # ── 1. RemoteOK ───────────────────────────────────────────────────────
+    # No location param, but remote jobs are always relevant as a fallback.
     all_jobs.extend(scrape_remoteok(keywords=combined_kw, limit=limit))
     time.sleep(0.4)
 
     # ── 2. Remotive ───────────────────────────────────────────────────────
+    # FIX: now uses _scrape_remotive_located which appends location to search.
     all_jobs.extend(_scrape_remotive_located(
         keywords=search_str,
         location=location if is_local else "",
@@ -564,10 +570,12 @@ def scrape_by_skills(
     time.sleep(0.3)
 
     # ── 5. Arbeitnow ─────────────────────────────────────────────────────
+    # FIX: now passes location_kw (skills + location) instead of search_str.
     all_jobs.extend(scrape_arbeitnow(keywords=location_kw, limit=limit))
     time.sleep(0.3)
 
     # ── 6. Himalayas ─────────────────────────────────────────────────────
+    # FIX: now passes location_kw so results mention the preferred city.
     all_jobs.extend(scrape_himalayas(keywords=location_kw, limit=limit))
     time.sleep(0.3)
 
@@ -655,4 +663,4 @@ if __name__ == "__main__":
         by_src[j["source"]] = by_src.get(j["source"], 0) + 1
     print("Source breakdown:", dict(sorted(by_src.items(), key=lambda x: -x[1])))
     for j in jobs[:5]:
-        print(f"  [{j['source']:10}] {j['title'][:45]} @ {j['company'][:25]} — {j['location']} — {j['url'][:60]}")
+        print(f"  [{j['source']:10}] {j['title'][:45]} @ {j['company'][:25]} — {j['location']}")
