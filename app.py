@@ -1,13 +1,12 @@
 """
-Career AI Assistant  –  v3
+Career AI Assistant  –  v4
 ============================
-Key changes vs v2:
-  • Job Matcher calls data_scraper.scrape_by_skills(skills) FIRST,
-    saves fresh jobs to DB, then runs AI matching against the full DB.
-  • Progress shown live with a Streamlit status box.
-  • Chat panel is a right-side Streamlit column (no broken JS).
-  • Groq called server-side (Python) — no CORS issues.
-  • data_scraper imported with graceful fallback if file missing.
+Changes vs v3:
+  • CV analysis now uses CVAnalyzer class from cv_analyzer.py
+      – Projects section extracted and displayed
+      – Text limit raised to 6 000 chars (full CV read)
+  • Chat: Enter key now sends message (st.form wraps input)
+  • data_scraper imported with graceful fallback if file missing
 """
 
 import os, re, json, html, datetime, time
@@ -26,6 +25,13 @@ try:
     HAS_SCRAPER = True
 except ImportError:
     HAS_SCRAPER = False
+
+# ── Try importing CVAnalyzer ──────────────────────────────────────────────────
+try:
+    from cv_analyzer import CVAnalyzer
+    HAS_CV_ANALYZER = True
+except ImportError:
+    HAS_CV_ANALYZER = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CSS
@@ -126,6 +132,8 @@ hr{border-color:var(--L)!important}
 .jcard{background:var(--n3);border:1px solid var(--L);border-radius:var(--R);
   padding:18px 20px;margin-bottom:12px;transition:border-color .18s}
 .jcard:hover{border-color:var(--cb)}
+.pcard{background:var(--n4);border:1px solid var(--L);border-left:3px solid var(--a);
+  border-radius:0 var(--R) var(--R) var(--R);padding:14px 18px;margin-bottom:10px}
 .sh{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
   color:var(--t3);margin:20px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--L)}
 .sdiv{height:1px;background:var(--L);margin:12px 0}
@@ -135,6 +143,8 @@ hr{border-color:var(--L)!important}
 .scrape-box{background:var(--n3);border:1px solid var(--cb);border-radius:var(--R);
   padding:14px 18px;margin:12px 0;font-size:12.5px;color:var(--t2);line-height:1.9}
 .scrape-box strong{color:var(--c)}
+/* Chat form — hide the default form border Streamlit adds */
+[data-testid="stForm"]{border:none!important;padding:0!important}
 </style>""", unsafe_allow_html=True)
 
 
@@ -183,14 +193,13 @@ def _parse_json(text):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Job database helpers  (thin wrappers — data_scraper owns the real logic)
+# Job database helpers
 # ══════════════════════════════════════════════════════════════════════════════
 DATA_DIR    = Path("data")
 COMBINED    = DATA_DIR / "jobs_combined.csv"
 CACHE_HOURS = 24
 
 def _load_combined() -> list:
-    """Load jobs from CSV — prefer data_scraper if available."""
     if HAS_SCRAPER:
         return _ds.load_combined()
     if not COMBINED.exists(): return []
@@ -226,7 +235,6 @@ def _auto_build():
             ph.empty()
 
 def _fallback_build(ph=None):
-    """Built-in scraper used only when data_scraper.py is missing."""
     import requests, pandas as pd
     def say(m):
         if ph: ph.info(m)
@@ -248,28 +256,39 @@ def _fallback_build(ph=None):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CV analysis
+# CV analysis  — uses CVAnalyzer class from cv_analyzer.py
 # ══════════════════════════════════════════════════════════════════════════════
-def _pdf_text(path: str) -> str:
-    from pypdf import PdfReader
-    return "\n".join(p.extract_text() or "" for p in PdfReader(path).pages)
-
 def analyze_cv(pdf_path: str) -> dict:
-    text = _pdf_text(pdf_path)
+    """
+    Delegates to CVAnalyzer if available (recommended — reads full CV + projects).
+    Falls back to a minimal inline analysis otherwise.
+    """
+    if HAS_CV_ANALYZER:
+        try:
+            analyzer = CVAnalyzer()
+            return analyzer.analyze_cv(pdf_path)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Inline fallback (cv_analyzer.py not found) ────────────────────────
+    from pypdf import PdfReader
+    text = "\n".join(p.extract_text() or "" for p in PdfReader(pdf_path).pages)
     if not text.strip():
         return {"success": False,
                 "error": "Could not read text from this PDF. Make sure it is not a scanned image."}
     client = _groq()
     prompt = (
-        "Analyze this CV. Return ONLY a valid JSON object — no markdown, no text outside the JSON.\n\n"
+        "Analyze this CV thoroughly. Return ONLY a valid JSON object — no markdown.\n\n"
         '{"name":"","summary":"2-3 sentence honest professional summary",'
         '"seniority_level":"Junior|Mid-Level|Senior|Lead","experience_years":<integer>,'
         '"skills":["skill1"],"technologies":["framework"],'
         '"experience":[{"title":"Job Title","company":"Company","duration":"2021-2023"}],'
         '"education":[{"degree":"BSc","field":"CS","school":"University"}],'
-        '"strengths":["strength1"],"improvement_areas":["area1"]}\n\nCV:\n' + text[:3500]
+        '"projects":[{"name":"Project Name","description":"what it does",'
+        '"technologies":["tech1"],"url":""}],'
+        '"strengths":["strength1"],"improvement_areas":["area1"]}\n\nCV:\n' + text[:6000]
     )
-    raw = _llm(client, [{"role": "user", "content": prompt}], max_tokens=1200)
+    raw = _llm(client, [{"role": "user", "content": prompt}], max_tokens=1400)
     parsed = _parse_json(raw)
     if not parsed or "skills" not in parsed:
         return {"success": False, "error": "AI could not parse your CV. Try a cleaner text-based PDF."}
@@ -325,7 +344,7 @@ def analyze_github(username: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Job matching  (AI scoring against DB)
+# Job matching
 # ══════════════════════════════════════════════════════════════════════════════
 def match_jobs(user_profile: dict, limit: int = 8) -> dict:
     jobs = _load_combined()
@@ -364,7 +383,6 @@ def match_jobs(user_profile: dict, limit: int = 8) -> dict:
     matches = _parse_json(raw)
     if isinstance(matches, dict) and "jobs" in matches: matches = matches["jobs"]
     if not isinstance(matches, list): matches = []
-    # re-attach URL from compact if AI dropped it
     url_map = {(str(j.get("title",""))[:50].lower()): j.get("url","") for j in compact}
     for m in matches:
         if not m.get("url"):
@@ -374,7 +392,7 @@ def match_jobs(user_profile: dict, limit: int = 8) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Chat  (Python-side Groq call — reliable)
+# Chat
 # ══════════════════════════════════════════════════════════════════════════════
 def _chat_context() -> str:
     parts = []
@@ -385,6 +403,10 @@ def _chat_context() -> str:
                          f"{a.get('experience_years','?')} yrs, "
                          f"skills: {', '.join(a.get('skills',[])[:10])}, "
                          f"summary: {a.get('summary','')}")
+            projs = a.get("projects", [])
+            if projs:
+                pnames = ", ".join(p.get("name","") for p in projs[:4] if isinstance(p, dict))
+                parts.append(f"Projects: {pnames}")
     if st.session_state.github_analysis:
         p = st.session_state.github_analysis.get("profile", {})
         parts.append(f"GitHub: {p.get('public_repos',0)} repos, "
@@ -435,13 +457,21 @@ def _render_chat():
         greet = ("Hey! 👋 I can see your profile data. What would you like to explore?"
                  if ctx else
                  "Hey! 👋 I'm Career AI. Ask me anything — CV, job search, salary, skills, interview prep…")
-        chat_html += f'<div style="background:var(--n3);border:1px solid var(--L);border-top-left-radius:4px;border-radius:14px;padding:10px 13px;font-size:13px;line-height:1.65;color:var(--t1);max-width:90%">{html.escape(greet)}</div>'
+        chat_html += (f'<div style="background:var(--n3);border:1px solid var(--L);'
+                      f'border-top-left-radius:4px;border-radius:14px;padding:10px 13px;'
+                      f'font-size:13px;line-height:1.65;color:var(--t1);max-width:90%">'
+                      f'{html.escape(greet)}</div>')
     for m in st.session_state.chat_history:
         txt = html.escape(m["content"])
         if m["role"] == "assistant":
-            chat_html += f'<div style="background:var(--n3);border:1px solid var(--L);border-top-left-radius:4px;border-radius:14px;padding:10px 13px;font-size:13px;line-height:1.65;color:var(--t1);max-width:90%">{txt}</div>'
+            chat_html += (f'<div style="background:var(--n3);border:1px solid var(--L);'
+                          f'border-top-left-radius:4px;border-radius:14px;padding:10px 13px;'
+                          f'font-size:13px;line-height:1.65;color:var(--t1);max-width:90%">{txt}</div>')
         else:
-            chat_html += f'<div style="background:linear-gradient(135deg,#00527a,#007cc2);color:#fff;border-top-right-radius:4px;border-radius:14px;padding:10px 13px;font-size:13px;line-height:1.65;max-width:90%;margin-left:auto">{txt}</div>'
+            chat_html += (f'<div style="background:linear-gradient(135deg,#00527a,#007cc2);'
+                          f'color:#fff;border-top-right-radius:4px;border-radius:14px;'
+                          f'padding:10px 13px;font-size:13px;line-height:1.65;'
+                          f'max-width:90%;margin-left:auto">{txt}</div>')
     chat_html += "</div>"
     st.markdown(chat_html, unsafe_allow_html=True)
 
@@ -458,22 +488,31 @@ def _render_chat():
                 st.session_state.chat_history.append({"role": "assistant", "content": reply})
                 st.rerun()
 
-    user_input = st.text_input("Ask your career question…", key="chat_input_field",
-                               placeholder="e.g. Which jobs match my Python skills?",
-                               label_visibility="collapsed")
-    col_send, col_clear = st.columns([3, 1])
-    with col_send:
-        if st.button("Send ➤", key="chat_send", use_container_width=True):
-            if user_input.strip():
-                with st.spinner("Thinking…"):
-                    reply = _chat_reply(user_input.strip())
-                st.session_state.chat_history.append({"role": "user", "content": user_input.strip()})
-                st.session_state.chat_history.append({"role": "assistant", "content": reply})
-                st.rerun()
-    with col_clear:
-        if st.button("🗑", key="chat_clear", use_container_width=True):
-            st.session_state.chat_history = []
-            st.rerun()
+    # ── Chat input — Enter key works via st.form ──────────────────────────
+    with st.form(key="chat_form", clear_on_submit=True):
+        user_input = st.text_input(
+            "Message",
+            placeholder="e.g. Which jobs match my Python skills?",
+            label_visibility="collapsed",
+            key="chat_input_field",
+        )
+        col_send, col_clear = st.columns([3, 1])
+        with col_send:
+            submitted = st.form_submit_button("Send ➤", use_container_width=True)
+        with col_clear:
+            cleared = st.form_submit_button("🗑", use_container_width=True)
+
+    # Handle outside the form so rerun works cleanly
+    if submitted and (user_input or "").strip():
+        with st.spinner("Thinking…"):
+            reply = _chat_reply(user_input.strip())
+        st.session_state.chat_history.append({"role": "user", "content": user_input.strip()})
+        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        st.rerun()
+
+    if cleared:
+        st.session_state.chat_history = []
+        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -638,13 +677,13 @@ def _header():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Tab: CV
+# Tab: CV  — with Projects section
 # ══════════════════════════════════════════════════════════════════════════════
 def _tab_cv():
     st.markdown('<div class="sh">📄 CV Analyzer</div>', unsafe_allow_html=True)
     st.markdown('<p style="color:var(--t2);font-size:13px;margin-bottom:18px">'
-                'Upload your PDF CV. I\'ll extract your skills and auto-fill the Job Matcher '
-                'so the scraper fetches jobs targeted specifically to you.</p>',
+                'Upload your PDF CV. Skills, experience <strong>and projects</strong> are all extracted. '
+                'Skills are auto-filled into the Job Matcher so the scraper fetches targeted jobs.</p>',
                 unsafe_allow_html=True)
     cu, cb = st.columns([3, 1])
     with cu: f = st.file_uploader("Choose your CV (PDF)", type=["pdf"], key="cv_file")
@@ -654,10 +693,11 @@ def _tab_cv():
                        use_container_width=True, disabled=f is None)
     if go and f:
         if not _key(): return
-        with st.spinner("Reading your CV…"):
+        with st.spinner("Reading your full CV including projects…"):
             tmp = f"temp_{f.name}"
             with open(tmp, "wb") as fh: fh.write(f.getbuffer())
-            res = analyze_cv(tmp); os.remove(tmp)
+            res = analyze_cv(tmp)
+            os.remove(tmp)
         if res.get("success"):
             st.session_state.cv_analysis = res
             st.session_state.skill_scrape_done = False
@@ -665,7 +705,9 @@ def _tab_cv():
             a = res.get("analysis", {})
             if isinstance(a, dict) and a.get("skills"):
                 st.session_state["js_skills_v3"] = "\n".join(str(s) for s in a["skills"])
-            st.success("✅ CV analyzed! Skills auto-filled in the 💼 Job Matcher tab.")
+            proj_count = len(a.get("projects", [])) if isinstance(a, dict) else 0
+            msg = f"✅ CV analyzed! Found {proj_count} project(s). Skills auto-filled in the 💼 Job Matcher tab."
+            st.success(msg)
         else:
             st.error(f"❌ {res.get('error')}"); return
 
@@ -674,17 +716,25 @@ def _tab_cv():
 
     a = st.session_state.cv_analysis.get("analysis", {})
     if isinstance(a, str): a = _parse_json(a) or {}
-    c1, c2, c3 = st.columns(3)
+
+    # ── Metrics ──────────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
     with c1: st.metric("Seniority", a.get("seniority_level", "—"))
     with c2: st.metric("Experience", f"{a.get('experience_years','—')} yrs")
     with c3: st.metric("Skills", len(a.get("skills", [])))
+    with c4: st.metric("Projects", len(a.get("projects", [])))
+
     if a.get("summary"):
         st.markdown(f'<div class="aib"><div class="ailbl">🤖 AI Summary</div>'
                     f'{html.escape(str(a["summary"]))}</div>', unsafe_allow_html=True)
+
+    # ── Skills & Technologies ────────────────────────────────────────────
     if a.get("skills") or a.get("technologies"):
         st.markdown('<div class="sh">Skills & Technologies</div>', unsafe_allow_html=True)
         st.markdown(_pills(a.get("skills",[]),"skill") + _pills(a.get("technologies",[]),"tech"),
                     unsafe_allow_html=True)
+
+    # ── Work Experience ──────────────────────────────────────────────────
     if a.get("experience"):
         st.markdown('<div class="sh">Work Experience</div>', unsafe_allow_html=True)
         for e in a["experience"]:
@@ -695,6 +745,47 @@ def _tab_cv():
                 f'<div style="font-size:12px;color:var(--t2)">'
                 f'{html.escape(str(e.get("company","—")))} · {html.escape(str(e.get("duration","")))}'
                 f'</div></div></div>', unsafe_allow_html=True)
+
+    # ── Projects ─────────────────────────────────────────────────────────
+    projects = a.get("projects", [])
+    if projects:
+        st.markdown('<div class="sh">🚀 Projects</div>', unsafe_allow_html=True)
+        for p in projects:
+            if not isinstance(p, dict): continue
+            tech_pills = "".join(_pill(t, "tech") for t in p.get("technologies", []))
+            url = str(p.get("url", "")).strip()
+            name_html = (
+                f'<a href="{html.escape(url)}" target="_blank" '
+                f'style="color:var(--a);text-decoration:none;font-weight:700">'
+                f'{html.escape(str(p.get("name","—")))}</a>'
+                if url else
+                f'<span style="color:var(--a);font-weight:700">{html.escape(str(p.get("name","—")))}</span>'
+            )
+            st.markdown(
+                f'<div class="pcard">'
+                f'<div style="font-size:13.5px;margin-bottom:4px">{name_html}</div>'
+                f'<div style="font-size:12.5px;color:var(--t2);line-height:1.6;margin-bottom:6px">'
+                f'{html.escape(str(p.get("description","—")))}</div>'
+                f'{tech_pills}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Education ────────────────────────────────────────────────────────
+    if a.get("education"):
+        st.markdown('<div class="sh">🎓 Education</div>', unsafe_allow_html=True)
+        for e in a["education"]:
+            st.markdown(
+                f'<div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:10px">'
+                f'{_dot("#34d399")}'
+                f'<div><div style="font-size:13.5px;font-weight:600;color:var(--t1)">'
+                f'{html.escape(str(e.get("degree","—")))} in {html.escape(str(e.get("field","—")))}</div>'
+                f'<div style="font-size:12px;color:var(--t2)">'
+                f'{html.escape(str(e.get("school","—")))}</div></div></div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Strengths & Improvements ─────────────────────────────────────────
     c1, c2 = st.columns(2)
     with c1:
         if a.get("strengths"):
@@ -755,7 +846,7 @@ def _tab_github():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Tab: Job Matcher  ← MAIN CHANGE: scrape FIRST, then match
+# Tab: Job Matcher
 # ══════════════════════════════════════════════════════════════════════════════
 def _tab_jobs():
     st.markdown('<div class="sh">💼 Job Matcher</div>', unsafe_allow_html=True)
@@ -783,7 +874,6 @@ def _tab_jobs():
 
     skills = [s.strip() for s in (sr or "").split("\n") if s.strip()]
 
-    # Info banner
     if cnt > 0:
         st.markdown(f'<p style="color:var(--t2);font-size:12.5px;margin:8px 0">'
                     f'Current DB: <strong style="color:var(--c)">{cnt:,} jobs</strong>. '
@@ -798,13 +888,11 @@ def _tab_jobs():
         if not skills:
             st.warning("Please enter at least one skill."); return
 
-        # ── Step 1: Scrape targeted jobs ──────────────────────────────────
         if HAS_SCRAPER:
             scrape_ph = st.empty()
             log_lines = []
 
             class _StreamlitPH:
-                """Wraps st.empty() so data_scraper can write progress."""
                 def info(self, msg):
                     log_lines.append(msg)
                     scrape_ph.markdown(
@@ -816,20 +904,18 @@ def _tab_jobs():
 
             ph_wrapper = _StreamlitPH()
             ph_wrapper.info(f"🎯 Scraping jobs for: {', '.join(skills[:5])}")
-
             try:
                 new_jobs = _ds.scrape_by_skills(skills, limit=60)
                 if new_jobs:
                     n_saved = _ds.save_jobs(new_jobs)
                     ph_wrapper.info(f"✅ Scraped {len(new_jobs)} fresh jobs → {n_saved:,} total in DB")
                 else:
-                    ph_wrapper.info("⚠️ Scraper returned 0 jobs (sites may be slow) — using existing DB")
+                    ph_wrapper.info("⚠️ Scraper returned 0 jobs — using existing DB")
                 time.sleep(0.8)
                 scrape_ph.empty()
             except Exception as e:
                 scrape_ph.warning(f"⚠️ Scraper error: {e} — using existing DB")
 
-        # ── Step 2: AI matching against full DB ───────────────────────────
         with st.spinner("🤖 AI is ranking your best matches…"):
             res = match_jobs({
                 "skills": skills,
@@ -843,8 +929,7 @@ def _tab_jobs():
             st.error(f"❌ {res.get('error')}"); return
 
     if not st.session_state.job_matches:
-        st.info("Fill in your skills and click **Find My Best Jobs**.")
-        return
+        st.info("Fill in your skills and click **Find My Best Jobs**."); return
 
     res     = st.session_state.job_matches
     matches = res.get("matches", [])
@@ -862,8 +947,8 @@ def _tab_jobs():
 
     for job in matches:
         if not isinstance(job, dict): continue
-        score   = int(job.get("match_score", 0));  colour = _sc(score)
-        matched = job.get("matched_skills", []);    missing = job.get("missing_skills", [])
+        score   = int(job.get("match_score", 0)); colour = _sc(score)
+        matched = job.get("matched_skills", []); missing = job.get("missing_skills", [])
         why     = job.get("why_good_fit", "")
         salary  = str(job.get("salary", ""))
         loc     = str(job.get("location", ""))
@@ -876,7 +961,10 @@ def _tab_jobs():
                       f'style="color:var(--t1);text-decoration:none">'
                       f'{html.escape(str(job.get("title","—")))}</a>'
                       if url else html.escape(str(job.get("title","—"))))
-        source_badge = f'<span style="font-size:10px;background:var(--n4);border:1px solid var(--L2);color:var(--t3);padding:2px 7px;border-radius:10px;margin-left:6px">{html.escape(str(job.get("source","")))}</span>' if job.get("source") else ""
+        source_badge = (f'<span style="font-size:10px;background:var(--n4);border:1px solid var(--L2);'
+                        f'color:var(--t3);padding:2px 7px;border-radius:10px;margin-left:6px">'
+                        f'{html.escape(str(job.get("source","")))}</span>'
+                        if job.get("source") else "")
         st.markdown(f"""
 <div class="jcard">
   <div style="display:flex;justify-content:space-between;align-items:flex-start">
@@ -925,6 +1013,10 @@ def _tab_assessment():
                              f"{a.get('experience_years')} yrs, "
                              f"skills: {', '.join(a.get('skills',[])[:10])}, "
                              f"summary: {a.get('summary','')}")
+                projs = a.get("projects", [])
+                if projs:
+                    pnames = ", ".join(p.get("name","") for p in projs[:4] if isinstance(p, dict))
+                    parts.append(f"Projects: {pnames}")
         if gh_done:
             p = st.session_state.github_analysis.get("profile", {})
             parts.append(f"GitHub: {p.get('public_repos')} repos, "
@@ -937,6 +1029,7 @@ def _tab_assessment():
                 parts.append(f"Top jobs: {', '.join(top3)}")
         prompt = ("Write a personalised career assessment. Warm, honest, specific — like a mentor. "
                   "Cover: where they are now, strongest assets, best opportunities, "
+                  "key projects that demonstrate their skills, "
                   "3-5 concrete next steps this month. Use markdown headers. "
                   "Don't be generic.\n\nData:\n" + "\n".join(parts))
         with st.spinner("Writing your personalised report…"):
