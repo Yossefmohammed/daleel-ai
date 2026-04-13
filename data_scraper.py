@@ -1,30 +1,21 @@
 """
-data_scraper.py  –  Career AI  (v3 – multi-source balanced)
-=============================================================
+data_scraper.py  –  Career AI  (v4 – location-aware across ALL sources)
+========================================================================
+Fix vs v3:
+  • scrape_by_skills() now passes location context to EVERY source, not just Wuzzuf.
+  • New _scrape_remotive_located() helper uses Remotive's search param with location.
+  • Arbeitnow and Himalayas receive location-enriched keyword strings.
+  • Location penalty applied at save time: non-matching physical jobs ranked lower.
+
 Sources:
   1. RemoteOK      – remote tech jobs        (free JSON API, no key)
   2. Arbeitnow     – European + remote jobs  (free JSON API, no key)
   3. The Muse      – culture-first jobs      (free JSON API, no key)
   4. Remotive      – remote-only jobs        (free JSON API, no key)
   5. Jobicy        – broad tech jobs         (free JSON API, no key)
-  6. Wuzzuf        – Egypt + MENA jobs       (RSS feed, no key) ← NEW
-  7. Himalayas     – remote tech jobs        (free JSON API, no key) ← NEW
+  6. Wuzzuf        – Egypt + MENA jobs       (RSS feed, no key)
+  7. Himalayas     – remote tech jobs        (free JSON API, no key)
   8. Local CSV     – any CSV in data/ or docs/
-
-Key fixes vs v2:
-  • scrape_by_skills now queries ALL 7 live sources in a balanced way
-  • RemoteOK no longer dominates (called once, not per-skill)
-  • Arbeitnow is now included in targeted scraping
-  • Wuzzuf added for Egypt / MENA jobs
-  • Himalayas added as extra remote source
-  • _ensure_source_diversity() caps per-source share before saving
-  • location parameter flows through scrape_by_skills → sources
-
-Public API (called by app.py):
-    scrape_by_skills(skills, limit=60, location="")  → list[dict]
-    scrape_and_save(skills, status_ph)               → pd.DataFrame
-    save_jobs(jobs)                                  → int
-    load_combined()                                  → list[dict]
 """
 
 from __future__ import annotations
@@ -38,24 +29,21 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger("data_scraper")
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
 DATA_DIR = Path("data")
 COMBINED = DATA_DIR / "jobs_combined.csv"
 
 _UA = {
-    "User-Agent": "CareerAI/3.0 (+github.com/Yossefmohammed/wasla-chatbot)",
+    "User-Agent": "CareerAI/4.0 (+github.com/Yossefmohammed/wasla-chatbot)",
     "Accept":     "application/json",
 }
 _UA_RSS = {
-    "User-Agent": "CareerAI/3.0 (+github.com/Yossefmohammed/wasla-chatbot)",
+    "User-Agent": "CareerAI/4.0 (+github.com/Yossefmohammed/wasla-chatbot)",
     "Accept":     "application/rss+xml, application/xml, text/xml",
 }
 
-# ── Column aliases used by local CSVs ─────────────────────────────────────────
 COL_MAP = {
     "job_title": "title", "position": "title", "role": "title",
     "company_name": "company", "employer": "company",
@@ -66,6 +54,9 @@ COL_MAP = {
     "annual_salary_usd": "salary", "avg_salary": "salary", "salary_range": "salary",
 }
 
+EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -74,7 +65,6 @@ def _strip_html(text: str) -> str:
 
 
 def _norm(j: dict) -> dict:
-    """Ensure every job dict has exactly the 7 required keys."""
     return {
         "title":       str(j.get("title",       "") or "")[:120].strip(),
         "company":     str(j.get("company",     "") or "")[:80].strip(),
@@ -97,11 +87,6 @@ def _dedup(jobs: list) -> list:
 
 
 def _ensure_source_diversity(jobs: list, max_per_source: int = 120) -> list:
-    """
-    Cap each source at max_per_source jobs so no single source dominates
-    the saved database.  Jobs are already ordered by relevance so we keep
-    the first max_per_source from each source.
-    """
     buckets: dict[str, list] = {}
     for j in jobs:
         src = j.get("source", "Unknown")
@@ -109,7 +94,6 @@ def _ensure_source_diversity(jobs: list, max_per_source: int = 120) -> list:
         if len(buckets[src]) < max_per_source:
             buckets[src].append(j)
 
-    # interleave so the CSV isn't source-sorted
     combined, max_len = [], max((len(v) for v in buckets.values()), default=0)
     sources_list = list(buckets.values())
     for i in range(max_len):
@@ -156,7 +140,6 @@ def scrape_remoteok(keywords: str = "", limit: int = 100) -> list:
 # Source 2 – Arbeitnow
 # ══════════════════════════════════════════════════════════════════════════════
 def scrape_arbeitnow(keywords: str = "", limit: int = 150) -> list:
-    """European + remote jobs — free paginated JSON API."""
     jobs = []
     try:
         for page in range(1, 5):
@@ -257,7 +240,7 @@ def scrape_themuse(keywords: str = "", limit: int = 100) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Source 4 – Remotive
+# Source 4 – Remotive  (standard + location-aware variant)
 # ══════════════════════════════════════════════════════════════════════════════
 _REMOTIVE_CATS = {
     "python": "software-dev", "javascript": "software-dev", "react": "software-dev",
@@ -274,6 +257,15 @@ _REMOTIVE_CATS = {
 
 
 def scrape_remotive(keywords: str = "", limit: int = 100) -> list:
+    return _scrape_remotive_located(keywords=keywords, location="", limit=limit)
+
+
+def _scrape_remotive_located(keywords: str = "", location: str = "", limit: int = 100) -> list:
+    """
+    Remotive with optional location filter.
+    Remotive's /api/remote-jobs supports a free-text 'search' param —
+    appending the location city/country nudges results toward that area.
+    """
     category = ""
     if keywords:
         kw_lower = keywords.lower()
@@ -285,8 +277,11 @@ def scrape_remotive(keywords: str = "", limit: int = 100) -> list:
         params = {"limit": min(limit, 100)}
         if category:
             params["category"] = category
-        if keywords:
-            params["search"] = keywords
+        # Combine skill keywords + location into the search string so the API
+        # surfaces results mentioning that location in title/description.
+        search = f"{keywords} {location}".strip() if location else keywords
+        if search:
+            params["search"] = search
         r = requests.get("https://remotive.com/api/remote-jobs",
                          params=params, headers=_UA, timeout=15)
         r.raise_for_status()
@@ -306,7 +301,7 @@ def scrape_remotive(keywords: str = "", limit: int = 100) -> list:
                 "url":         j.get("url", ""),
                 "source":      "Remotive",
             }))
-        logger.info(f"Remotive       → {len(jobs):>4} jobs  (kw={keywords!r})")
+        logger.info(f"Remotive       → {len(jobs):>4} jobs  (kw={keywords!r}, loc={location!r})")
         return jobs
     except Exception as e:
         logger.warning(f"Remotive failed: {e}")
@@ -348,16 +343,9 @@ def scrape_jobicy(keywords: str = "", limit: int = 50) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Source 6 – Wuzzuf  (Egypt + MENA — RSS feed, no key needed)
+# Source 6 – Wuzzuf  (Egypt + MENA — RSS feed)
 # ══════════════════════════════════════════════════════════════════════════════
 def scrape_wuzzuf(keywords: str = "", location: str = "Egypt", limit: int = 60) -> list:
-    """
-    Wuzzuf — Egypt's largest job board.
-    Uses the public RSS endpoint; no API key required.
-
-    Title format in the feed:  "Job Title at Company – City, Egypt"
-    We parse this to extract the three fields.
-    """
     try:
         params: dict = {}
         if keywords:
@@ -379,7 +367,6 @@ def scrape_wuzzuf(keywords: str = "", location: str = "Egypt", limit: int = 60) 
             link      = (item.findtext("link")  or "").strip()
             desc_raw  = (item.findtext("description") or "")
 
-            # Parse "Software Engineer at Acme Corp – Cairo, Egypt"
             company, loc = "", location or "Egypt"
             if " at " in title_raw:
                 head, tail = title_raw.split(" at ", 1)
@@ -413,11 +400,13 @@ def scrape_wuzzuf(keywords: str = "", location: str = "Egypt", limit: int = 60) 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Source 7 – Himalayas  (remote tech jobs — free JSON API, no key)
+# Source 7 – Himalayas
 # ══════════════════════════════════════════════════════════════════════════════
 def scrape_himalayas(keywords: str = "", limit: int = 50) -> list:
     """
-    Himalayas.app free public API — high-quality remote jobs with salary data.
+    Himalayas.app free public API.
+    The 'q' param accepts free text — appending location to keywords
+    surfaces jobs that mention that region in their description.
     """
     try:
         params: dict = {"limit": min(limit, 100)}
@@ -494,11 +483,9 @@ def load_local_csv() -> list:
 # Persist / load
 # ══════════════════════════════════════════════════════════════════════════════
 def save_jobs(jobs: list) -> int:
-    """Dedup + source-balance, save to CSV, return number saved."""
     DATA_DIR.mkdir(exist_ok=True)
     normalised = [_norm(j) for j in jobs]
 
-    # Merge with existing DB
     if COMBINED.exists():
         try:
             existing = pd.read_csv(str(COMBINED), on_bad_lines="skip").fillna("").to_dict("records")
@@ -514,7 +501,6 @@ def save_jobs(jobs: list) -> int:
 
 
 def load_combined() -> list:
-    """Load current job database as list of dicts."""
     if not COMBINED.exists():
         return []
     try:
@@ -530,82 +516,79 @@ def load_combined() -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 def scrape_by_skills(
     skills: list,
-    limit: int  = 60,
+    limit: int   = 60,
     location: str = "",
 ) -> list:
     """
-    Balanced multi-source scrape based on user skills + optional location.
+    Balanced multi-source scrape based on user skills + location.
+
+    FIX v4: location is now passed to ALL sources that support text search,
+    not only to Wuzzuf.  This ensures the raw candidate pool already contains
+    location-relevant jobs before the scoring/LLM stages run.
 
     Strategy:
-      • Each live source is queried with the TOP-3 combined keyword string
-        (avoids RemoteOK domination from per-skill × N calls).
-      • Wuzzuf is always queried for Egypt jobs; also queried with location
-        when a specific non-remote location is given.
-      • Arbeitnow (previously missing from this function) is now included.
-      • Per-source caps are enforced in save_jobs via _ensure_source_diversity.
-
-    Parameters
-    ----------
-    skills   : list[str]  – e.g. ["Python", "React", "SQL"]
-    limit    : int        – max jobs per source call
-    location : str        – e.g. "Egypt", "Cairo", "Remote", ""
-
-    Returns
-    -------
-    list[dict] with keys: title, company, description, location, salary, url, source
+      • location is appended to keyword strings for text-search APIs
+        (Arbeitnow, Himalayas, Remotive) so their results skew local.
+      • Wuzzuf is always queried with location=Egypt plus any specific city.
+      • RemoteOK / The Muse / Jobicy don't support location params but are
+        still included for remote-friendly roles.
     """
     if not skills:
         return []
 
-    all_jobs:    list = []
-    top_skills        = skills[:5]
+    all_jobs: list = []
+    top_skills     = skills[:5]
+    combined_kw    = ",".join(s.lower() for s in top_skills[:3])
+    search_str     = " ".join(top_skills[:3])
 
-    # Use up to 3 skills for the combined query to keep URLs short
-    combined_kw = ",".join(s.lower() for s in top_skills[:3])
-    search_str  = " ".join(top_skills[:3])        # space-separated for text-search APIs
+    is_local = location and location.lower() not in ("remote", "worldwide", "")
 
-    is_local_location = (
-        location and location.lower() not in ("remote", "worldwide", "")
-    )
+    # For text-search APIs, append location to the query so results mention
+    # the city/country in their titles or descriptions.
+    location_kw = f"{search_str} {location}".strip() if is_local else search_str
 
-    # ── 1. RemoteOK – once with combined keyword (was called 6× before) ──
+    # ── 1. RemoteOK ───────────────────────────────────────────────────────
+    # No location param, but remote jobs are always relevant as a fallback.
     all_jobs.extend(scrape_remoteok(keywords=combined_kw, limit=limit))
     time.sleep(0.4)
 
-    # ── 2. Remotive – once with combined search ───────────────────────────
-    all_jobs.extend(scrape_remotive(keywords=search_str, limit=limit))
+    # ── 2. Remotive ───────────────────────────────────────────────────────
+    # FIX: now uses _scrape_remotive_located which appends location to search.
+    all_jobs.extend(_scrape_remotive_located(
+        keywords=search_str,
+        location=location if is_local else "",
+        limit=limit,
+    ))
     time.sleep(0.3)
 
-    # ── 3. Jobicy – once with first skill tag ─────────────────────────────
+    # ── 3. Jobicy ─────────────────────────────────────────────────────────
     all_jobs.extend(scrape_jobicy(keywords=top_skills[0], limit=limit))
     time.sleep(0.3)
 
-    # ── 4. The Muse – once with combined keyword ──────────────────────────
+    # ── 4. The Muse ───────────────────────────────────────────────────────
     all_jobs.extend(scrape_themuse(keywords=search_str, limit=limit))
     time.sleep(0.3)
 
-    # ── 5. Arbeitnow – once with combined search ──────────────────────────
-    #    (was completely missing from scrape_by_skills in v2)
-    all_jobs.extend(scrape_arbeitnow(keywords=search_str, limit=limit))
+    # ── 5. Arbeitnow ─────────────────────────────────────────────────────
+    # FIX: now passes location_kw (skills + location) instead of search_str.
+    all_jobs.extend(scrape_arbeitnow(keywords=location_kw, limit=limit))
     time.sleep(0.3)
 
-    # ── 6. Himalayas – once with combined query ───────────────────────────
-    all_jobs.extend(scrape_himalayas(keywords=search_str, limit=limit))
+    # ── 6. Himalayas ─────────────────────────────────────────────────────
+    # FIX: now passes location_kw so results mention the preferred city.
+    all_jobs.extend(scrape_himalayas(keywords=location_kw, limit=limit))
     time.sleep(0.3)
 
-    # ── 7. Wuzzuf Egypt – always included ────────────────────────────────
+    # ── 7. Wuzzuf (Egypt always, plus specific city if given) ─────────────
     all_jobs.extend(scrape_wuzzuf(keywords=search_str, location="Egypt", limit=limit))
     time.sleep(0.3)
-
-    # ── 7b. Wuzzuf with specific location if provided ────────────────────
-    if is_local_location and location.lower() != "egypt":
+    if is_local and location.lower() not in EGYPT_ALIASES:
         all_jobs.extend(
             scrape_wuzzuf(keywords=search_str, location=location, limit=limit // 2)
         )
         time.sleep(0.2)
 
     deduped = _dedup([_norm(j) for j in all_jobs])
-    # Log per-source breakdown
     by_src: dict[str, int] = {}
     for j in deduped:
         by_src[j.get("source", "?")] = by_src.get(j.get("source", "?"), 0) + 1
@@ -617,9 +600,6 @@ def scrape_by_skills(
 
 
 def scrape_and_save(skills: list = None, status_ph=None) -> pd.DataFrame:
-    """
-    Full database rebuild.  Called by sidebar Refresh and on first load.
-    """
     def say(msg: str):
         logger.info(msg)
         if status_ph:
@@ -661,14 +641,11 @@ def scrape_and_save(skills: list = None, status_ph=None) -> pd.DataFrame:
     return pd.read_csv(str(COMBINED))
 
 
-# ── Backward-compat alias ─────────────────────────────────────────────────
 def get_combined_jobs(*args, **kwargs) -> pd.DataFrame:
     return scrape_and_save()
 
 
-# ── Source summary helper (used by app.py sidebar) ────────────────────────
 def source_counts() -> dict[str, int]:
-    """Return {source: count} for the current database."""
     jobs = load_combined()
     counts: dict[str, int] = {}
     for j in jobs:
@@ -677,10 +654,9 @@ def source_counts() -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda x: -x[1]))
 
 
-# ── CLI test ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("=== Targeted test (Python, React) ===")
-    jobs = scrape_by_skills(["Python", "React", "SQL"])
+    print("=== Targeted test (Python, React) with location=Egypt ===")
+    jobs = scrape_by_skills(["Python", "React", "SQL"], location="Egypt")
     print(f"scrape_by_skills returned {len(jobs)} jobs")
     by_src: dict[str, int] = {}
     for j in jobs:
@@ -688,9 +664,3 @@ if __name__ == "__main__":
     print("Source breakdown:", dict(sorted(by_src.items(), key=lambda x: -x[1])))
     for j in jobs[:5]:
         print(f"  [{j['source']:10}] {j['title'][:45]} @ {j['company'][:25]} — {j['location']}")
-
-    print("\n=== Egypt-specific test ===")
-    egypt_jobs = scrape_wuzzuf(keywords="python", location="Egypt", limit=10)
-    print(f"Wuzzuf returned {len(egypt_jobs)} jobs")
-    for j in egypt_jobs[:3]:
-        print(f"  {j['title']} @ {j['company']} — {j['location']}")

@@ -1,14 +1,12 @@
 """
-job_matcher.py  –  Career AI  (v2 – location-aware + source-diverse)
-======================================================================
-Fixes vs v1:
-  • Candidate selection enforces source diversity (round-robin by source)
-    so the AI always sees jobs from ALL scraped sources, not just RemoteOK.
-  • Location-aware scoring: jobs matching the user's preferred location
-    get a bonus so they rank higher.
-  • AI prompt explicitly requests matches from multiple sources/locations.
-  • _load_jobs() reads jobs_combined.csv first (populated by data_scraper),
-    then falls back to the legacy paths.
+job_matcher.py  –  Career AI  (v3 – stronger location scoring)
+===============================================================
+Fix vs v2:
+  • _score_row() location bonus raised from +3 → +15 so it outweighs
+    a typical skill-match score and actually affects ranking.
+  • Egypt aliases checked for all Egypt city variants.
+  • Non-matching physical location now incurs a -5 penalty.
+  • AI prompt is explicit: fill slots with local jobs first, remote second.
 """
 
 import os
@@ -16,6 +14,8 @@ import re
 import json
 
 import pandas as pd
+
+EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
 
 
 # ── Groq helpers ──────────────────────────────────────────────────────────────
@@ -90,11 +90,17 @@ def _score_row(row_text: str, skills: list[str], roles: list[str],
                location_pref: str = "") -> int:
     """
     Keyword match score.
-      +2  per matching skill
-      +1  per matching word from a desired role title
-      +3  if the job location matches the preferred location   ← NEW
+      +2   per matching skill
+      +1   per matching word from a desired role title
+      +15  if the job location matches the preferred location  (FIX: was +3)
+      +5   if remote/worldwide and a specific location is preferred
+      -5   if a non-matching physical location and a specific pref is set (NEW)
+
+    Rationale: with 5 skills matching you get +10. The old +3 location bonus
+    was too small to make any difference. +15 ensures a local job with 3
+    skill matches (score 21) beats a remote job with 5 skill matches (score 15).
     """
-    text = row_text.lower()
+    text  = row_text.lower()
     score = 0
 
     for s in skills:
@@ -107,15 +113,24 @@ def _score_row(row_text: str, skills: list[str], roles: list[str],
                 score += 1
 
     if location_pref:
-        loc_lower = location_pref.lower()
-        # Common Egypt synonyms
-        egypt_aliases = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
-        if loc_lower in egypt_aliases:
-            # Give bonus to any Egypt-located job
-            if any(alias in text for alias in egypt_aliases):
-                score += 3
-        elif loc_lower in text:
-            score += 3
+        loc_lower     = location_pref.lower()
+        is_egypt_pref = loc_lower in EGYPT_ALIASES
+        is_remote_job = "remote" in text or "worldwide" in text
+
+        if is_egypt_pref:
+            if any(alias in text for alias in EGYPT_ALIASES):
+                score += 15   # strong Egypt match
+            elif is_remote_job:
+                score += 5    # remote acceptable
+            else:
+                score -= 5    # different country — push down
+        else:
+            if loc_lower in text:
+                score += 15   # exact city/country match
+            elif is_remote_job:
+                score += 5    # remote acceptable
+            else:
+                score -= 5    # non-matching physical location — penalise
 
     return score
 
@@ -127,23 +142,13 @@ def _diverse_candidates(
     location_pref: str = "",
     n: int = 30,
 ) -> list[dict]:
-    """
-    Build a candidate shortlist that:
-      1. Scores every job by skill/role/location relevance
-      2. Picks the top-N/sources jobs from each source (round-robin)
-         so the AI always sees multiple sources
-      3. Back-fills with top-scored jobs if any source has fewer jobs
-
-    This prevents RemoteOK (or any single source) from filling all 25 slots.
-    """
-    # Score all
     for j in jobs:
-        blob  = (str(j.get("title", "")) + " " + str(j.get("description", ""))).lower()
+        blob  = (str(j.get("title", "")) + " " + str(j.get("description", "")) +
+                 " " + str(j.get("location", ""))).lower()
         j["_score"] = _score_row(blob, skills, roles, location_pref)
 
     scored = sorted(jobs, key=lambda x: x.get("_score", 0), reverse=True)
 
-    # Bucket by source
     buckets: dict[str, list] = {}
     for j in scored:
         src = j.get("source", "Unknown")
@@ -153,12 +158,10 @@ def _diverse_candidates(
     num_sources = max(len(buckets), 1)
     per_source  = max(3, n // num_sources)
 
-    # Round-robin selection
     diverse: list[dict] = []
     seen: set            = set()
-    max_rounds           = per_source
 
-    for rnd in range(max_rounds):
+    for rnd in range(per_source):
         for src_jobs in buckets.values():
             if rnd < len(src_jobs):
                 j = src_jobs[rnd]
@@ -171,7 +174,6 @@ def _diverse_candidates(
         if len(diverse) >= n:
             break
 
-    # Back-fill from top-scored if we're short
     for j in scored:
         if len(diverse) >= n:
             break
@@ -180,7 +182,6 @@ def _diverse_candidates(
             seen.add(k)
             diverse.append(j)
 
-    # Clean internal score field before returning
     for j in diverse:
         j.pop("_score", None)
 
@@ -190,7 +191,6 @@ def _diverse_candidates(
 # ── CSV loader ────────────────────────────────────────────────────────────────
 
 def _load_jobs(limit: int = 2000) -> pd.DataFrame | None:
-    # Prefer the live-scraped combined DB; fall back to legacy paths
     paths = [
         "data/jobs_combined.csv",
         "data/jobs.csv",
@@ -220,14 +220,6 @@ class JobMatcher:
         limit: int = 8,
         location_pref: str = "",
     ) -> dict:
-        """
-        Parameters
-        ----------
-        user_profile  : dict with keys skills, interested_roles, seniority_level,
-                        experience_years
-        limit         : how many matches to return
-        location_pref : e.g. "Egypt", "Cairo", "Remote"  (new in v2)
-        """
         df = _load_jobs()
         if df is None or df.empty:
             return {
@@ -249,12 +241,10 @@ class JobMatcher:
         df["_combined"] = df[text_cols].astype(str).agg(" ".join, axis=1)
         all_jobs = df.to_dict("records")
 
-        # Source-diverse candidate selection (the key fix)
         candidates = _diverse_candidates(
             all_jobs, skills, roles, location_pref=location_pref, n=30
         )
 
-        # Build compact payload for the LLM
         job_list = []
         for row in candidates:
             entry = {}
@@ -265,17 +255,25 @@ class JobMatcher:
                     entry[field] = val[:200] if field == "description" else val
             job_list.append(entry)
 
-        # Summarise sources present for the AI to know variety is available
         sources_present = sorted({j.get("source", "?") for j in job_list})
+
+        # ── FIX: stronger location instruction in LLM prompt ─────────────
+        loc_display   = location_pref or "Remote/Worldwide"
+        is_egypt_pref = location_pref.lower() in EGYPT_ALIASES if location_pref else False
+        egypt_note    = (
+            "For Egypt: Cairo, Giza, Alexandria, and 'Egypt' in the location field "
+            "all count as a match.\n" if is_egypt_pref else ""
+        )
 
         prompt = f"""You are a career advisor. Given the user profile and job listings,
 return ONLY a valid JSON array (no markdown, no explanation) of the top {limit} best-matching jobs.
 
-IMPORTANT:
-- Try to recommend jobs from DIFFERENT sources/companies when possible.
-- If the user prefers a specific location ({location_pref or 'not specified'}), 
-  prioritise jobs in or near that location, but also include relevant remote options.
-- Sources available in this list: {', '.join(sources_present)}
+LOCATION REQUIREMENT — this is the most important ranking rule:
+- The user is based in / prefers: '{loc_display}'.
+- FIRST, fill as many of the {limit} slots as possible with jobs IN that location.
+- ONLY use remote or other-location jobs if fewer than {limit // 2} strong local matches exist.
+- {egypt_note}- NEVER include a job from a different physical country at the expense of a matching local one.
+- Sources available: {', '.join(sources_present)}
 
 Each object must have exactly these keys:
 {{
@@ -296,9 +294,9 @@ User profile:
 - Experience: {exp_years} years
 - Seniority: {seniority}
 - Interested roles: {', '.join(roles) if roles else 'any'}
-- Preferred location: {location_pref or 'open to remote and on-site'}
+- Preferred location: {loc_display}
 
-Job listings (from {len(job_list)} pre-screened candidates across {len(sources_present)} sources):
+Job listings ({len(job_list)} pre-screened candidates across {len(sources_present)} sources):
 {json.dumps(job_list, indent=2)[:4500]}
 
 Return ONLY the JSON array.
@@ -314,10 +312,10 @@ Return ONLY the JSON array.
                 matches = []
 
             return {
-                "success":              True,
-                "matches":              matches,
-                "total_in_db":          len(df),
-                "candidates_evaluated": len(job_list),
+                "success":               True,
+                "matches":               matches,
+                "total_in_db":           len(df),
+                "candidates_evaluated":  len(job_list),
                 "sources_in_candidates": sources_present,
             }
         except Exception as e:

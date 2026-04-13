@@ -1,17 +1,14 @@
 """
-Career AI Assistant  –  v6
+Career AI Assistant  –  v7
 ============================
-Changes vs v5:
-  • 3-stage matching pipeline (semantic → engine → LLM):
-      Stage 0  semantic_matcher  – cosine similarity on all-MiniLM-L6-v2
-                                   embeddings → top-100 semantically relevant
-      Stage 1  matching_engine   – deterministic skill/exp/location scoring
-                                   → diverse top-30
-      Stage 2  Groq LLM          – explanation + final rank → top-8
-  • "CV" now matches "computer vision", "ML" matches "machine learning", etc.
-  • Semantic score shown on each job card
-  • Status indicator: which pipeline stages are active
-  • Graceful degradation: works even if sentence-transformers not installed
+Changes vs v6 (location fixes):
+  • _diverse_candidates(): location score raised from +3 → +15, non-matching
+    physical locations now penalised -5 so local jobs always surface above
+    irrelevant ones when a preference is set.
+  • match_jobs() LLM prompt: location instruction rewritten as a hard ranked
+    rule ("fill slots with local jobs FIRST, remote SECOND") with Egypt aliases
+    explicitly listed.  Replaces the old weak "prioritise matching location".
+  • Egypt alias set shared consistently across all location-checking code.
 """
 
 import os, re, json, html, datetime, time
@@ -24,36 +21,35 @@ load_dotenv()
 st.set_page_config(page_title="Career AI", page_icon="🎯",
                    layout="wide", initial_sidebar_state="expanded")
 
-# ── Try importing data_scraper ────────────────────────────────────────────────
 try:
     import data_scraper as _ds
     HAS_SCRAPER = True
 except ImportError:
     HAS_SCRAPER = False
 
-# ── Try importing CVAnalyzer ──────────────────────────────────────────────────
 try:
     from cv_analyzer import CVAnalyzer
     HAS_CV_ANALYZER = True
 except ImportError:
     HAS_CV_ANALYZER = False
 
-# ── Try importing matching engine ─────────────────────────────────────────────
 try:
     from matching_engine import score_and_rank
     HAS_ENGINE = True
 except ImportError:
     HAS_ENGINE = False
 
-# ── Try importing semantic matcher ────────────────────────────────────────────
 try:
     from semantic_matcher import semantic_rank
     HAS_SEMANTIC = True
 except ImportError:
     HAS_SEMANTIC = False
 
+EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# CSS  (identical to v4 — no visual changes)
+# CSS
 # ══════════════════════════════════════════════════════════════════════════════
 def _css():
     st.markdown("""
@@ -274,7 +270,7 @@ def _fallback_build(ph=None):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Diverse candidate selection  (mirrors job_matcher.py but used in app.py)
+# Diverse candidate selection
 # ══════════════════════════════════════════════════════════════════════════════
 def _diverse_candidates(
     jobs: list,
@@ -285,21 +281,49 @@ def _diverse_candidates(
 ) -> list:
     """
     Score + round-robin by source to guarantee multi-source candidate list.
+
+    FIX v7: location score is now +15 for a match (was +3), with a -5 penalty
+    for non-matching physical locations.  This ensures that with a typical
+    5-skill profile (max +10 from skills), a local job with 2 skill matches
+    (score 19) beats a remote job with 5 skill matches (score 15) — which is
+    the correct behaviour when the user has set a location preference.
     """
-    egypt_aliases = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
-    loc_lower = location_pref.lower() if location_pref else ""
+    loc_lower     = location_pref.lower() if location_pref else ""
+    is_egypt_pref = loc_lower in EGYPT_ALIASES
 
     def _score(j):
-        blob = (str(j.get("title","")) + " " + str(j.get("description","")) +
-                " " + str(j.get("location",""))).lower()
+        blob = (
+            str(j.get("title",       "")) + " " +
+            str(j.get("description", "")) + " " +
+            str(j.get("location",    ""))
+        ).lower()
+        src = str(j.get("source", "")).lower()
+
+        # Skill + role score (unchanged)
         s  = sum(2 for sk in skills if sk.lower() in blob)
         s += sum(1 for ro in roles for w in ro.lower().split()
                  if len(w) > 3 and w in blob)
+
+        # Location score — FIX: now weighted to actually dominate ranking
         if loc_lower:
-            if loc_lower in egypt_aliases and any(a in blob for a in egypt_aliases):
-                s += 3
-            elif loc_lower in blob:
-                s += 3
+            jloc       = (j.get("location", "") or "").lower()
+            is_remote  = "remote" in jloc or "worldwide" in jloc
+
+            if is_egypt_pref:
+                if any(a in jloc for a in EGYPT_ALIASES) or src == "wuzzuf":
+                    s += 15   # strong Egypt / Wuzzuf match
+                elif is_remote:
+                    s += 5    # remote acceptable
+                else:
+                    s -= 5    # non-Egypt physical location — push down
+            else:
+                if loc_lower in jloc:
+                    s += 15   # exact city/country match
+                elif is_remote:
+                    s += 5    # remote acceptable
+                else:
+                    s -= 5    # non-matching physical location — penalise
+
         return s
 
     scored = sorted(jobs, key=_score, reverse=True)
@@ -337,17 +361,6 @@ def _diverse_candidates(
 # Job matching  —  3-stage pipeline
 # ══════════════════════════════════════════════════════════════════════════════
 def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> dict:
-    """
-    3-stage pipeline:
-      Stage 0  semantic_rank()   – all-MiniLM-L6-v2 cosine similarity → top-100
-      Stage 1  score_and_rank()  – deterministic engine → diverse top-30
-      Stage 2  Groq LLM          – why_good_fit + final rank → top-8
-
-    Degrades gracefully:
-      if sentence-transformers absent → skip Stage 0
-      if matching_engine absent       → skip Stage 1
-      Groq LLM is always the final step
-    """
     all_jobs = _load_combined()
     if not all_jobs:
         return {"success": False,
@@ -357,10 +370,7 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
     roles  = [r.lower() for r in user_profile.get("interested_roles", [])]
     pipeline_stages: list[str] = []
 
-    # ── Stage 0: Semantic filtering  ──────────────────────────────────────
-    # Embeds the user profile and every job; keeps the 100 most semantically
-    # similar jobs so Stage 1 and 2 never see irrelevant candidates.
-    # "CV" matches "computer vision", "ML" matches "machine learning", etc.
+    # ── Stage 0: Semantic filtering ───────────────────────────────────────
     if HAS_SEMANTIC:
         try:
             pool = semantic_rank(
@@ -370,14 +380,11 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
             )
             pipeline_stages.append("🧠 Semantic")
         except Exception as e:
-            logger.warning(f"Semantic stage failed: {e}")
             pool = all_jobs
     else:
         pool = all_jobs
 
-    # ── Stage 1: Deterministic engine  ────────────────────────────────────
-    # Scores each candidate on skill synonyms, experience, role, seniority,
-    # and location.  Enforces source diversity (round-robin).
+    # ── Stage 1: Deterministic engine ────────────────────────────────────
     if HAS_ENGINE:
         try:
             candidates = score_and_rank(
@@ -387,7 +394,6 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
             )
             pipeline_stages.append("⚙️ Engine")
         except Exception as e:
-            logger.warning(f"Engine stage failed: {e}")
             candidates = _diverse_candidates(pool, skills, roles,
                                              location_pref=location_pref, n=30)
     else:
@@ -397,7 +403,7 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
     pipeline_stages.append("🤖 LLM")
     sources_present = sorted({j.get("source", "?") for j in candidates})
 
-    # ── Build compact payload for the LLM ─────────────────────────────────
+    # ── Build compact payload for LLM ─────────────────────────────────────
     compact = []
     for j in candidates:
         entry = {
@@ -409,7 +415,6 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
             "url":         str(j.get("url",         "")),
             "source":      str(j.get("source",      "")),
         }
-        # Pass pre-computed scores as hints to the LLM
         if "_engine_score" in j:
             entry["pre_score"]      = j["_engine_score"]
             entry["matched_skills"] = j.get("_matched_skills", [])
@@ -417,7 +422,7 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
             entry["semantic_score"] = round(j["_semantic_score"] * 100)
         compact.append(entry)
 
-    # ── Stage 2: Groq LLM  ────────────────────────────────────────────────
+    # ── Stage 2: Groq LLM ─────────────────────────────────────────────────
     pipeline_note = (
         "Candidates were pre-filtered by a semantic embedding model (all-MiniLM-L6-v2) "
         "and a deterministic scoring engine before reaching you.\n"
@@ -425,6 +430,15 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
         "'pre_score' (0-100) = deterministic skill/exp/location score.\n"
         "Use both as strong signals.\n\n"
         if pipeline_stages else ""
+    )
+
+    # FIX: explicit ranked location rule replaces the old weak "prioritise" language
+    loc_display   = location_pref or "Remote / Worldwide"
+    is_egypt_pref = location_pref.lower() in EGYPT_ALIASES if location_pref else False
+    egypt_note    = (
+        "  • For Egypt: Cairo, Giza, Alexandria, Wuzzuf-sourced jobs, and any job "
+        "with 'Egypt' in the location field all count as a local match.\n"
+        if is_egypt_pref else ""
     )
 
     client = _groq()
@@ -435,11 +449,15 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
         '"match_score":<0-100>,"matched_skills":["skill1"],"missing_skills":["skill1"],'
         '"why_good_fit":"one or two sentences"}\n\n'
         f"{pipeline_note}"
-        "RULES:\n"
-        "- Recommend jobs from DIFFERENT sources when scores are close.\n"
-        f"- Preferred location: {location_pref or 'open to remote and on-site'}. "
-        "Prioritise matching location but also include strong remote options.\n"
-        f"- Sources available: {', '.join(sources_present)}\n\n"
+        "RANKING RULES (apply in order):\n"
+        f"1. LOCATION — User is based in / prefers: '{loc_display}'.\n"
+        f"   • Fill as many of the {limit} result slots as possible with jobs IN that location.\n"
+        f"   • Only use remote or other-location jobs if fewer than {limit // 2} strong local matches exist.\n"
+        f"{egypt_note}"
+        "   • NEVER place a different-country job above a matching local job.\n"
+        "2. SKILL MATCH — among jobs in the same location tier, rank by matched_skills count.\n"
+        "3. SOURCE DIVERSITY — when scores are close, prefer different sources.\n\n"
+        f"Sources available: {', '.join(sources_present)}\n\n"
         f"User profile:\n"
         f"  Skills: {user_profile.get('skills', [])}\n"
         f"  Experience: {user_profile.get('experience_years', 0)} years\n"
@@ -455,7 +473,6 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
     if isinstance(matches, dict) and "jobs" in matches: matches = matches["jobs"]
     if not isinstance(matches, list): matches = []
 
-    # Back-fill URL from candidate list if AI dropped it
     url_map = {str(j.get("title",""))[:50].lower(): j.get("url","") for j in compact}
     for m in matches:
         if not m.get("url"):
@@ -580,6 +597,9 @@ def _chat_context() -> str:
             t = m[0]
             parts.append(f"Top job: {t.get('title','')} @ {t.get('company','')} "
                          f"({t.get('match_score','')}%) from {t.get('source','')}")
+    loc = st.session_state.get("job_location_pref", "")
+    if loc:
+        parts.append(f"Preferred location: {loc}")
     return "\n".join(parts)
 
 def _chat_reply(user_msg: str) -> str:
@@ -681,7 +701,7 @@ def _init():
         "job_matches": None, "db_checked": False,
         "skill_scrape_done": False, "_jobs_skills_shown": False,
         "chat_history": [], "last_scraped_skills": [],
-        "job_location_pref": "Egypt",        # ← new in v5
+        "job_location_pref": "Egypt",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -704,7 +724,6 @@ def _dot(col="#00d9ff"):
     return (f'<div style="width:9px;height:9px;border-radius:50%;background:{col};'
             f'margin-top:4px;flex-shrink:0"></div>')
 
-# Source → colour map for badges
 _SRC_COLOURS = {
     "RemoteOK":  "#00d9ff", "Arbeitnow": "#a78bfa", "Remotive":  "#34d399",
     "Jobicy":    "#fbbf24", "The Muse":  "#f472b6", "Wuzzuf":    "#fb923c",
@@ -732,7 +751,7 @@ def _sidebar():
             '<div><div style="font-size:14px;font-weight:800;color:#e8eeff">Career AI</div>'
             '<div style="font-size:10px;color:#00d9ff;background:rgba(0,217,255,.08);'
             'padding:2px 8px;border-radius:20px;border:1px solid rgba(0,217,255,.2);'
-            'display:inline-block;font-weight:600;margin-top:2px">v6 · 3-Stage Pipeline</div>'
+            'display:inline-block;font-weight:600;margin-top:2px">v7 · Location-Aware</div>'
             '</div></div></div>',
             unsafe_allow_html=True,
         )
@@ -746,7 +765,6 @@ def _sidebar():
         with c3: st.metric("Jobs DB",  f"🟢 {cnt:,}" if cnt          else "🔴 Empty")
         with c4: st.metric("GitHub",   "🟢"          if _gh_token()  else "⚪ Optional")
 
-        # ── Pipeline status ───────────────────────────────────────────────
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
         st.markdown('<div class="slbl">Matching Pipeline</div>', unsafe_allow_html=True)
         for stage_lbl, active, tip in [
@@ -768,7 +786,6 @@ def _sidebar():
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
         st.markdown('<div class="slbl">Job Sources</div>', unsafe_allow_html=True)
 
-        # Show live source counts if DB exists
         src_counts: dict[str, int] = {}
         if HAS_SCRAPER and COMBINED.exists():
             try:
@@ -1052,7 +1069,7 @@ def _tab_github():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Tab: Job Matcher  ← major changes in v5
+# Tab: Job Matcher
 # ══════════════════════════════════════════════════════════════════════════════
 def _tab_jobs():
     st.markdown('<div class="sh">💼 Job Matcher</div>', unsafe_allow_html=True)
@@ -1062,7 +1079,6 @@ def _tab_jobs():
         st.success("✅ Skills auto-filled from your CV — edit freely below.")
         st.session_state._jobs_skills_shown = True
 
-    # ── Row 1: skills + experience ───────────────────────────────────────
     c1, c2 = st.columns(2)
     with c1:
         sr  = st.text_area("Your Skills (one per line)",
@@ -1079,7 +1095,6 @@ def _tab_jobs():
             "Mobile Developer","Cloud Architect","QA Engineer",
         ], key="js_roles")
 
-    # ── Row 2: location preference  ← NEW in v5 ─────────────────────────
     loc_col1, loc_col2 = st.columns([2, 3])
     with loc_col1:
         loc_preset = st.selectbox(
@@ -1100,7 +1115,7 @@ def _tab_jobs():
         elif loc_preset == "Egypt 🇪🇬":
             location_pref = "Egypt"
             st.markdown('<div style="padding-top:30px;color:var(--a);font-size:12px">'
-                        '🇪🇬 Wuzzuf will be scraped — Egypt jobs prioritised in matching</div>',
+                        '🇪🇬 Wuzzuf scraped — Cairo/Giza/Alexandria all match Egypt preference</div>',
                         unsafe_allow_html=True)
         else:
             location_pref = loc_preset
@@ -1108,13 +1123,10 @@ def _tab_jobs():
                         f'Jobs near <strong>{location_pref}</strong> will be prioritised</div>',
                         unsafe_allow_html=True)
 
-    # Save to session so chat has access
     st.session_state.job_location_pref = location_pref
-
     skills = [s.strip() for s in (sr or "").split("\n") if s.strip()]
 
     if cnt > 0:
-        # Show which pipeline stages are active
         stages = []
         if HAS_SEMANTIC: stages.append("🧠 Semantic")
         if HAS_ENGINE:   stages.append("⚙️ Engine")
@@ -1152,13 +1164,12 @@ def _tab_jobs():
             ph_wrapper = _StreamlitPH()
             ph_wrapper.info(f"🎯 Scraping jobs for: {', '.join(skills[:5])}")
             if location_pref and location_pref != "Remote":
-                ph_wrapper.info(f"📍 Location filter: {location_pref}")
+                ph_wrapper.info(f"📍 Location filter applied: {location_pref}")
             try:
                 new_jobs = _ds.scrape_by_skills(
                     skills, limit=60, location=location_pref
                 )
                 if new_jobs:
-                    # Show per-source breakdown
                     by_src: dict[str, int] = {}
                     for j in new_jobs:
                         by_src[j.get("source","?")] = by_src.get(j.get("source","?"),0) + 1
@@ -1204,7 +1215,6 @@ def _tab_jobs():
     if not matches:
         st.warning("No matches found. Try broadening your skills."); return
 
-    # ── Results header with pipeline + source summary ─────────────────────
     src_pills     = "".join(_src_badge(s) for s in sources) if sources else ""
     pipeline_html = (
         '<div style="margin-top:6px;font-size:11px;color:var(--t3)">'
@@ -1224,11 +1234,10 @@ def _tab_jobs():
         unsafe_allow_html=True,
     )
 
-    # ── Job cards ─────────────────────────────────────────────────────────
     for job in matches:
         if not isinstance(job, dict): continue
         score    = int(job.get("match_score", 0)); colour = _sc(score)
-        sem_s    = job.get("semantic_score")   # int 0-100 or None
+        sem_s    = job.get("semantic_score")
         matched  = job.get("matched_skills", []);  missing = job.get("missing_skills", [])
         why      = job.get("why_good_fit", "")
         salary   = str(job.get("salary", ""))
@@ -1249,7 +1258,6 @@ def _tab_jobs():
         )
         src_b = _src_badge(source) if source else ""
 
-        # Semantic score chip (shown only when semantic stage was active)
         sem_html = ""
         if sem_s is not None:
             sem_col = _sc(sem_s)
