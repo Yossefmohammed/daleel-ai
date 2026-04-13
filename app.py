@@ -622,12 +622,14 @@ def _chat_reply(user_msg: str) -> str:
     ctx    = _chat_context()
 
     system = (
-        "You are a real human career mentor, not an assistant. "
-        "Speak naturally, casually, and directly like a real person chatting. "
-        "Do NOT assume things about the user. Ask simple, natural questions. "
-        "Keep responses short unless the user asks for details. "
-        "Avoid sounding like a script or a chatbot."
-        + (f"\n\nUser context:\n{ctx}" if ctx else "")
+    "You are a real human career mentor having a casual conversation. "
+    "Keep replies short and natural. "
+    "Ask at most ONE question per reply. "
+    "Do NOT repeat questions. "
+    "Do NOT assume personal details (like location) unless the user mentions them. "
+    "Avoid generic phrases like 'what brings you here'. "
+    "Sound like a normal person, not a chatbot."
+    + (f"\n\nUser context:\n{ctx}" if ctx else "")
     )
 
     history = st.session_state.chat_history[-12:]
