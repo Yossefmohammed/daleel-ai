@@ -1,658 +1,575 @@
 """
-data_scraper.py  –  Career AI  (v4 – location-aware across ALL sources)
-========================================================================
-Fix vs v3:
-  • scrape_by_skills() now passes location context to EVERY source, not just Wuzzuf.
-  • New _scrape_remotive_located() helper uses Remotive's search param with location.
-  • Arbeitnow and Himalayas receive location-enriched keyword strings.
-  • Location penalty applied at save time: non-matching physical jobs ranked lower.
+data_scraper.py  –  Career AI  (v3 – Real jobs, real URLs, 7 sources)
+======================================================================
+Sources scraped (all free, no API key needed):
+  1. RemoteOK      – remote tech jobs
+  2. Arbeitnow     – European + remote jobs
+  3. Remotive      – curated remote jobs
+  4. Jobicy        – remote jobs
+  5. The Muse      – US + remote jobs
+  6. Himalayas     – remote tech jobs
+  7. Wuzzuf        – Egypt jobs (Cairo, Giza, Alexandria)
 
-Sources:
-  1. RemoteOK      – remote tech jobs        (free JSON API, no key)
-  2. Arbeitnow     – European + remote jobs  (free JSON API, no key)
-  3. The Muse      – culture-first jobs      (free JSON API, no key)
-  4. Remotive      – remote-only jobs        (free JSON API, no key)
-  5. Jobicy        – broad tech jobs         (free JSON API, no key)
-  6. Wuzzuf        – Egypt + MENA jobs       (RSS feed, no key)
-  7. Himalayas     – remote tech jobs        (free JSON API, no key)
-  8. Local CSV     – any CSV in data/ or docs/
+All jobs are stored in data/jobs_combined.csv with a real, working URL.
 """
 
 from __future__ import annotations
 
-import re
 import time
-import logging
-import xml.etree.ElementTree as ET
+import datetime
+import re
 from pathlib import Path
 
 import pandas as pd
 import requests
-
-logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
-logger = logging.getLogger("data_scraper")
+from bs4 import BeautifulSoup
 
 DATA_DIR = Path("data")
 COMBINED = DATA_DIR / "jobs_combined.csv"
 
-_UA = {
-    "User-Agent": "CareerAI/4.0 (+github.com/Yossefmohammed/wasla-chatbot)",
-    "Accept":     "application/json",
-}
-_UA_RSS = {
-    "User-Agent": "CareerAI/4.0 (+github.com/Yossefmohammed/wasla-chatbot)",
-    "Accept":     "application/rss+xml, application/xml, text/xml",
-}
-
-COL_MAP = {
-    "job_title": "title", "position": "title", "role": "title",
-    "company_name": "company", "employer": "company",
-    "job_description": "description", "responsibilities": "description",
-    "required_skills": "description",
-    "job_location": "location", "city": "location",
-    "salary_in_usd": "salary", "salary_estimate": "salary",
-    "annual_salary_usd": "salary", "avg_salary": "salary", "salary_range": "salary",
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/html, */*",
 }
 
-EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
+EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-def _strip_html(text: str) -> str:
-    return re.sub(r"<[^>]+>", " ", str(text or "")).strip()
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _get(url: str, params: dict | None = None, timeout: int = 15) -> requests.Response | None:
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
+        r.raise_for_status()
+        return r
+    except Exception as e:
+        print(f"  ⚠️  GET {url} failed: {e}")
+        return None
 
 
-def _norm(j: dict) -> dict:
+def _clean(text: str) -> str:
+    """Strip HTML tags and normalise whitespace."""
+    if not text:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", str(text))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:500]
+
+
+def _job(title, company, description, location, salary, url, source) -> dict:
     return {
-        "title":       str(j.get("title",       "") or "")[:120].strip(),
-        "company":     str(j.get("company",     "") or "")[:80].strip(),
-        "description": str(j.get("description", "") or "")[:500].strip(),
-        "location":    str(j.get("location",    "") or "Remote")[:80].strip(),
-        "salary":      str(j.get("salary",      "") or "")[:60].strip(),
-        "url":         str(j.get("url",         "") or "")[:300].strip(),
-        "source":      str(j.get("source",      "Unknown")).strip(),
+        "title":       _clean(title)       or "",
+        "company":     _clean(company)     or "",
+        "description": _clean(description) or "",
+        "location":    _clean(location)    or "",
+        "salary":      _clean(salary)      or "",
+        "url":         str(url).strip()    or "",
+        "source":      source,
+        "scraped_at":  datetime.datetime.now().isoformat(timespec="seconds"),
     }
 
 
-def _dedup(jobs: list) -> list:
-    seen, unique = set(), []
-    for j in jobs:
-        k = (j.get("title", "").lower()[:40], j.get("company", "").lower()[:30])
-        if k not in seen:
-            seen.add(k)
-            unique.append(j)
-    return unique
-
-
-def _ensure_source_diversity(jobs: list, max_per_source: int = 120) -> list:
-    buckets: dict[str, list] = {}
-    for j in jobs:
-        src = j.get("source", "Unknown")
-        buckets.setdefault(src, [])
-        if len(buckets[src]) < max_per_source:
-            buckets[src].append(j)
-
-    combined, max_len = [], max((len(v) for v in buckets.values()), default=0)
-    sources_list = list(buckets.values())
-    for i in range(max_len):
-        for src_jobs in sources_list:
-            if i < len(src_jobs):
-                combined.append(src_jobs[i])
-    return combined
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# Source 1 – RemoteOK
+# Source 1 – RemoteOK  (JSON API)
 # ══════════════════════════════════════════════════════════════════════════════
-def scrape_remoteok(keywords: str = "", limit: int = 100) -> list:
+
+def scrape_remoteok(skills: list[str] | None = None, limit: int = 80) -> list[dict]:
+    """https://remoteok.com/api — returns JSON array, first item is metadata."""
+    print("  📡 RemoteOK…")
+    r = _get("https://remoteok.com/api")
+    if not r:
+        return []
     try:
-        params = {}
-        if keywords:
-            params["tags"] = keywords.lower().replace(" ", ",")
-        r = requests.get("https://remoteok.com/api", params=params,
-                         headers=_UA, timeout=15)
-        r.raise_for_status()
-        jobs = []
-        for j in r.json()[:limit]:
-            if not isinstance(j, dict) or "id" not in j:
-                continue
-            tags = j.get("tags", [])
-            desc = _strip_html(j.get("description", "")) or ", ".join(tags)
-            jobs.append(_norm({
-                "title":       j.get("position") or j.get("title", ""),
-                "company":     j.get("company", ""),
-                "description": desc[:500],
-                "location":    j.get("location", "Remote"),
-                "salary":      str(j.get("salary") or ""),
-                "url":         j.get("url", ""),
-                "source":      "RemoteOK",
-            }))
-        logger.info(f"RemoteOK       → {len(jobs):>4} jobs  (kw={keywords!r})")
-        return jobs
-    except Exception as e:
-        logger.warning(f"RemoteOK failed: {e}")
+        data = r.json()
+    except Exception:
         return []
 
+    jobs = []
+    for item in data[1:]:  # skip metadata object
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        tags = " ".join(item.get("tags", []))
+        if skills:
+            blob = (item.get("position", "") + " " + tags + " " + item.get("description", "")).lower()
+            if not any(s.lower() in blob for s in skills):
+                continue
+        jobs.append(_job(
+            title=item.get("position", ""),
+            company=item.get("company", ""),
+            description=item.get("description", "")[:400],
+            location=item.get("location", "Remote"),
+            salary=item.get("salary", ""),
+            url=item.get("url", f"https://remoteok.com/remote-jobs/{item.get('slug', '')}"),
+            source="RemoteOK",
+        ))
+        if len(jobs) >= limit:
+            break
+
+    print(f"     ✅ {len(jobs)} jobs")
+    return jobs
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Source 2 – Arbeitnow
+# Source 2 – Arbeitnow  (JSON API)
 # ══════════════════════════════════════════════════════════════════════════════
-def scrape_arbeitnow(keywords: str = "", limit: int = 150) -> list:
+
+def scrape_arbeitnow(skills: list[str] | None = None, limit: int = 80) -> list[dict]:
+    """https://arbeitnow.com/api/job-board-api"""
+    print("  📡 Arbeitnow…")
     jobs = []
-    try:
-        for page in range(1, 5):
-            params: dict = {"page": page}
-            if keywords:
-                params["search"] = keywords
-            r = requests.get(
-                "https://www.arbeitnow.com/api/job-board-api",
-                params=params, headers=_UA, timeout=15)
-            r.raise_for_status()
+    page = 1
+    while len(jobs) < limit:
+        r = _get("https://arbeitnow.com/api/job-board-api", params={"page": page})
+        if not r:
+            break
+        try:
             data = r.json().get("data", [])
-            if not data:
-                break
-            for j in data:
-                jobs.append(_norm({
-                    "title":       j.get("title", ""),
-                    "company":     j.get("company_name", ""),
-                    "description": _strip_html(j.get("description", ""))[:500],
-                    "location":    j.get("location", ""),
-                    "salary":      "",
-                    "url":         j.get("url", ""),
-                    "source":      "Arbeitnow",
-                }))
+        except Exception:
+            break
+        if not data:
+            break
+        for item in data:
+            blob = (item.get("title", "") + " " + " ".join(item.get("tags", []))).lower()
+            if skills and not any(s.lower() in blob for s in skills):
+                continue
+            jobs.append(_job(
+                title=item.get("title", ""),
+                company=item.get("company_name", ""),
+                description=item.get("description", "")[:400],
+                location=item.get("location", "Remote"),
+                salary="",
+                url=item.get("url", ""),
+                source="Arbeitnow",
+            ))
             if len(jobs) >= limit:
                 break
-            time.sleep(0.3)
-        logger.info(f"Arbeitnow      → {len(jobs):>4} jobs  (kw={keywords!r})")
-        return jobs[:limit]
-    except Exception as e:
-        logger.warning(f"Arbeitnow failed: {e}")
+        page += 1
+        if page > 5:
+            break
+        time.sleep(0.3)
+
+    print(f"     ✅ {len(jobs)} jobs")
+    return jobs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Source 3 – Remotive  (JSON API)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scrape_remotive(skills: list[str] | None = None, limit: int = 80) -> list[dict]:
+    """https://remotive.com/api/remote-jobs"""
+    print("  📡 Remotive…")
+    params = {}
+    if skills:
+        params["search"] = " ".join(skills[:3])
+    r = _get("https://remotive.com/api/remote-jobs", params=params)
+    if not r:
         return []
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Source 3 – The Muse
-# ══════════════════════════════════════════════════════════════════════════════
-_MUSE_CATEGORIES = {
-    "python": "Engineering", "javascript": "Engineering", "js": "Engineering",
-    "react": "Engineering",  "vue": "Engineering",         "node": "Engineering",
-    "java": "Engineering",   "kotlin": "Engineering",      "swift": "Engineering",
-    "php": "Engineering",    "ruby": "Engineering",         "go": "Engineering",
-    "rust": "Engineering",   "c++": "Engineering",          "scala": "Engineering",
-    "data": "Data Science",  "ml": "Data Science",          "ai": "Data Science",
-    "machine learning": "Data Science",                      "nlp": "Data Science",
-    "design": "Design & UX", "figma": "Design & UX",        "ux": "Design & UX",
-    "product": "Product",    "devops": "DevOps",             "cloud": "DevOps",
-    "aws": "DevOps",         "docker": "DevOps",             "kubernetes": "DevOps",
-    "mobile": "Engineering", "android": "Engineering",       "ios": "Engineering",
-    "marketing": "Marketing & PR", "sales": "Sales",
-}
-
-
-def scrape_themuse(keywords: str = "", limit: int = 100) -> list:
-    category = "Engineering"
-    if keywords:
-        kw_lower = keywords.lower()
-        for kw, cat in _MUSE_CATEGORIES.items():
-            if kw in kw_lower:
-                category = cat
-                break
-
-    jobs, page = [], 1
     try:
-        while len(jobs) < limit:
-            r = requests.get(
-                "https://www.themuse.com/api/public/jobs",
-                params={"category": category, "page": page, "descending": "true"},
-                headers=_UA, timeout=15)
-            r.raise_for_status()
-            payload = r.json()
-            items = payload.get("results", [])
-            if not items:
-                break
-            for item in items:
-                locs   = item.get("locations", [])
-                loc    = ", ".join(l.get("name", "") for l in locs) or "Remote"
-                levels = item.get("levels", [])
-                lvl    = ", ".join(l.get("name", "") for l in levels)
-                desc   = _strip_html(item.get("contents", ""))
-                jobs.append(_norm({
-                    "title":       item.get("name", ""),
-                    "company":     item.get("company", {}).get("name", ""),
-                    "description": (f"[{lvl}] " if lvl else "") + desc[:490],
-                    "location":    loc,
-                    "salary":      "",
-                    "url":         item.get("refs", {}).get("landing_page", ""),
-                    "source":      "The Muse",
-                }))
-            if page >= payload.get("page_count", 1) or len(jobs) >= limit:
-                break
-            page += 1
-            time.sleep(0.3)
-    except Exception as e:
-        logger.warning(f"The Muse failed: {e}")
+        data = r.json().get("jobs", [])
+    except Exception:
+        return []
 
-    logger.info(f"The Muse       → {len(jobs):>4} jobs  (cat={category!r})")
-    return jobs[:limit]
+    jobs = []
+    for item in data[:limit]:
+        jobs.append(_job(
+            title=item.get("title", ""),
+            company=item.get("company_name", ""),
+            description=_clean(item.get("description", ""))[:400],
+            location=item.get("candidate_required_location", "Remote"),
+            salary=item.get("salary", ""),
+            url=item.get("url", ""),
+            source="Remotive",
+        ))
+
+    print(f"     ✅ {len(jobs)} jobs")
+    return jobs
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Source 4 – Remotive  (standard + location-aware variant)
+# Source 4 – Jobicy  (JSON API)
 # ══════════════════════════════════════════════════════════════════════════════
-_REMOTIVE_CATS = {
-    "python": "software-dev", "javascript": "software-dev", "react": "software-dev",
-    "java": "software-dev",   "php": "software-dev",         "ruby": "software-dev",
-    "go": "software-dev",     "node": "software-dev",         "typescript": "software-dev",
-    "data": "data",           "ml": "data",                   "machine learning": "data",
-    "ai": "data",             "analyst": "data",
-    "devops": "devops-sysadmin", "aws": "devops-sysadmin",   "docker": "devops-sysadmin",
-    "design": "design",       "ux": "design",                 "figma": "design",
-    "product": "product",     "marketing": "marketing",       "sales": "sales",
-    "mobile": "mobile-dev",   "android": "mobile-dev",        "ios": "mobile-dev",
-    "qa": "qa",               "testing": "qa",
-}
 
-
-def scrape_remotive(keywords: str = "", limit: int = 100) -> list:
-    return _scrape_remotive_located(keywords=keywords, location="", limit=limit)
-
-
-def _scrape_remotive_located(keywords: str = "", location: str = "", limit: int = 100) -> list:
-    """
-    Remotive with optional location filter.
-    Remotive's /api/remote-jobs supports a free-text 'search' param —
-    appending the location city/country nudges results toward that area.
-    """
-    category = ""
-    if keywords:
-        kw_lower = keywords.lower()
-        for kw, cat in _REMOTIVE_CATS.items():
-            if kw in kw_lower:
-                category = cat
-                break
+def scrape_jobicy(skills: list[str] | None = None, limit: int = 60) -> list[dict]:
+    """https://jobicy.com/api/v2/remote-jobs"""
+    print("  📡 Jobicy…")
+    params = {"count": min(limit, 50), "geo": "worldwide", "industry": "tech"}
+    if skills:
+        params["tag"] = skills[0].lower()
+    r = _get("https://jobicy.com/api/v2/remote-jobs", params=params)
+    if not r:
+        return []
     try:
-        params = {"limit": min(limit, 100)}
-        if category:
-            params["category"] = category
-        search = f"{keywords} {location}".strip() if location else keywords
-        if search:
-            params["search"] = search
-        r = requests.get("https://remotive.com/api/remote-jobs",
-                         params=params, headers=_UA, timeout=15)
-        r.raise_for_status()
-        items = r.json().get("jobs", [])
-        jobs = []
-        for j in items[:limit]:
-            tags = ", ".join(j.get("tags", []))
-            desc = _strip_html(j.get("description", ""))
-            if tags:
-                desc = f"Skills: {tags}. {desc}"
-            jobs.append(_norm({
-                "title":       j.get("title", ""),
-                "company":     j.get("company_name", ""),
-                "description": desc[:500],
-                "location":    j.get("candidate_required_location", "Remote"),
-                "salary":      j.get("salary", ""),
-                "url":         j.get("url", ""),
-                "source":      "Remotive",
-            }))
-        logger.info(f"Remotive       → {len(jobs):>4} jobs  (kw={keywords!r}, loc={location!r})")
-        return jobs
-    except Exception as e:
-        logger.warning(f"Remotive failed: {e}")
+        data = r.json().get("jobs", [])
+    except Exception:
         return []
 
+    jobs = []
+    for item in data[:limit]:
+        jobs.append(_job(
+            title=item.get("jobTitle", ""),
+            company=item.get("companyName", ""),
+            description=_clean(item.get("jobDescription", ""))[:400],
+            location=item.get("jobGeo", "Remote"),
+            salary=item.get("annualSalaryMin", "") and
+                   f"${item['annualSalaryMin']:,}–${item.get('annualSalaryMax', item['annualSalaryMin']):,}",
+            url=item.get("url", ""),
+            source="Jobicy",
+        ))
+
+    print(f"     ✅ {len(jobs)} jobs")
+    return jobs
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Source 5 – Jobicy
+# Source 5 – The Muse  (JSON API)
 # ══════════════════════════════════════════════════════════════════════════════
-def scrape_jobicy(keywords: str = "", limit: int = 50) -> list:
+
+def scrape_themuse(skills: list[str] | None = None, limit: int = 60) -> list[dict]:
+    """https://www.themuse.com/api/public/jobs"""
+    print("  📡 The Muse…")
+    params = {"page": 1, "descending": "true"}
+    if skills:
+        params["category"] = "Software Engineer"  # broad category
+    r = _get("https://www.themuse.com/api/public/jobs", params=params)
+    if not r:
+        return []
     try:
-        params = {"count": min(limit, 50), "geo": "worldwide"}
-        if keywords:
-            params["tag"] = keywords.split(",")[0].strip().lower()
-        r = requests.get("https://jobicy.com/api/v2/remote-jobs",
-                         params=params, headers=_UA, timeout=15)
-        r.raise_for_status()
-        items = r.json().get("jobs", [])
-        jobs = []
-        for j in items:
-            desc = _strip_html(j.get("jobDescription", ""))
-            lo = j.get("annualSalaryMin", "")
-            hi = j.get("annualSalaryMax", "")
-            salary = f"${lo}–${hi}" if (lo and hi) else (f"${lo or hi}" if (lo or hi) else "")
-            jobs.append(_norm({
-                "title":       j.get("jobTitle", ""),
-                "company":     j.get("companyName", ""),
-                "description": desc[:500],
-                "location":    j.get("jobGeo", "Remote"),
-                "salary":      salary,
-                "url":         j.get("url", ""),
-                "source":      "Jobicy",
-            }))
-        logger.info(f"Jobicy         → {len(jobs):>4} jobs  (kw={keywords!r})")
-        return jobs
-    except Exception as e:
-        logger.warning(f"Jobicy failed: {e}")
+        data = r.json().get("results", [])
+    except Exception:
         return []
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Source 6 – Wuzzuf  (Egypt + MENA — RSS feed)
-# ══════════════════════════════════════════════════════════════════════════════
-def scrape_wuzzuf(keywords: str = "", location: str = "Egypt", limit: int = 60) -> list:
-    try:
-        params: dict = {}
-        if keywords:
-            params["q"] = keywords
-        if location and location.lower() not in ("remote", "worldwide", ""):
-            params["l"] = location
-
-        r = requests.get(
-            "https://wuzzuf.net/search/jobs/rss",
-            params=params, headers=_UA_RSS, timeout=18,
-        )
-        r.raise_for_status()
-
-        root = ET.fromstring(r.content)
-        jobs = []
-
-        for item in root.findall(".//item")[:limit]:
-            title_raw = (item.findtext("title") or "").strip()
-            link      = (item.findtext("link")  or "").strip()
-            desc_raw  = (item.findtext("description") or "")
-
-            company, loc = "", location or "Egypt"
-            if " at " in title_raw:
-                head, tail = title_raw.split(" at ", 1)
-                title_raw  = head.strip()
-                if " – " in tail:
-                    company, loc = [p.strip() for p in tail.split(" – ", 1)]
-                elif " - " in tail:
-                    company, loc = [p.strip() for p in tail.split(" - ", 1)]
-                else:
-                    company = tail.strip()
-
-            jobs.append(_norm({
-                "title":       title_raw,
-                "company":     company,
-                "description": _strip_html(desc_raw)[:500],
-                "location":    loc,
-                "salary":      "",
-                "url":         link,
-                "source":      "Wuzzuf",
-            }))
-
-        logger.info(f"Wuzzuf         → {len(jobs):>4} jobs  (kw={keywords!r}, loc={location!r})")
-        return jobs
-
-    except ET.ParseError as e:
-        logger.warning(f"Wuzzuf RSS parse error: {e}")
-        return []
-    except Exception as e:
-        logger.warning(f"Wuzzuf failed: {e}")
-        return []
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Source 7 – Himalayas
-# ══════════════════════════════════════════════════════════════════════════════
-def scrape_himalayas(keywords: str = "", limit: int = 50) -> list:
-    """
-    Himalayas.app free public API.
-    The 'q' param accepts free text — appending location to keywords
-    surfaces jobs that mention that region in their description.
-    """
-    try:
-        params: dict = {"limit": min(limit, 100)}
-        if keywords:
-            params["q"] = keywords
-        r = requests.get(
-            "https://himalayas.app/jobs/api",
-            params=params, headers=_UA, timeout=15,
-        )
-        r.raise_for_status()
-        items = r.json().get("jobs", [])
-        jobs = []
-        for j in items[:limit]:
-            salary = ""
-            lo = j.get("salaryMin", "")
-            hi = j.get("salaryMax", "")
-            cur = j.get("salaryCurrency", "USD")
-            if lo or hi:
-                salary = f"{cur} {lo}–{hi}" if (lo and hi) else f"{cur} {lo or hi}"
-
-            reqs = j.get("requirements", [])
-            desc = _strip_html(j.get("description", ""))
-            if reqs:
-                desc = "Requirements: " + "; ".join(reqs[:5]) + ". " + desc
-
-            jobs.append(_norm({
-                "title":       j.get("title", ""),
-                "company":     j.get("companyName", ""),
-                "description": desc[:500],
-                "location":    j.get("locationRestrictions") or j.get("location", "Remote"),
-                "salary":      salary,
-                "url":         j.get("applicationLink", "") or j.get("url", ""),
-                "source":      "Himalayas",
-            }))
-        logger.info(f"Himalayas      → {len(jobs):>4} jobs  (kw={keywords!r})")
-        return jobs
-    except Exception as e:
-        logger.warning(f"Himalayas failed: {e}")
-        return []
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Source 8 – Local CSV
-# ══════════════════════════════════════════════════════════════════════════════
-def load_local_csv() -> list:
-    candidates = [DATA_DIR / "jobs.csv"]
-    if Path("docs").exists():
-        candidates += list(Path("docs").glob("*.csv"))
-
-    for p in candidates:
-        if not p.exists():
+    jobs = []
+    for item in data[:limit]:
+        # Location: list of location dicts
+        locs = item.get("locations", [])
+        loc_str = ", ".join(l.get("name", "") for l in locs) if locs else "Remote"
+        # URL
+        ref_url = item.get("refs", {}).get("landing_page", "")
+        if not ref_url:
+            ref_url = f"https://www.themuse.com/jobs/{item.get('id', '')}"
+        blob = item.get("name", "") + " " + _clean(item.get("contents", ""))
+        if skills and not any(s.lower() in blob.lower() for s in skills):
             continue
-        try:
-            df = pd.read_csv(str(p), on_bad_lines="skip", nrows=2000)
-            df.columns = [c.lower().strip() for c in df.columns]
-            df = df.rename(columns={k: v for k, v in COL_MAP.items()
-                                     if k in df.columns and v not in df.columns})
-            df = df.fillna("")
-            for col in ["title", "company", "description", "location", "salary"]:
-                if col not in df.columns:
-                    df[col] = ""
-            df["source"] = "Local CSV"
-            df["url"]    = ""
-            records = df[["title", "company", "description", "location",
-                           "salary", "url", "source"]].to_dict("records")
-            logger.info(f"Local CSV      → {len(records):>4} jobs  ({p.name})")
-            return [_norm(r) for r in records]
-        except Exception as e:
-            logger.warning(f"Local CSV {p}: {e}")
-    return []
+        jobs.append(_job(
+            title=item.get("name", ""),
+            company=item.get("company", {}).get("name", ""),
+            description=_clean(item.get("contents", ""))[:400],
+            location=loc_str,
+            salary="",
+            url=ref_url,
+            source="The Muse",
+        ))
+        if len(jobs) >= limit:
+            break
+
+    print(f"     ✅ {len(jobs)} jobs")
+    return jobs
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Persist / load
+# Source 6 – Himalayas  (JSON API)
 # ══════════════════════════════════════════════════════════════════════════════
-def save_jobs(jobs: list) -> int:
-    DATA_DIR.mkdir(exist_ok=True)
-    normalised = [_norm(j) for j in jobs]
 
-    if COMBINED.exists():
-        try:
-            existing = pd.read_csv(str(COMBINED), on_bad_lines="skip").fillna("").to_dict("records")
-            normalised = existing + normalised
-        except Exception:
-            pass
+def scrape_himalayas(skills: list[str] | None = None, limit: int = 60) -> list[dict]:
+    """https://himalayas.app/jobs/api"""
+    print("  📡 Himalayas…")
+    params = {"limit": min(limit, 100)}
+    if skills:
+        params["q"] = " ".join(skills[:3])
+    r = _get("https://himalayas.app/jobs/api", params=params)
+    if not r:
+        return []
+    try:
+        data = r.json().get("jobs", [])
+    except Exception:
+        return []
 
-    deduped   = _dedup(normalised)
-    balanced  = _ensure_source_diversity(deduped, max_per_source=150)
-    pd.DataFrame(balanced).to_csv(str(COMBINED), index=False)
-    logger.info(f"Saved {len(balanced):,} unique jobs → {COMBINED}")
-    return len(balanced)
+    jobs = []
+    for item in data[:limit]:
+        jobs.append(_job(
+            title=item.get("title", ""),
+            company=item.get("companyName", ""),
+            description=_clean(item.get("description", ""))[:400],
+            location=item.get("locationRestrictions", ["Remote"])[0]
+                     if item.get("locationRestrictions") else "Remote",
+            salary=item.get("salary", ""),
+            url=item.get("applicationLink", item.get("url", "")),
+            source="Himalayas",
+        ))
+
+    print(f"     ✅ {len(jobs)} jobs")
+    return jobs
 
 
-def load_combined() -> list:
+# ══════════════════════════════════════════════════════════════════════════════
+# Source 7 – Wuzzuf  (HTML scraper — Egypt jobs)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scrape_wuzzuf(skills: list[str] | None = None, limit: int = 60) -> list[dict]:
+    """
+    Scrapes https://wuzzuf.net/search/jobs/ for Egypt-based jobs.
+    Uses BeautifulSoup to parse the HTML listing page.
+    """
+    print("  📡 Wuzzuf (Egypt)…")
+    query = " ".join(skills[:3]) if skills else "software developer"
+    params = {"q": query, "a[]=Egypt--Egypt", "start": 0}
+    url = "https://wuzzuf.net/search/jobs/"
+
+    r = _get(url, params=params)
+    if not r:
+        return []
+
+    soup = BeautifulSoup(r.text, "lxml")
+    cards = soup.select("div.css-pkv5jc")  # job card container
+
+    if not cards:
+        # fallback selector
+        cards = soup.select("article") or soup.select("[data-id]")
+
+    jobs = []
+    for card in cards[:limit]:
+        # Title + link
+        title_el = card.select_one("h2 a, h3 a, a.css-o171kl, a[data-tag='job-title']")
+        title    = title_el.get_text(strip=True) if title_el else ""
+        href     = title_el.get("href", "") if title_el else ""
+        if href and not href.startswith("http"):
+            href = "https://wuzzuf.net" + href
+
+        # Company
+        comp_el = card.select_one("a.css-17s97q8, a[data-tag='company-name'], span.css-1f89vj5")
+        company = comp_el.get_text(strip=True) if comp_el else ""
+
+        # Location
+        loc_el = card.select_one("span.css-5wys0k, [data-tag='job-location']")
+        location = loc_el.get_text(strip=True) if loc_el else "Egypt"
+        if not location:
+            location = "Egypt"
+
+        # Description / tags
+        tags_els = card.select("a.css-o171kl span, span.css-1ve4b75")
+        desc = " · ".join(t.get_text(strip=True) for t in tags_els) if tags_els else ""
+
+        if not title or not href:
+            continue
+
+        jobs.append(_job(
+            title=title,
+            company=company,
+            description=desc,
+            location=location,
+            salary="",
+            url=href,
+            source="Wuzzuf",
+        ))
+
+    # If CSS selectors changed, try JSON-LD embedded in the page
+    if not jobs:
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                import json
+                data = json.loads(script.string)
+                if isinstance(data, list):
+                    items = data
+                elif data.get("@type") == "ItemList":
+                    items = data.get("itemListElement", [])
+                else:
+                    items = [data]
+                for item in items:
+                    job = item.get("item", item)
+                    if job.get("@type") != "JobPosting":
+                        continue
+                    org  = job.get("hiringOrganization", {})
+                    loc  = job.get("jobLocation", {})
+                    addr = loc.get("address", {}) if isinstance(loc, dict) else {}
+                    city = addr.get("addressLocality", "Egypt") if isinstance(addr, dict) else "Egypt"
+                    jobs.append(_job(
+                        title=job.get("title", ""),
+                        company=org.get("name", "") if isinstance(org, dict) else "",
+                        description=_clean(job.get("description", ""))[:400],
+                        location=city,
+                        salary="",
+                        url=job.get("url", "https://wuzzuf.net"),
+                        source="Wuzzuf",
+                    ))
+            except Exception:
+                continue
+
+    print(f"     ✅ {len(jobs)} jobs from Wuzzuf Egypt")
+    return jobs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Database helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_combined() -> list[dict]:
+    """Load all saved jobs as a list of dicts."""
     if not COMBINED.exists():
         return []
     try:
-        df = pd.read_csv(str(COMBINED), on_bad_lines="skip", nrows=5000)
+        df = pd.read_csv(str(COMBINED), on_bad_lines="skip", nrows=8000)
         return df.fillna("").to_dict("records")
     except Exception as e:
-        logger.warning(f"load_combined failed: {e}")
+        print(f"load_combined error: {e}")
         return []
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PUBLIC API
-# ══════════════════════════════════════════════════════════════════════════════
-def scrape_by_skills(
-    skills: list,
-    limit: int   = 60,
-    location: str = "",
-) -> list:
-    """
-    Balanced multi-source scrape based on user skills + location.
-
-    location is now passed to ALL sources that support text search,
-    not only to Wuzzuf.  This ensures the raw candidate pool already contains
-    location-relevant jobs before the scoring/LLM stages run.
-
-    Strategy:
-      • location is appended to keyword strings for text-search APIs
-        (Arbeitnow, Himalayas, Remotive) so their results skew local.
-      • Wuzzuf is always queried with location=Egypt plus any specific city.
-      • RemoteOK / The Muse / Jobicy don't support location params but are
-        still included for remote-friendly roles.
-    """
-    if not skills:
-        return []
-
-    all_jobs: list = []
-    top_skills     = skills[:5]
-    combined_kw    = ",".join(s.lower() for s in top_skills[:3])
-    search_str     = " ".join(top_skills[:3])
-
-    is_local = location and location.lower() not in ("remote", "worldwide", "")
-
-    location_kw = f"{search_str} {location}".strip() if is_local else search_str
-
-    # ── 1. RemoteOK ───────────────────────────────────────────────────────
-    all_jobs.extend(scrape_remoteok(keywords=combined_kw, limit=limit))
-    time.sleep(0.4)
-
-    # ── 2. Remotive ───────────────────────────────────────────────────────
-    all_jobs.extend(_scrape_remotive_located(
-        keywords=search_str,
-        location=location if is_local else "",
-        limit=limit,
-    ))
-    time.sleep(0.3)
-
-    # ── 3. Jobicy ─────────────────────────────────────────────────────────
-    all_jobs.extend(scrape_jobicy(keywords=top_skills[0], limit=limit))
-    time.sleep(0.3)
-
-    # ── 4. The Muse ───────────────────────────────────────────────────────
-    all_jobs.extend(scrape_themuse(keywords=search_str, limit=limit))
-    time.sleep(0.3)
-
-    # ── 5. Arbeitnow ─────────────────────────────────────────────────────
-    all_jobs.extend(scrape_arbeitnow(keywords=location_kw, limit=limit))
-    time.sleep(0.3)
-
-    # ── 6. Himalayas ─────────────────────────────────────────────────────
-    all_jobs.extend(scrape_himalayas(keywords=location_kw, limit=limit))
-    time.sleep(0.3)
-
-    # ── 7. Wuzzuf (Egypt always, plus specific city if given) ─────────────
-    all_jobs.extend(scrape_wuzzuf(keywords=search_str, location="Egypt", limit=limit))
-    time.sleep(0.3)
-    if is_local and location.lower() not in EGYPT_ALIASES:
-        all_jobs.extend(
-            scrape_wuzzuf(keywords=search_str, location=location, limit=limit // 2)
-        )
-        time.sleep(0.2)
-
-    deduped = _dedup([_norm(j) for j in all_jobs])
-    by_src: dict[str, int] = {}
-    for j in deduped:
-        by_src[j.get("source", "?")] = by_src.get(j.get("source", "?"), 0) + 1
-    logger.info(
-        f"scrape_by_skills → {len(deduped)} unique jobs | "
-        + " | ".join(f"{s}:{n}" for s, n in sorted(by_src.items()))
-    )
-    return deduped
-
-
-def scrape_and_save(skills: list = None, status_ph=None) -> pd.DataFrame:
-    def say(msg: str):
-        logger.info(msg)
-        if status_ph:
-            status_ph.info(msg)
-
-    all_jobs: list = []
-
-    if skills:
-        say(f"🎯 Targeted scrape for: {', '.join(skills[:5])}")
-        all_jobs.extend(scrape_by_skills(skills))
-
-    say("📡 RemoteOK general…")
-    all_jobs.extend(scrape_remoteok(limit=150))
-
-    say("📡 Arbeitnow…")
-    all_jobs.extend(scrape_arbeitnow(limit=150))
-
-    say("📡 Remotive general…")
-    all_jobs.extend(scrape_remotive(limit=100))
-
-    say("📡 Jobicy general…")
-    all_jobs.extend(scrape_jobicy(limit=50))
-
-    say("📡 The Muse…")
-    all_jobs.extend(scrape_themuse(limit=100))
-
-    say("📡 Himalayas…")
-    all_jobs.extend(scrape_himalayas(limit=80))
-
-    say("🌍 Wuzzuf (Egypt)…")
-    all_jobs.extend(scrape_wuzzuf(limit=100))
-
-    say("📂 Local CSV…")
-    all_jobs.extend(load_local_csv())
-
-    say("🔧 Balancing sources and saving…")
-    n = save_jobs(all_jobs)
-    say(f"✅ Done — {n:,} unique jobs in database.")
-    return pd.read_csv(str(COMBINED))
-
-
-def get_combined_jobs(*args, **kwargs) -> pd.DataFrame:
-    return scrape_and_save()
 
 
 def source_counts() -> dict[str, int]:
-    jobs = load_combined()
-    counts: dict[str, int] = {}
-    for j in jobs:
-        src = j.get("source", "Unknown")
-        counts[src] = counts.get(src, 0) + 1
-    return dict(sorted(counts.items(), key=lambda x: -x[1]))
+    """Return {source: count} from the saved CSV."""
+    if not COMBINED.exists():
+        return {}
+    try:
+        df = pd.read_csv(str(COMBINED), usecols=["source"], on_bad_lines="skip")
+        return df["source"].value_counts().to_dict()
+    except Exception:
+        return {}
 
 
+def save_jobs(new_jobs: list[dict]) -> int:
+    """
+    Merge new_jobs into jobs_combined.csv.
+    Deduplicates on (title_lower, company_lower).
+    Returns total job count after save.
+    """
+    DATA_DIR.mkdir(exist_ok=True)
+
+    existing: list[dict] = load_combined()
+
+    seen: set[tuple] = set()
+    merged: list[dict] = []
+
+    for j in existing:
+        k = (str(j.get("title", ""))[:40].lower(), str(j.get("company", ""))[:30].lower())
+        if k not in seen:
+            seen.add(k)
+            merged.append(j)
+
+    added = 0
+    for j in new_jobs:
+        k = (str(j.get("title", ""))[:40].lower(), str(j.get("company", ""))[:30].lower())
+        if k not in seen:
+            seen.add(k)
+            merged.append(j)
+            added += 1
+
+    df = pd.DataFrame(merged)
+    df.to_csv(str(COMBINED), index=False)
+    print(f"  💾 Saved: {added} new + {len(existing)} existing = {len(merged)} total jobs")
+    return len(merged)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# scrape_by_skills — used by app.py "Find My Best Jobs" button
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scrape_by_skills(
+    skills: list[str],
+    limit: int = 60,
+    location: str = "",
+) -> list[dict]:
+    """
+    Scrape fresh jobs matching the given skills.
+    If location is Egypt / Cairo / etc, always include Wuzzuf results.
+    Returns combined list (not yet saved — caller decides when to save).
+    """
+    loc_lower     = location.lower() if location else ""
+    is_egypt_pref = loc_lower in EGYPT_ALIASES or loc_lower == "egypt"
+
+    per_source = max(limit // 6, 10)
+    all_jobs: list[dict] = []
+
+    scrapers = [
+        scrape_remoteok,
+        scrape_arbeitnow,
+        scrape_remotive,
+        scrape_jobicy,
+        scrape_themuse,
+        scrape_himalayas,
+    ]
+
+    for fn in scrapers:
+        try:
+            jobs = fn(skills=skills, limit=per_source)
+            all_jobs.extend(jobs)
+        except Exception as e:
+            print(f"  ⚠️  {fn.__name__} error: {e}")
+        time.sleep(0.5)
+
+    # Always scrape Wuzzuf when Egypt preferred, or if no location pref
+    if is_egypt_pref or not loc_lower:
+        try:
+            wuzzuf_jobs = scrape_wuzzuf(skills=skills, limit=per_source)
+            all_jobs.extend(wuzzuf_jobs)
+        except Exception as e:
+            print(f"  ⚠️  scrape_wuzzuf error: {e}")
+
+    return all_jobs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# scrape_and_save — used by sidebar "Refresh Job Database" button
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scrape_and_save(
+    skills: list[str] | None = None,
+    status_ph=None,
+    limit_per_source: int = 80,
+) -> int:
+    """
+    Full scrape of all sources → save to CSV.
+    status_ph: optional Streamlit placeholder for live progress messages.
+    """
+    def say(msg: str):
+        print(msg)
+        if status_ph:
+            try:
+                status_ph.info(msg)
+            except Exception:
+                pass
+
+    say("🔄 Starting full job database refresh…")
+    all_jobs: list[dict] = []
+
+    scraper_fns = [
+        ("RemoteOK",  scrape_remoteok),
+        ("Arbeitnow", scrape_arbeitnow),
+        ("Remotive",  scrape_remotive),
+        ("Jobicy",    scrape_jobicy),
+        ("The Muse",  scrape_themuse),
+        ("Himalayas", scrape_himalayas),
+        ("Wuzzuf 🇪🇬", scrape_wuzzuf),
+    ]
+
+    for name, fn in scraper_fns:
+        say(f"📡 Scraping {name}…")
+        try:
+            jobs = fn(skills=skills, limit=limit_per_source)
+            all_jobs.extend(jobs)
+            say(f"  ✅ {name}: {len(jobs)} jobs")
+        except Exception as e:
+            say(f"  ⚠️ {name} failed: {e}")
+        time.sleep(0.8)
+
+    total = save_jobs(all_jobs)
+    say(f"✅ Done! {total:,} total jobs in database.")
+    return total
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLI test
+# ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    print("=== Targeted test (Python, React) with location=Egypt ===")
-    jobs = scrape_by_skills(["Python", "React", "SQL"], location="Egypt")
-    print(f"scrape_by_skills returned {len(jobs)} jobs")
-    by_src: dict[str, int] = {}
-    for j in jobs:
-        by_src[j["source"]] = by_src.get(j["source"], 0) + 1
-    print("Source breakdown:", dict(sorted(by_src.items(), key=lambda x: -x[1])))
+    print("=== data_scraper smoke test ===")
+    jobs = scrape_by_skills(["Python", "FastAPI", "React"], limit=30, location="Egypt")
+    print(f"\nTotal scraped: {len(jobs)}")
     for j in jobs[:5]:
-        print(f"  [{j['source']:10}] {j['title'][:45]} @ {j['company'][:25]} — {j['location']} — {j['url'][:60]}")
+        print(f"  [{j['source']:10}] {j['title'][:40]:<40} | {j['location']:<20} | {j['url'][:60]}")
+    n = save_jobs(jobs)
+    print(f"\nSaved. Total in DB: {n}")

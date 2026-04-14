@@ -43,3 +43,4 @@ numpy>=1.26.0
 # Knowledge Graph
 # ==============================
 networkx>=3.3
+lxml>=5.0.0
