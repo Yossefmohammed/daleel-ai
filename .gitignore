@@ -32,4 +32,7 @@ Thumbs.db
 
 # Chat logs (optional to exclude)
 # chat_history.csv
-# feedback.csv
+# feedback.csvchat_history.csv
+feedback.csv
+db/
+temp_*.pdf
