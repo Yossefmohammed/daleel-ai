@@ -319,7 +319,7 @@ def scrape_wuzzuf(skills: list[str] | None = None, limit: int = 60) -> list[dict
     """
     print("  📡 Wuzzuf (Egypt)…")
     query = " ".join(skills[:3]) if skills else "software developer"
-    params = {"q": query, "a[]=Egypt--Egypt", "start": 0}
+    params = {"q": query, "a[]": "Egypt--Egypt", "start": 0}
     url = "https://wuzzuf.net/search/jobs/"
 
     r = _get(url, params=params)
