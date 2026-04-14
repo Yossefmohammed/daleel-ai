@@ -101,9 +101,9 @@ GITHUB_TOKEN=ghp_your_token_here
 
 Download one of these datasets and place it in `data/jobs.csv`:
 
-| Dataset | Rows | Best For |
-|---------|------|----------|
-| [AI Jobs Market 2025-2026 | Salaries](https://www.kaggle.com/datasets/alitaqishah/ai-jobs-market-2025-2026-salaries)
+| Dataset |
+|---------|
+| [AI Jobs Market 2025-2026 Salaries](https://www.kaggle.com/datasets/alitaqishah/ai-jobs-market-2025-2026-salaries)
 | [Tech Jobs, Salaries, and Skills Dataset](https://www.kaggle.com/datasets/mjawad17/tech-jobs-salaries-and-skills-dataset) 
 | [LinkedIn Profiles and Jobs Dataset](https://www.kaggle.com/datasets/muqaddasejaz/linkedin-profiles-and-jobs-dataset)
 
