@@ -8,6 +8,7 @@ python-dotenv>=1.0.0
 
 # LLM
 groq>=0.9.0
+httpx>=0.27.0          # groq SDK dependency (pinned here to avoid conflicts)
 
 # ==============================
 # RAG & Embeddings
@@ -36,7 +37,7 @@ lxml>=5.0.0
 # Data Processing
 # ==============================
 pandas>=2.1.0
-numpy>=1.26.0   # ✅ added correctly here
+numpy>=1.26.0
 
 # ==============================
 # Knowledge Graph
