@@ -591,45 +591,82 @@ def analyze_github(username: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 def _chat_context() -> str:
     parts = []
+
+    # Full CV data
     if st.session_state.cv_analysis:
         a = st.session_state.cv_analysis.get("analysis", {})
         if isinstance(a, dict):
-            parts.append(f"CV: {a.get('seniority_level','?')}, "
-                         f"{a.get('experience_years','?')} yrs, "
-                         f"skills: {', '.join(a.get('skills',[])[:10])}, "
-                         f"summary: {a.get('summary','')}")
+            parts.append(f"CV Summary: {a.get('summary', '')}")
+            parts.append(f"Seniority: {a.get('seniority_level', '?')}, "
+                         f"Experience: {a.get('experience_years', '?')} years")
+            parts.append(f"Skills: {', '.join(a.get('skills', []))}")
+            parts.append(f"Technologies: {', '.join(a.get('technologies', []))}")
+            parts.append(f"Strengths: {', '.join(a.get('strengths', []))}")
+            parts.append(f"Areas to improve: {', '.join(a.get('improvement_areas', []))}")
+
+            # Work experience
+            exp = a.get("experience", [])
+            if exp:
+                exp_lines = [f"{e.get('title')} at {e.get('company')} ({e.get('duration','')})"
+                             for e in exp[:4] if isinstance(e, dict)]
+                parts.append(f"Work history: {' | '.join(exp_lines)}")
+
+            # Projects
             projs = a.get("projects", [])
             if projs:
-                pnames = ", ".join(p.get("name","") for p in projs[:4] if isinstance(p, dict))
-                parts.append(f"Projects: {pnames}")
+                proj_lines = [f"{p.get('name')}: {p.get('description','')[:80]}"
+                              for p in projs[:5] if isinstance(p, dict)]
+                parts.append(f"Projects: {' | '.join(proj_lines)}")
+
+            # Education
+            edu = a.get("education", [])
+            if edu:
+                edu_lines = [f"{e.get('degree')} in {e.get('field')} from {e.get('school')}"
+                             for e in edu[:2] if isinstance(e, dict)]
+                parts.append(f"Education: {' | '.join(edu_lines)}")
+
+    # Full GitHub data
     if st.session_state.github_analysis:
-        p = st.session_state.github_analysis.get("profile", {})
-        parts.append(f"GitHub: {p.get('public_repos',0)} repos, "
-                     f"top langs: {', '.join(list(p.get('languages',{}).keys())[:5])}")
+        p   = st.session_state.github_analysis.get("profile", {})
+        ana = st.session_state.github_analysis.get("analysis", {})
+        parts.append(f"GitHub: {p.get('public_repos', 0)} repos, "
+                     f"followers: {p.get('followers', 0)}, "
+                     f"languages: {', '.join(list(p.get('languages', {}).keys()))}")
+        if isinstance(ana, dict):
+            parts.append(f"GitHub score: {ana.get('profile_score', '?')}/100")
+            parts.append(f"GitHub recommendations: {', '.join(ana.get('recommendations', []))}")
+
+    # ALL job matches
     if st.session_state.job_matches:
-        m = st.session_state.job_matches.get("matches", [])
-        if m and isinstance(m[0], dict):
-            t = m[0]
-            parts.append(f"Top job: {t.get('title','')} @ {t.get('company','')} "
-                         f"({t.get('match_score','')}%) from {t.get('source','')}")
+        matches = st.session_state.job_matches.get("matches", [])
+        if matches:
+            job_lines = [
+                f"{j.get('title')} at {j.get('company')} "
+                f"({j.get('match_score')}% match, {j.get('location','')}) "
+                f"[{j.get('source','')}] - missing: {', '.join(j.get('missing_skills',[]))}"
+                for j in matches if isinstance(j, dict)
+            ]
+            parts.append(f"All {len(matches)} job matches:\n" + "\n".join(job_lines))
+
+    # Location
     loc = st.session_state.get("job_location_pref", "")
     if loc:
-        parts.append(f"Preferred location: {loc}")
-    return "\n".join(parts)
+        parts.append(f"User's preferred job location: {loc}")
 
+    return "\n".join(parts)
 def _chat_reply(user_msg: str) -> str:
     client = _groq()
     ctx    = _chat_context()
 
     system = (
-    "You are a real human career mentor having a casual conversation. "
-    "Keep replies short and natural. "
-    "Ask at most ONE question per reply. "
-    "Do NOT repeat questions. "
-    "Do NOT assume personal details (like location) unless the user mentions them. "
-    "Avoid generic phrases like 'what brings you here'. "
-    "Sound like a normal person, not a chatbot."
-    + (f"\n\nUser context:\n{ctx}" if ctx else "")
+        "You are a real human career mentor having a casual conversation. "
+        "Keep replies short and natural. "
+        "Ask at most ONE question per reply. "
+        "Use the user context below to give specific, personalised advice — "
+        "reference their actual skills, projects, and job matches by name. "
+        "Sound like a normal person, not a chatbot."
+        + (f"\n\nWhat you know about this user:\n{ctx}" if ctx else
+        "\n\nNo user data yet — encourage them to use the CV or Job tabs first.")
     )
 
     history = st.session_state.chat_history[-12:]
