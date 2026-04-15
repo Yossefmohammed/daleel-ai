@@ -55,14 +55,14 @@ def _css():
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
-    --n:#0c0e1a;--n2:#13162a;--n3:#1a1e36;--n4:#222640;--n5:#2c3050;
-    --L:rgba(255,255,255,.08);--L2:rgba(255,255,255,.12);
-    --t1:#f4f3ff;--t2:#b0aed4;--t3:#5a577a;
-    --c:#6c63ff;--cd:rgba(108,99,255,.2);--cb:rgba(108,99,255,.3);
-    --g:#2ecc71;--a:#f0c040;--r:#e05c5c;
-    --ff:'Plus Jakarta Sans',system-ui,sans-serif;
-    --fm:'JetBrains Mono',monospace;
-    --R:14px;--Rs:9px;
+  --n:#080c18;--n2:#0d1326;--n3:#111829;--n4:#172035;--n5:#1e2d47;
+  --L:rgba(255,255,255,.06);--L2:rgba(255,255,255,.10);
+  --t1:#e8eeff;--t2:#7a8ab0;--t3:#3d4a6a;
+  --c:#00d9ff;--cd:rgba(0,217,255,.08);--cb:rgba(0,217,255,.20);
+  --g:#34d399;--a:#fbbf24;--r:#f87171;
+  --ff:'Plus Jakarta Sans',system-ui,sans-serif;
+  --fm:'JetBrains Mono',monospace;
+  --R:14px;--Rs:9px;
 }
 *,*::before,*::after{box-sizing:border-box}
 html,body,[data-testid="stApp"],[data-testid="stAppViewContainer"],.main{
