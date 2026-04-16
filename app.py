@@ -1236,6 +1236,7 @@ def _sidebar():
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
         # ── Database controls ────────────────────────────────────────────
+        # ── Database controls ────────────────────────────────────────────
         st.markdown('<div class="slbl">Database</div>', unsafe_allow_html=True)
         if COMBINED.exists():
             age_h = (datetime.datetime.now() -
@@ -1243,6 +1244,7 @@ def _sidebar():
                     ).total_seconds() / 3600
             st.caption(f"Cache: {age_h:.0f}h old · refreshes every {CACHE_HOURS}h")
 
+        # Existing refresh button (scrapes with skills from CV if available)
         if st.button("🔄 Refresh Job Database", key="sb_ref", use_container_width=True):
             ph     = st.empty()
             skills = []
@@ -1257,6 +1259,22 @@ def _sidebar():
                     ph.success(f"✅ {n:,} jobs loaded")
             except Exception as e:
                 ph.error(f"❌ {e}")
+
+        # 🆕 NEW: Dedicated Spider button – runs full scrape on all sources
+        if st.button("🕷️ Run Full Spider (All Sources)", key="sb_spider", use_container_width=True):
+            ph = st.empty()
+            try:
+                if HAS_SCRAPER:
+                    # Pass skills=None to scrape everything (no filtering)
+                    _ds.scrape_and_save(skills=None, status_ph=ph)
+                    ph.success("✅ Full spider completed. Job database updated from all sources.")
+                else:
+                    n = _fallback_build(ph)
+                    ph.success(f"✅ Fallback spider loaded {n} jobs from RemoteOK.")
+            except Exception as e:
+                ph.error(f"❌ Spider error: {e}")
+            time.sleep(2)
+            ph.empty()
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
