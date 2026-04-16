@@ -1,15 +1,10 @@
 """
-job_matcher.py  –  Career AI  (v4 – real URL verification + stronger location scoring)
-========================================================================================
-Changes vs v3:
-  • URL cross-reference: after the LLM returns matches, every URL is replaced
-    with the verified real URL from the database (prevents hallucinated links).
-  • Empty or non-http URLs are wiped to empty string instead of shown broken.
-  • location_pref now forwarded cleanly from match_jobs caller.
-  • _score_row() location bonus stays at +15 (from v3 fix).
-  • Egypt aliases checked for all Egypt city variants.
-  • Non-matching physical location incurs -5 penalty.
-  • AI prompt explicit: fill slots with local jobs first, remote second.
+job_matcher.py  –  Career AI  (v5 – synonym-aware LLM prompts)
+================================================================
+Fixes:
+  - LLM now knows skill aliases (imported from matching_engine)
+  - Prompt instructs to treat "NLP" = "Natural Language Processing"
+  - explain_gap() no longer falsely reports missing synonyms
 """
 
 import os
@@ -18,10 +13,17 @@ import json
 
 import pandas as pd
 
+# Import the alias dictionary from your fixed matching engine
+try:
+    from matching_engine import SKILL_ALIASES
+except ImportError:
+    # Fallback if import fails (should not happen)
+    SKILL_ALIASES = {}
+
 EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
 
 
-# ── Groq helpers ──────────────────────────────────────────────────────────────
+# ── Groq helpers (unchanged) ──────────────────────────────────────────────
 
 def _groq_client():
     from groq import Groq
@@ -62,7 +64,7 @@ def _parse_json(text: str):
     return []
 
 
-# ── CSV column normaliser ─────────────────────────────────────────────────────
+# ── CSV column normaliser (unchanged) ─────────────────────────────────────
 
 _COL_MAP = {
     "job_title": "title",        "title": "title",
@@ -87,7 +89,7 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=rename)
 
 
-# ── Scoring helpers ───────────────────────────────────────────────────────────
+# ── Scoring helpers (unchanged) ───────────────────────────────────────────
 
 def _score_row(row_text: str, skills: list[str], roles: list[str],
                location_pref: str = "") -> int:
@@ -187,7 +189,7 @@ def _diverse_candidates(
     return diverse[:n]
 
 
-# ── CSV loader ────────────────────────────────────────────────────────────────
+# ── CSV loader (unchanged) ────────────────────────────────────────────────
 
 def _load_jobs(limit: int = 2000) -> pd.DataFrame | None:
     paths = [
@@ -207,7 +209,28 @@ def _load_jobs(limit: int = 2000) -> pd.DataFrame | None:
     return None
 
 
-# ── Main class ────────────────────────────────────────────────────────────────
+# ── Helper to build synonym prompt text ────────────────────────────────────
+
+def _build_synonym_instruction() -> str:
+    """Return a human-readable instruction about skill synonyms."""
+    if not SKILL_ALIASES:
+        return ""
+    # Show a few examples to keep prompt short
+    examples = []
+    for canonical, aliases in list(SKILL_ALIASES.items())[:10]:
+        if len(aliases) > 1:
+            examples.append(f'"{canonical}" (also known as {", ".join(aliases[:3])})')
+    if not examples:
+        return ""
+    return (
+        "IMPORTANT – Skill synonyms: The following skills are considered IDENTICAL for matching:\n"
+        + "\n".join(f"  • {ex}" for ex in examples) +
+        "\nFor example, if the user has 'NLP' and the job asks for 'Natural Language Processing', it's a perfect match.\n"
+        "Do NOT mark a skill as 'missing' if the user has a synonym.\n"
+    )
+
+
+# ── Main class (fixed prompts) ────────────────────────────────────────────
 
 class JobMatcher:
     def __init__(self):
@@ -255,8 +278,7 @@ class JobMatcher:
                     entry[field] = val[:200] if field == "description" else val
             job_list.append(entry)
 
-        # ── Build a URL lookup from real database records ─────────────────
-        # key: (title_lower[:40], company_lower[:30]) → verified URL
+        # Build URL lookup
         url_lookup: dict[tuple, str] = {}
         for row in candidates:
             real_url = str(row.get("url", "")).strip()
@@ -276,8 +298,13 @@ class JobMatcher:
             "all count as a match.\n" if is_egypt_pref else ""
         )
 
+        # Build synonym instruction
+        synonym_instruction = _build_synonym_instruction()
+
         prompt = f"""You are a career advisor. Given the user profile and job listings,
 return ONLY a valid JSON array (no markdown, no explanation) of the top {limit} best-matching jobs.
+
+{synonym_instruction}
 
 LOCATION REQUIREMENT — this is the most important ranking rule:
 - The user is based in / prefers: '{loc_display}'.
@@ -325,9 +352,7 @@ Return ONLY the JSON array.
             if not isinstance(matches, list):
                 matches = []
 
-            # ── Replace hallucinated / missing URLs with real DB URLs ──────
-            # This is the key fix: even if the LLM copies a URL correctly,
-            # we cross-reference against our own lookup to ensure it is real.
+            # Replace hallucinated / missing URLs
             for m in matches:
                 key = (
                     str(m.get("title", ""))[:40].lower(),
@@ -335,10 +360,8 @@ Return ONLY the JSON array.
                 )
                 real_url = url_lookup.get(key, "")
                 if real_url:
-                    # Verified URL from database — always prefer this
                     m["url"] = real_url
                 elif not str(m.get("url", "")).startswith("http"):
-                    # LLM returned something invalid — wipe it
                     m["url"] = ""
 
             return {
@@ -352,16 +375,27 @@ Return ONLY the JSON array.
             return {"success": False, "error": str(e)}
 
     def explain_gap(self, user_skills: list, job: dict) -> dict:
-        prompt = f"""You are a career advisor. Analyse the skill gap.
+        """Fixed to understand skill synonyms."""
+        # Build synonym instruction again
+        synonym_instruction = _build_synonym_instruction()
+
+        prompt = f"""You are a career advisor. Analyse the skill gap between the user and the job.
+
+{synonym_instruction}
 
 User skills: {', '.join(user_skills)}
 
-Target job: {json.dumps(job)}
+Target job: {json.dumps(job, indent=2)}
 
-Return ONLY a valid JSON object:
+IMPORTANT RULES:
+- If the user has a skill that is a synonym of a job requirement, consider it MATCHED, not missing.
+- For example, "NLP" equals "Natural Language Processing", "JS" equals "JavaScript".
+- Only list a skill as "missing_skills" if the user has no equivalent skill.
+
+Return ONLY a valid JSON object with these exact keys:
 {{
-  "matching_skills": ["..."],
-  "missing_skills": ["..."],
+  "matching_skills": ["list of user skills that match job requirements (including synonyms)"],
+  "missing_skills": ["only skills truly absent from user's skill set"],
   "learning_path": ["step 1", "step 2"],
   "time_to_readiness": "e.g. 3 months",
   "resources": ["course or resource 1", "resource 2"]
