@@ -1166,14 +1166,11 @@ def _sidebar():
     </div>
   </div>
   <div class="dal-ornament" style="margin-top:14px;margin-bottom:0"></div>
-  <div style="display:flex;align-items:center;justify-content:space-between;
-    margin-top:8px">
-    <span style="font-size:10px;color:var(--t3);letter-spacing:.06em;
-      text-transform:uppercase">v1.0 · URL Verified</span>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px">
+    <span style="font-size:10px;color:var(--t3);letter-spacing:.06em;text-transform:uppercase">
+      v1.0 · URL Verified</span>
     <span style="font-size:9px;background:var(--goldd);border:1px solid var(--goldb);
-      color:var(--gold);padding:2px 9px;border-radius:10px;font-weight:700">
-      دليل
-    </span>
+      color:var(--gold);padding:2px 9px;border-radius:10px;font-weight:700">دليل</span>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -1182,12 +1179,127 @@ def _sidebar():
         # ── Status metrics ───────────────────────────────────────────────
         st.markdown('<div class="slbl">System Status</div>', unsafe_allow_html=True)
         c1, c2 = st.columns(2)
-        with c1: st.metric("Groq AI",  "🟢 Ready" if _key()       else "🔴 Missing")
-        with c2: st.metric("Scraper",  "🟢 Ready" if HAS_SCRAPER  else "⚪ Basic")
-        cnt = len(_load_combined())
+        with c1: st.metric("Groq AI",  "🟢 Ready" if _key()      else "🔴 Missing")
+        with c2: st.metric("Scraper",  "🟢 Ready" if HAS_SCRAPER else "⚪ Basic")
+        all_jobs = _load_combined()
+        cnt = len(all_jobs)
         c3, c4 = st.columns(2)
-        with c3: st.metric("Jobs DB",  f"🟢 {cnt:,}" if cnt       else "🔴 Empty")
-        with c4: st.metric("GitHub",   "🟢" if _gh_token()        else "⚪ Optional")
+        with c3: st.metric("Jobs DB",  f"🟢 {cnt:,}" if cnt      else "🔴 Empty")
+        with c4: st.metric("GitHub",   "🟢" if _gh_token()       else "⚪ Optional")
+
+        st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
+
+        # ══════════════════════════════════════════════════════════════
+        # ── DATABASE CONTROLS (prominent, at the top) ─────────────────
+        # ══════════════════════════════════════════════════════════════
+        st.markdown('<div class="slbl">🗄️ Database Controls</div>', unsafe_allow_html=True)
+
+        if COMBINED.exists():
+            age_h = (datetime.datetime.now() -
+                     datetime.datetime.fromtimestamp(COMBINED.stat().st_mtime)
+                    ).total_seconds() / 3600
+            freshness_col = "var(--grn)" if age_h < 6 else "var(--gold)" if age_h < 24 else "var(--red)"
+            st.markdown(
+                f'<div style="font-size:11px;color:{freshness_col};margin-bottom:8px">'
+                f'⏱ Cache: {age_h:.0f}h old · auto-refresh every {CACHE_HOURS}h</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="font-size:11px;color:var(--red);margin-bottom:8px">'
+                '⚠️ No database found — run spider below</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Button 1: Refresh with CV skills
+        if st.button("🔄 Refresh (Smart — uses your skills)", key="sb_ref", use_container_width=True):
+            ph = st.empty()
+            skills = []
+            if st.session_state.cv_analysis:
+                a = st.session_state.cv_analysis.get("analysis", {})
+                if isinstance(a, dict):
+                    skills = a.get("skills", [])
+            try:
+                if HAS_SCRAPER:
+                    _ds.scrape_and_save(skills=skills or None, status_ph=ph)
+                else:
+                    n = _fallback_build(ph)
+                    ph.success(f"✅ {n:,} jobs loaded")
+            except Exception as e:
+                ph.error(f"❌ {e}")
+
+        # Button 2: Full spider — ALL sources, no filter
+        if st.button("🕷️ Full Spider — ALL Sources", key="sb_spider", use_container_width=True):
+            ph = st.empty()
+            ph.info("🕷️ Running full spider across all sources…")
+            try:
+                if HAS_SCRAPER:
+                    _ds.scrape_and_save(skills=None, status_ph=ph)
+                    ph.success("✅ Full spider done! Database updated from all sources.")
+                else:
+                    n = _fallback_build(ph)
+                    ph.success(f"✅ Loaded {n:,} jobs from RemoteOK.")
+            except Exception as e:
+                ph.error(f"❌ Spider error: {e}")
+            time.sleep(2)
+            ph.empty()
+            st.rerun()
+
+        st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
+
+        # ── DATABASE VIEWER ──────────────────────────────────────────────
+        st.markdown('<div class="slbl">📊 Database Viewer</div>', unsafe_allow_html=True)
+
+        if not all_jobs:
+            st.markdown(
+                '<div style="font-size:12px;color:var(--red);padding:8px 0">'
+                '❌ Database is empty. Click <strong>Full Spider</strong> above to populate it.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            # Jobs by source breakdown
+            src_counts = {}
+            for j in all_jobs:
+                src = j.get("source", "Unknown")
+                src_counts[src] = src_counts.get(src, 0) + 1
+
+            st.markdown(
+                f'<div style="font-size:12px;color:var(--grn);font-weight:700;margin-bottom:6px">'
+                f'✅ {cnt:,} jobs loaded from {len(src_counts)} sources</div>',
+                unsafe_allow_html=True,
+            )
+
+            for src, n in sorted(src_counts.items(), key=lambda x: -x[1]):
+                col = _SRC_COLOURS.get(src, "#7A8AB0")
+                pct = int((n / cnt) * 100)
+                st.markdown(
+                    f'<div style="margin-bottom:5px">'
+                    f'<div style="display:flex;justify-content:space-between;'
+                    f'font-size:11px;color:var(--t2);margin-bottom:2px">'
+                    f'<span style="color:{col};font-weight:600">{src}</span>'
+                    f'<span style="color:var(--gold);font-weight:700">{n:,}</span></div>'
+                    f'<div style="background:var(--bg4);border-radius:3px;height:4px">'
+                    f'<div style="height:4px;border-radius:3px;width:{pct}%;'
+                    f'background:{col}"></div></div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Sample jobs preview
+            with st.expander("👁 Preview sample jobs"):
+                for j in all_jobs[:5]:
+                    title   = str(j.get("title",   "—"))[:35]
+                    company = str(j.get("company", "—"))[:25]
+                    loc     = str(j.get("location","—"))[:20]
+                    src     = str(j.get("source",  "—"))
+                    src_col = _SRC_COLOURS.get(src, "#7A8AB0")
+                    st.markdown(
+                        f'<div style="padding:6px 0;border-bottom:1px solid var(--bdr)">'
+                        f'<div style="font-size:12px;font-weight:600;color:var(--t1)">{title}</div>'
+                        f'<div style="font-size:10px;color:var(--t2)">{company} · {loc}</div>'
+                        f'<span style="font-size:9px;color:{src_col}">{src}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
@@ -1206,81 +1318,34 @@ def _sidebar():
                    f'margin-bottom:2px">{tip}</div>' if not active else ""),
                 unsafe_allow_html=True,
             )
-        if not _key(): st.error("GROQ_API_KEY missing.\nAdd to .env or secrets.toml.")
+        if not _key():
+            st.error("GROQ_API_KEY missing.\nAdd to .env or secrets.toml.")
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
         # ── Job sources ──────────────────────────────────────────────────
         st.markdown('<div class="slbl">Job Sources</div>', unsafe_allow_html=True)
-        src_counts = {}
-        if HAS_SCRAPER and COMBINED.exists():
-            try: src_counts = _ds.source_counts()
-            except Exception: pass
-
         sources_cfg = [
-            ("RemoteOK",  True),  ("Arbeitnow", True), ("Remotive", True),
-            ("Jobicy",    True),  ("The Muse",  True), ("Himalayas",True),
+            ("RemoteOK",  True), ("Arbeitnow", True), ("Remotive", True),
+            ("Jobicy",    True), ("The Muse",  True), ("Himalayas", True),
             ("Wuzzuf 🇪🇬", True), ("Local CSV", (DATA_DIR/"jobs.csv").exists()),
         ]
         for src, status in sources_cfg:
-            dot   = "🟢" if status else "⚪"
-            count = src_counts.get(src, src_counts.get(src.replace(" 🇪🇬",""),0))
-            cnt_s = (f' <span style="color:var(--gold);font-weight:700">({count})</span>'
-                     if count else "")
+            dot = "🟢" if status else "⚪"
             st.markdown(
-                f'<div style="font-size:12px;color:var(--t2);padding:2px 0">'
-                f'{dot} {src}{cnt_s}</div>',
+                f'<div style="font-size:12px;color:var(--t2);padding:2px 0">{dot} {src}</div>',
                 unsafe_allow_html=True,
             )
-
-        st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
-
-        # ── Database controls ────────────────────────────────────────────
-        st.markdown('<div class="slbl">Database</div>', unsafe_allow_html=True)
-        if COMBINED.exists():
-            age_h = (datetime.datetime.now() -
-                     datetime.datetime.fromtimestamp(COMBINED.stat().st_mtime)
-                    ).total_seconds() / 3600
-            st.caption(f"Cache: {age_h:.0f}h old · refreshes every {CACHE_HOURS}h")
-
-        if st.button("🔄 Refresh Job Database", key="sb_ref", use_container_width=True):
-            ph     = st.empty()
-            skills = []
-            if st.session_state.cv_analysis:
-                a = st.session_state.cv_analysis.get("analysis",{})
-                if isinstance(a,dict): skills = a.get("skills",[])
-            try:
-                if HAS_SCRAPER:
-                    _ds.scrape_and_save(skills=skills or None, status_ph=ph)
-                else:
-                    n = _fallback_build(ph)
-                    ph.success(f"✅ {n:,} jobs loaded")
-            except Exception as e:
-                ph.error(f"❌ {e}")
-
-        if st.button("🕷️ Run Full Spider (All Sources)", key="sb_spider", use_container_width=True):
-            ph = st.empty()
-            try:
-                if HAS_SCRAPER:
-                    _ds.scrape_and_save(skills=None, status_ph=ph)
-                    ph.success("✅ Full spider completed. Job database updated from all sources.")
-                else:
-                    n = _fallback_build(ph)
-                    ph.success(f"✅ Fallback spider loaded {n} jobs from RemoteOK.")
-            except Exception as e:
-                ph.error(f"❌ Spider error: {e}")
-            time.sleep(2)
-            ph.empty()
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
         # ── Progress ─────────────────────────────────────────────────────
         st.markdown('<div class="slbl">Your Progress</div>', unsafe_allow_html=True)
         for lbl, done in [
-            ("📄 CV analyzed",    st.session_state.cv_analysis   is not None),
-            ("🐙 GitHub analyzed",st.session_state.github_analysis is not None),
-            ("💼 Jobs matched",   st.session_state.job_matches   is not None),
-            ("💬 Chat active",    len(st.session_state.chat_history) > 0),
+            ("📄 CV analyzed",     st.session_state.cv_analysis      is not None),
+            ("🐙 GitHub analyzed", st.session_state.github_analysis  is not None),
+            ("💼 Jobs matched",    st.session_state.job_matches      is not None),
+            ("💬 Chat active",     len(st.session_state.chat_history) > 0),
         ]:
             col = "var(--grn)" if done else "var(--t3)"
             st.markdown(
@@ -1294,7 +1359,8 @@ def _sidebar():
                       "skill_scrape_done","_jobs_skills_shown",
                       "chat_history","last_scraped_skills"]:
                 st.session_state[k] = [] if k in ("chat_history","last_scraped_skills") else None
-            if "js_skills_v3" in st.session_state: del st.session_state["js_skills_v3"]
+            if "js_skills_v3" in st.session_state:
+                del st.session_state["js_skills_v3"]
             st.rerun()
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
@@ -1305,9 +1371,9 @@ def _sidebar():
                 "📥 Download Report",
                 data=json.dumps({
                     "generated_at": datetime.datetime.now().isoformat(),
-                    "cv": st.session_state.cv_analysis,
+                    "cv":     st.session_state.cv_analysis,
                     "github": st.session_state.github_analysis,
-                    "jobs": st.session_state.job_matches,
+                    "jobs":   st.session_state.job_matches,
                 }, indent=2, default=str),
                 file_name=f"daleel_report_{datetime.date.today()}.json",
                 mime="application/json",
