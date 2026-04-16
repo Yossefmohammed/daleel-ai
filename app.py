@@ -573,21 +573,14 @@ def _llm(client, msgs, max_tokens=900):
     Tries models from best quality → fastest, all on the same API key.
     """
     GROQ_MODELS = [
-        # ── Tier 1: Production (stable, best quality) ──────────────────
-        "llama-3.3-70b-versatile",                      # your current primary ✅
+        # Tier 1: Production (stable, best quality)
+        "llama-3.3-70b-versatile",                     # your current primary
+        "deepseek-r1-distill-llama-70b",               # great for reasoning
+        "qwen-qwen2-5-72b",                            # high-quality alternative
 
-        # ── Tier 2: Preview (newer, cutting-edge) ──────────────────────
-        "meta-llama/llama-4-maverick-17b-128e-instruct",# Llama 4 — great reasoning
-        "moonshotai/kimi-k2-instruct-0905",             # 256K ctx, excellent at JSON
-        "qwen/qwen-3-32b",                              # strong instruction following
-
-        # ── Tier 3: GPT-OSS on Groq (OpenAI open weights) ──────────────
-        "openai/gpt-oss-20b",                           # fast + good quality
-        "openai/gpt-oss-120b",                          # largest — slowest fallback
-
-        # ── Tier 4: Small fast models (replaces deprecated gemma2-9b-it) ─
-        "llama-3.1-8b-instant",                         # official gemma2 replacement
-        "meta-llama/llama-4-scout-17b-16e-instruct",    # Llama 4 Scout — very fast
+        # Tier 2: Lightweight / Fast
+        "llama-3.1-8b-instant",                        # fastest
+        "gemma2-9b-it",                                # another fast option
     ]
 
     for model in GROQ_MODELS:
@@ -601,11 +594,12 @@ def _llm(client, msgs, max_tokens=900):
             return r.choices[0].message.content
         except Exception as e:
             err = str(e).lower()
-            # Hard stop on auth errors — no point retrying other models
+            # Hard stop on auth errors
             if any(x in err for x in ("api key", "unauthorized", "401", "invalid_api_key")):
                 st.error("❌ Invalid GROQ_API_KEY. Check your .env or secrets.toml.")
                 st.stop()
-            # Rate limit / model unavailable → silently try next model
+            # Otherwise, log error (optional) and continue
+            # print(f"Model {model} failed: {e}")  # uncomment for debugging
             continue
 
     return "⚠️ All Groq models are currently rate-limited. Please wait a moment and try again."
