@@ -844,7 +844,7 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
         f"  Seniority: {user_profile.get('seniority_level','')}\n"
         f"  Roles: {user_profile.get('interested_roles',[])}\n\n"
         f"Candidates ({len(compact)}):\n"
-        f"{json.dumps(compact, indent=2)[:4500]}\n\n"
+        f"{json.dumps(compact, indent=2)[:12000]}\n\n"
         "Return ONLY the JSON array."
     )
 
@@ -1248,7 +1248,7 @@ def _sidebar():
             skills = []
             if st.session_state.cv_analysis:
                 a = st.session_state.cv_analysis.get("analysis",{})
-                if isinstance(a,dict): skills = a.get("skills",[])[:6]
+                if isinstance(a,dict): skills = a.get("skills",[])
             try:
                 if HAS_SCRAPER:
                     _ds.scrape_and_save(skills=skills or None, status_ph=ph)
@@ -1660,7 +1660,7 @@ def _tab_jobs():
                     )
 
             ph_wrapper = _PH()
-            ph_wrapper.info(f"🎯 Scraping jobs for: {', '.join(skills[:5])}")
+            ph_wrapper.info(f"🎯 Scraping jobs for: {', '.join(skills)}")
             if location_pref and location_pref != "Remote":
                 ph_wrapper.info(f"📍 Location filter: {location_pref}")
             try:
