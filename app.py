@@ -228,6 +228,28 @@ section.main > div { padding: 0 !important; }
   color: var(--t1) !important;
 }
 
+/* Chip buttons (location quick-select) */
+[data-testid="stTabPanel"] [data-testid="stButton"][id*="loc_chip_"] > button,
+div[data-testid="column"] button[kind="secondary"] {
+  background: var(--bg4) !important;
+  border: 1px solid var(--bdr2) !important;
+  color: var(--t2) !important;
+  font-size: 11.5px !important;
+  font-weight: 600 !important;
+  padding: 6px 8px !important;
+  box-shadow: none !important;
+  border-radius: var(--rs) !important;
+  letter-spacing: 0 !important;
+  transform: none !important;
+}
+div[data-testid="column"] button[kind="secondary"]:hover {
+  background: var(--bg5) !important;
+  border-color: var(--goldb) !important;
+  color: var(--gold) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
 /* ── Primary button ─────────────────────────────────────────────────────── */
 .stButton > button {
   background: linear-gradient(135deg, #C8850A, #F4B942) !important;
@@ -1511,41 +1533,59 @@ def _tab_jobs():
             "Mobile Developer","Cloud Architect","QA Engineer",
         ], key="js_roles")
 
-    loc_col1, loc_col2 = st.columns([2, 3])
-    with loc_col1:
-        loc_preset = st.selectbox(
-            "📍 Location Preference",
-            ["Egypt 🇪🇬","Remote / Worldwide","Cairo","Alexandria",
-             "United States","United Kingdom","Germany","Custom…"],
-            key="js_loc_preset",
-        )
-    with loc_col2:
-        if loc_preset == "Custom…":
-            location_pref = st.text_input(
-                "Enter location", placeholder="e.g. Dubai, Netherlands", key="js_loc_custom"
-            ).strip()
-        elif loc_preset == "Remote / Worldwide":
-            location_pref = "Remote"
-            st.markdown(
-                '<div style="padding-top:30px;color:var(--t3);font-size:12px">'
-                '🌍 Includes jobs open to worldwide candidates</div>',
-                unsafe_allow_html=True,
-            )
-        elif loc_preset == "Egypt 🇪🇬":
-            location_pref = "Egypt"
-            st.markdown(
-                '<div style="padding-top:30px;color:var(--amb);font-size:12px">'
-                '🇪🇬 Wuzzuf scraped · Cairo / Giza / Alexandria all match</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            location_pref = loc_preset
-            st.markdown(
-                f'<div style="padding-top:30px;color:var(--t3);font-size:12px">'
-                f'Jobs near <strong style="color:var(--gold)">{location_pref}</strong>'
-                f' will be prioritised</div>',
-                unsafe_allow_html=True,
-            )
+    # ── Location: free-text input with quick-select chips ────────────────
+    st.markdown(
+        '<div style="margin-top:14px">'
+        '<div style="font-size:12px;font-weight:600;letter-spacing:.04em;'
+        'text-transform:uppercase;color:var(--t2);margin-bottom:8px">'
+        '📍 Where do you want to work?</div>',
+        unsafe_allow_html=True,
+    )
+
+    QUICK_LOCS = [
+        ("🇪🇬 Egypt",   "Egypt"),
+        ("🌍 Remote",   "Remote"),
+        ("🇺🇸 USA",     "United States"),
+        ("🇬🇧 UK",      "United Kingdom"),
+        ("🇦🇪 UAE",     "United Arab Emirates"),
+        ("🇩🇪 Germany", "Germany"),
+        ("🇸🇦 KSA",     "Saudi Arabia"),
+        ("🇨🇦 Canada",  "Canada"),
+    ]
+
+    chip_cols = st.columns(len(QUICK_LOCS))
+    for idx, (label, val) in enumerate(QUICK_LOCS):
+        with chip_cols[idx]:
+            if st.button(label, key=f"loc_chip_{idx}", use_container_width=True):
+                st.session_state["js_loc_text"] = val
+
+    if "js_loc_text" not in st.session_state:
+        st.session_state["js_loc_text"] = "Egypt"
+
+    location_pref = st.text_input(
+        "location_text",
+        value=st.session_state["js_loc_text"],
+        placeholder="Type any country, city, or 'Remote'…",
+        label_visibility="collapsed",
+        key="js_loc_text",
+    ).strip()
+
+    loc_lower_hint = location_pref.lower()
+    if not location_pref:
+        hint = '<span style="color:var(--t3)">No location set — results will be worldwide</span>'
+    elif loc_lower_hint in {"remote", "worldwide", "anywhere"}:
+        hint = '🌍 <span style="color:var(--t2)">Searching globally for remote-friendly roles</span>'
+    elif loc_lower_hint in EGYPT_ALIASES:
+        hint = '🇪🇬 <span style="color:var(--amb)">Egypt selected · Wuzzuf scraped · Cairo / Giza / Alexandria all match</span>'
+    else:
+        hint = (f'🔍 Searching jobs in <strong style="color:var(--gold)">'
+                f'{html.escape(location_pref)}</strong>')
+
+    st.markdown(
+        f'<div style="font-size:12px;color:var(--t2);margin-top:6px;margin-bottom:4px">'
+        f'{hint}</div></div>',
+        unsafe_allow_html=True,
+    )
 
     st.session_state.job_location_pref = location_pref
     skills = [s.strip() for s in (sr or "").split("\n") if s.strip()]
