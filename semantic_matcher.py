@@ -9,11 +9,17 @@ Fix vs v1:
     genuinely rank below local and remote options.
   • Remote/worldwide jobs get a +0.08 nudge (was +0.06).
 
+BUG #6 FIX:
+  • _load_model() checks DISABLE_SEMANTIC env var before downloading the
+    ~90MB model. Set DISABLE_SEMANTIC=true in Streamlit Cloud secrets to
+    avoid OOM crashes on the free tier (no persistent storage = re-download
+    on every cold start, often exceeding the ~1GB memory limit).
+
 Pipeline position
 -----------------
-Stage 0  SemanticMatcher.rank()         → semantic top-100  (this file)
+Stage 0  SemanticMatcher.rank()           → semantic top-100  (this file)
 Stage 1  matching_engine.score_and_rank() → diverse top-30
-Stage 2  Groq LLM                       → explanation top-8
+Stage 2  Groq LLM                         → explanation top-8
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -137,9 +144,21 @@ class SemanticMatcher:
         self._cache      = _EmbedCache()
         self._cache.load()
 
+    # ── BUG #6 FIX: check DISABLE_SEMANTIC before downloading the model ───
     def _load_model(self):
         if self._model is not None:
             return
+
+        # Allow operators to disable semantic matching via env var.
+        # Set DISABLE_SEMANTIC=true in Streamlit Cloud secrets to prevent the
+        # ~90MB model from being re-downloaded on every cold start, which
+        # exhausts the ~1GB memory limit on the free tier.
+        if os.getenv("DISABLE_SEMANTIC", "false").lower() == "true":
+            raise ImportError(
+                "Semantic matching disabled via DISABLE_SEMANTIC=true env var. "
+                "Remove or set to 'false' to re-enable."
+            )
+
         try:
             from sentence_transformers import SentenceTransformer
             logger.info(f"Loading sentence-transformer model: {self._model_name}")
@@ -189,7 +208,7 @@ class SemanticMatcher:
         """
         Rank all jobs by semantic similarity, then apply location boost/penalty.
 
-        FIX v2: location scoring is now meaningful:
+        Location scoring (v2):
           +0.30  for exact location match (was +0.10)
           +0.30  for Egypt alias match OR Wuzzuf source when pref is Egypt
           +0.08  for remote/worldwide (was +0.06)

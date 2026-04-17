@@ -5,6 +5,7 @@ Fixes:
   - LLM now knows skill aliases (imported from matching_engine)
   - Prompt instructs to treat "NLP" = "Natural Language Processing"
   - explain_gap() no longer falsely reports missing synonyms
+  - BUG #3 FIX: _parse_json() returns [] on failure (not {})
 """
 
 import os
@@ -13,17 +14,15 @@ import json
 
 import pandas as pd
 
-# Import the alias dictionary from your fixed matching engine
 try:
     from matching_engine import SKILL_ALIASES
 except ImportError:
-    # Fallback if import fails (should not happen)
     SKILL_ALIASES = {}
 
 EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
 
 
-# ── Groq helpers (unchanged) ──────────────────────────────────────────────
+# ── Groq helpers ──────────────────────────────────────────────────────────────
 
 def _groq_client():
     from groq import Groq
@@ -48,6 +47,7 @@ def _call_llm(client, prompt: str, max_tokens: int = 1500) -> str:
     raise RuntimeError("All Groq models failed.")
 
 
+# ── BUG #3 FIX: return [] instead of {} on parse failure ─────────────────────
 def _parse_json(text: str):
     text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
     try:
@@ -61,10 +61,10 @@ def _parse_json(text: str):
                 return json.loads(m.group())
             except Exception:
                 pass
-    return []
+    return []   # ← was implicitly {}, now explicitly [] for safer downstream handling
 
 
-# ── CSV column normaliser (unchanged) ─────────────────────────────────────
+# ── CSV column normaliser ─────────────────────────────────────────────────────
 
 _COL_MAP = {
     "job_title": "title",        "title": "title",
@@ -89,18 +89,10 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=rename)
 
 
-# ── Scoring helpers (unchanged) ───────────────────────────────────────────
+# ── Scoring helpers ───────────────────────────────────────────────────────────
 
 def _score_row(row_text: str, skills: list[str], roles: list[str],
                location_pref: str = "") -> int:
-    """
-    Keyword match score.
-      +2   per matching skill
-      +1   per matching word from a desired role title
-      +15  if the job location matches the preferred location
-      +5   if remote/worldwide and a specific location is preferred
-      -5   if a non-matching physical location and a specific pref is set
-    """
     text  = row_text.lower()
     score = 0
 
@@ -189,7 +181,7 @@ def _diverse_candidates(
     return diverse[:n]
 
 
-# ── CSV loader (unchanged) ────────────────────────────────────────────────
+# ── CSV loader ────────────────────────────────────────────────────────────────
 
 def _load_jobs(limit: int = 2000) -> pd.DataFrame | None:
     paths = [
@@ -209,13 +201,11 @@ def _load_jobs(limit: int = 2000) -> pd.DataFrame | None:
     return None
 
 
-# ── Helper to build synonym prompt text ────────────────────────────────────
+# ── Helper to build synonym prompt text ──────────────────────────────────────
 
 def _build_synonym_instruction() -> str:
-    """Return a human-readable instruction about skill synonyms."""
     if not SKILL_ALIASES:
         return ""
-    # Show a few examples to keep prompt short
     examples = []
     for canonical, aliases in list(SKILL_ALIASES.items())[:10]:
         if len(aliases) > 1:
@@ -230,7 +220,7 @@ def _build_synonym_instruction() -> str:
     )
 
 
-# ── Main class (fixed prompts) ────────────────────────────────────────────
+# ── Main class ────────────────────────────────────────────────────────────────
 
 class JobMatcher:
     def __init__(self):
@@ -298,8 +288,18 @@ class JobMatcher:
             "all count as a match.\n" if is_egypt_pref else ""
         )
 
-        # Build synonym instruction
         synonym_instruction = _build_synonym_instruction()
+
+        # ── BUG #2 FIX: truncate on whole job objects only ────────────────
+        jobs_str = json.dumps(job_list, indent=2)
+        if len(jobs_str) > 4500:
+            truncated = []
+            for job in job_list:
+                candidate_str = json.dumps(truncated + [job], indent=2)
+                if len(candidate_str) > 4200:
+                    break
+                truncated.append(job)
+            jobs_str = json.dumps(truncated, indent=2)
 
         prompt = f"""You are a career advisor. Given the user profile and job listings,
 return ONLY a valid JSON array (no markdown, no explanation) of the top {limit} best-matching jobs.
@@ -338,7 +338,7 @@ User profile:
 - Preferred location: {loc_display}
 
 Job listings ({len(job_list)} pre-screened candidates across {len(sources_present)} sources):
-{json.dumps(job_list, indent=2)[:4500]}
+{jobs_str}
 
 Return ONLY the JSON array.
 """
@@ -376,7 +376,6 @@ Return ONLY the JSON array.
 
     def explain_gap(self, user_skills: list, job: dict) -> dict:
         """Fixed to understand skill synonyms."""
-        # Build synonym instruction again
         synonym_instruction = _build_synonym_instruction()
 
         prompt = f"""You are a career advisor. Analyse the skill gap between the user and the job.

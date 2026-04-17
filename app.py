@@ -9,6 +9,13 @@ Redesigned from Career AI Assistant v7.1
   • Refined geometric micro-details
   • match_jobs() URL lookup keyed by (title, company)
   • URL verification REPLACES hallucinated LLM URLs
+
+Bug fixes applied:
+  #1 - job_matcher.py is now imported and used (no longer dead code)
+  #2 - JSON truncation now cuts on whole job objects only
+  #3 - _parse_json() returns [] on failure (not {})
+  #4 - db_checked only set to True on successful build (retries on failure)
+  #5 - Fallback candidate path now uses SKILL_ALIASES via matching_engine
 """
 
 import os, re, json, html, datetime, time
@@ -48,6 +55,13 @@ try:
     HAS_SEMANTIC = True
 except ImportError:
     HAS_SEMANTIC = False
+
+# ── BUG #1 FIX: Import JobMatcher so job_matcher.py is no longer dead code ──
+try:
+    from job_matcher import JobMatcher
+    HAS_JOB_MATCHER = True
+except ImportError:
+    HAS_JOB_MATCHER = False
 
 EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
 
@@ -573,14 +587,11 @@ def _llm(client, msgs, max_tokens=900):
     Tries models from best quality → fastest, all on the same API key.
     """
     GROQ_MODELS = [
-        # Tier 1: Production (stable, best quality)
-        "llama-3.3-70b-versatile",                     # your current primary
-        "deepseek-r1-distill-llama-70b",               # great for reasoning
-        "qwen-qwen2-5-72b",                            # high-quality alternative
-
-        # Tier 2: Lightweight / Fast
-        "llama-3.1-8b-instant",                        # fastest
-        "gemma2-9b-it",                                # another fast option
+        "llama-3.3-70b-versatile",
+        "deepseek-r1-distill-llama-70b",
+        "qwen-qwen2-5-72b",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
     ]
 
     for model in GROQ_MODELS:
@@ -594,26 +605,29 @@ def _llm(client, msgs, max_tokens=900):
             return r.choices[0].message.content
         except Exception as e:
             err = str(e).lower()
-            # Hard stop on auth errors
             if any(x in err for x in ("api key", "unauthorized", "401", "invalid_api_key")):
                 st.error("❌ Invalid GROQ_API_KEY. Check your .env or secrets.toml.")
                 st.stop()
-            # Otherwise, log error (optional) and continue
-            # print(f"Model {model} failed: {e}")  # uncomment for debugging
             continue
 
     return "⚠️ All Groq models are currently rate-limited. Please wait a moment and try again."
 
+
+# ── BUG #3 FIX: return [] instead of {} on parse failure ──────────────────
 def _parse_json(text):
     text = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
-    try: return json.loads(text)
-    except Exception: pass
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
     for pat in [r"\[.*\]", r"\{.*\}"]:
         m = re.search(pat, text, re.DOTALL)
         if m:
-            try: return json.loads(m.group())
-            except Exception: pass
-    return {}
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+    return []   # ← was {}, now [] so downstream isinstance(matches, list) is safer
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -639,24 +653,30 @@ def _cache_fresh() -> bool:
            datetime.datetime.fromtimestamp(COMBINED.stat().st_mtime)).total_seconds()
     return age < CACHE_HOURS * 3600
 
+
+# ── BUG #4 FIX: db_checked only set on success; retries on next load if failed
 def _auto_build():
-    if st.session_state.get("db_checked"): return
-    st.session_state.db_checked = True
-    if _cache_fresh(): return
-    with st.sidebar:
-        ph = st.empty()
-        ph.warning("🔄 Building job database…")
-        try:
+    if st.session_state.get("db_checked"):
+        return
+    try:
+        if _cache_fresh():
+            st.session_state.db_checked = True
+            return
+        with st.sidebar:
+            ph = st.empty()
+            ph.warning("🔄 Building job database…")
             if HAS_SCRAPER:
                 _ds.scrape_and_save(status_ph=ph)
             else:
                 _fallback_build(ph)
             ph.success("✅ Job database ready")
             time.sleep(2)
-        except Exception as e:
-            ph.warning(f"⚠️ {e}")
-        finally:
             ph.empty()
+        st.session_state.db_checked = True   # ← only set after successful build
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ Auto-build failed: {e}")
+        # db_checked intentionally NOT set → will retry on next load
+
 
 def _fallback_build(ph=None):
     import requests, pandas as pd
@@ -680,18 +700,41 @@ def _fallback_build(ph=None):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Diverse candidate selection
+# Diverse candidate selection (fallback only — used when engine unavailable)
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ── BUG #5 FIX: import SKILL_ALIASES so this fallback path also benefits ──
+try:
+    from matching_engine import SKILL_ALIASES as _SKILL_ALIASES
+except ImportError:
+    _SKILL_ALIASES = {}
+
+def _expand_skills(skills: list) -> list:
+    """Expand user skills to include all known synonyms for broader matching."""
+    expanded = set(s.lower() for s in skills)
+    for skill in skills:
+        canonical = skill.lower().strip()
+        # Check if this skill maps to a canonical form
+        for canon, aliases in _SKILL_ALIASES.items():
+            if canonical in [a.lower() for a in aliases] or canonical == canon:
+                expanded.update(a.lower() for a in aliases)
+                expanded.add(canon)
+    return list(expanded)
+
 def _diverse_candidates(jobs, skills, roles, location_pref="", n=30):
     loc_lower     = location_pref.lower() if location_pref else ""
     is_egypt_pref = loc_lower in EGYPT_ALIASES
+
+    # BUG #5 FIX: expand skills with aliases before scoring
+    expanded_skills = _expand_skills(skills)
 
     def _score(j):
         blob = (str(j.get("title","")) + " " +
                 str(j.get("description","")) + " " +
                 str(j.get("location",""))).lower()
         src  = str(j.get("source","")).lower()
-        s    = sum(2 for sk in skills if sk.lower() in blob)
+        # Use expanded skills (includes synonyms) for matching
+        s    = sum(2 for sk in expanded_skills if sk in blob)
         s   += sum(1 for ro in roles for w in ro.lower().split()
                    if len(w) > 3 and w in blob)
         if loc_lower:
@@ -740,7 +783,18 @@ def _diverse_candidates(jobs, skills, roles, location_pref="", n=30):
 # ══════════════════════════════════════════════════════════════════════════════
 # Job matching  –  3-stage pipeline
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ── BUG #1 FIX: route through JobMatcher when available ───────────────────
 def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> dict:
+    # If job_matcher.py is importable, delegate to it (fixes dead code bug)
+    if HAS_JOB_MATCHER:
+        try:
+            matcher = JobMatcher()
+            return matcher.match_jobs(user_profile, limit=limit, location_pref=location_pref)
+        except Exception:
+            pass  # fall through to inline implementation below
+
+    # ── Inline fallback (used only when job_matcher.py is unavailable) ────
     all_jobs = _load_combined()
     if not all_jobs:
         return {"success": False,
@@ -815,6 +869,17 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
         if is_egypt_pref else ""
     )
 
+    # ── BUG #2 FIX: truncate on whole job objects only ────────────────────
+    jobs_str = json.dumps(compact, indent=2)
+    if len(jobs_str) > 12000:
+        truncated = []
+        for job in compact:
+            candidate_str = json.dumps(truncated + [job], indent=2)
+            if len(candidate_str) > 11500:
+                break
+            truncated.append(job)
+        jobs_str = json.dumps(truncated, indent=2)
+
     client = _groq()
     prompt = (
         f"You are a career advisor. Return ONLY a valid JSON array of the top {limit} best-matching jobs.\n"
@@ -838,7 +903,7 @@ def match_jobs(user_profile: dict, limit: int = 8, location_pref: str = "") -> d
         f"  Seniority: {user_profile.get('seniority_level','')}\n"
         f"  Roles: {user_profile.get('interested_roles',[])}\n\n"
         f"Candidates ({len(compact)}):\n"
-        f"{json.dumps(compact, indent=2)[:12000]}\n\n"
+        f"{jobs_str}\n\n"   # ← uses safely truncated string (Bug #2 fix)
         "Return ONLY the JSON array."
     )
 
@@ -1146,7 +1211,6 @@ def _src_badge(source: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 def _sidebar():
     with st.sidebar:
-        # ── Brand ────────────────────────────────────────────────────────
         st.markdown("""
 <div class="dal-sbar-logo">
   <div style="display:flex;align-items:center;gap:12px">
@@ -1173,7 +1237,6 @@ def _sidebar():
 
         st.markdown("<div style='padding:12px 16px 0'>", unsafe_allow_html=True)
 
-        # ── Status metrics ───────────────────────────────────────────────
         st.markdown('<div class="slbl">System Status</div>', unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         with c1: st.metric("Groq AI",  "🟢 Ready" if _key()       else "🔴 Missing")
@@ -1185,7 +1248,6 @@ def _sidebar():
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
-        # ── Pipeline ─────────────────────────────────────────────────────
         st.markdown('<div class="slbl">Matching Pipeline</div>', unsafe_allow_html=True)
         for lbl, active, tip in [
             ("🧠 Semantic (embeddings)", HAS_SEMANTIC, "pip install sentence-transformers"),
@@ -1204,7 +1266,6 @@ def _sidebar():
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
-        # ── Job sources ──────────────────────────────────────────────────
         st.markdown('<div class="slbl">Job Sources</div>', unsafe_allow_html=True)
         src_counts = {}
         if HAS_SCRAPER and COMBINED.exists():
@@ -1229,7 +1290,6 @@ def _sidebar():
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
-    # ── Database controls ────────────────────────────────────────────
         st.markdown('<div class="slbl">Database</div>', unsafe_allow_html=True)
         if COMBINED.exists():
             age_h = (datetime.datetime.now() -
@@ -1268,7 +1328,6 @@ def _sidebar():
 
         st.markdown('<div class="sdiv"></div>', unsafe_allow_html=True)
 
-        # ── Progress ─────────────────────────────────────────────────────
         st.markdown('<div class="slbl">Your Progress</div>', unsafe_allow_html=True)
         for lbl, done in [
             ("📄 CV analyzed",    st.session_state.cv_analysis   is not None),
@@ -1574,7 +1633,6 @@ def _tab_jobs():
             "Mobile Developer","Cloud Architect","QA Engineer",
         ], key="js_roles")
 
-    # ── Location: free-text input with quick-select chips ────────────────
     st.markdown(
         '<div style="margin-top:14px">'
         '<div style="font-size:12px;font-weight:600;letter-spacing:.04em;'
