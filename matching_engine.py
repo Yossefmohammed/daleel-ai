@@ -1,7 +1,9 @@
 """
-matching_engine.py  –  Career AI  (Stage 1: Deterministic Keyword Scorer - IMPROVED)
+matching_engine.py – Career AI (Stage 1: Deterministic Keyword Scorer - IMPROVED)
 =====================================================================================
 FIXES:
+- BUG 2 FIX: _loc_score now correctly handles Remote preference as PRIMARY target
+             (previously "remote" was treated the same as a city name, giving wrong results)
 - Expanded skill alias dictionary (50+ common tech synonyms)
 - Bidirectional alias resolution (user skill → canonical form)
 - Fuzzy matching fallback (catches typos & abbreviations)
@@ -17,7 +19,7 @@ from typing import Tuple, List
 EGYPT_ALIASES = {"egypt", "cairo", "giza", "alexandria", "مصر", "القاهرة"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Skill aliases – EXTENDED (FIX #1)
+# Skill aliases – EXTENDED
 # Format: canonical_skill -> [list of synonyms, including acronyms, common typos]
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -78,16 +80,16 @@ SKILL_ALIASES = {
     "agile": ["agile", "scrum", "kanban", "sprint", "jira", "agile methodology"],
 }
 
-# Seniority keywords (unchanged)
+# Seniority keywords
 _JUNIOR_KW = {"junior", "entry", "graduate", "intern", "trainee", "jr"}
 _SENIOR_KW = {"senior", "lead", "staff", "principal", "sr", "sr.", "architect"}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _blob(job: dict) -> str:
-    """Combine job fields into a single lowercase string for matching."""
     return " ".join([
         str(job.get("title", "")),
         str(job.get("description", "")),
@@ -95,108 +97,84 @@ def _blob(job: dict) -> str:
         str(job.get("company", "")),
     ]).lower()
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Skill normalization (bidirectional alias resolution)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _canonical_skill(skill: str) -> str:
-    """
-    Convert any skill (user input or job text) to its canonical form.
-    Example: "NLP" -> "natural language processing", "js" -> "javascript"
-    """
+    """Convert any skill to its canonical form. Example: 'NLP' -> 'natural language processing'"""
     skill_lower = skill.lower().strip()
-    
-    # First, check if it's already a canonical key
     if skill_lower in SKILL_ALIASES:
         return skill_lower
-    
-    # Second, search through all alias lists
     for canonical, aliases in SKILL_ALIASES.items():
         if skill_lower in aliases:
             return canonical
-    
-    # No alias found – return original (lowercased)
     return skill_lower
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fuzzy matching helper
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fuzzy_match(word1: str, word2: str, threshold: float = 0.85) -> bool:
-    """Check if two strings are similar enough using difflib."""
     return difflib.SequenceMatcher(None, word1, word2).ratio() >= threshold
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Improved skill matching (FIX #2 & #3)
+# Improved skill matching
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _match_skill(blob: str, skill: str) -> float:
-    """
-    Match a skill against the job blob.
-    Returns score > 0 if matched (exact alias, partial, or fuzzy).
-    """
     if not skill:
         return 0.0
-    
-    # Get canonical form and its aliases
+
     canonical = _canonical_skill(skill)
-    aliases = SKILL_ALIASES.get(canonical, [canonical])
-    
-    # Also include the canonical itself if not already in aliases
+    aliases = list(SKILL_ALIASES.get(canonical, [canonical]))
+
     if canonical not in aliases:
         aliases.append(canonical)
-    
-    # Also include the original user skill (might be a typo)
     original_lower = skill.lower().strip()
     if original_lower not in aliases:
         aliases.append(original_lower)
-    
+
     blob_words = blob.split()
-    
+
     for alias in aliases:
-        # 1. Exact word match (with word boundaries)
         if re.search(rf"\b{re.escape(alias)}\b", blob):
-            # Boost for core skills like python
             if canonical == "python":
                 return 2.0
             return 1.5
-        
-        # 2. Partial match (alias is substring of blob)
         if alias in blob:
             return 0.75
-    
-    # 3. Fuzzy fallback – compare alias against each blob word
+
     for alias in aliases:
         for blob_word in blob_words:
             if len(alias) > 3 and len(blob_word) > 3 and _fuzzy_match(alias, blob_word):
                 return 0.6
-    
+
     return 0.0
 
 
 def _skill_score(blob: str, skills: List[str]) -> Tuple[float, List[str]]:
-    """
-    Compute total skill score and list of matched skills (original user strings).
-    """
     if not skills:
         return 0.0, []
-    
+
     total = 0.0
     matched = []
-    
     for skill in skills:
         score = _match_skill(blob, skill)
         if score > 0:
             total += score
             matched.append(skill)
-    
-    # Normalize score – prevent dilution from too many skills
+
     norm = max(min(len(skills), 10), 1)
     raw = total / norm
     return min(raw, 1.0), matched
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Other scoring functions (unchanged, but kept for completeness)
+# Other scoring functions
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _role_score(blob: str, roles: List[str]) -> float:
@@ -218,7 +196,7 @@ def _exp_score(blob: str, seniority: str) -> float:
         job_level = "senior"
     elif any(k in text for k in _JUNIOR_KW):
         job_level = "junior"
-    
+
     user_level = seniority.lower()
     if "senior" in user_level:
         user_band = "senior"
@@ -226,7 +204,7 @@ def _exp_score(blob: str, seniority: str) -> float:
         user_band = "junior"
     else:
         user_band = "mid"
-    
+
     levels = ["junior", "mid", "senior"]
     if user_band == job_level:
         return 1.0
@@ -238,47 +216,61 @@ def _exp_score(blob: str, seniority: str) -> float:
 def _loc_score(job: dict, loc_lower: str) -> float:
     if not loc_lower:
         return 0.65
+
     jloc = (job.get("location", "") or "").lower()
     jsrc = (job.get("source", "") or "").lower()
-    is_remote = "remote" in jloc or "worldwide" in jloc
+    is_remote_job = "remote" in jloc or "worldwide" in jloc or "work from home" in jloc
+
     is_egypt_pref = loc_lower in EGYPT_ALIASES
+    # ── BUG 2 FIX: explicit remote preference detection ──────────────────────
+    is_remote_pref = "remote" in loc_lower or "worldwide" in loc_lower
+
+    if is_remote_pref:
+        # Remote is the PRIMARY goal — remote jobs score 1.0, on-site score 0.0
+        if is_remote_job:
+            return 1.0
+        return 0.0
+
     if is_egypt_pref:
         if any(a in jloc for a in EGYPT_ALIASES) or jsrc == "wuzzuf":
             return 1.0
-        if is_remote:
-            return 0.55
-        return 0.0
-    else:
-        if loc_lower in jloc:
-            return 1.0
-        if is_remote:
-            return 0.55
+        if is_remote_job:
+            return 0.55   # remote acceptable as secondary for Egypt preference
         return 0.0
 
+    # Physical city / country preference
+    if loc_lower in jloc:
+        return 1.0
+    if is_remote_job:
+        return 0.55
+    return 0.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Main scoring function (returns matched AND correctly computed missing)
+# Main scoring function
 # ─────────────────────────────────────────────────────────────────────────────
 
 def score_job(job: dict, user_profile: dict, location_pref: str = ""):
     skills = [s.strip() for s in user_profile.get("skills", []) if s.strip()]
     roles = [r.strip() for r in user_profile.get("interested_roles", []) if r.strip()]
     seniority = str(user_profile.get("seniority_level", "mid-level"))
-    
+
     blob = _blob(job)
-    
     sk_raw, matched = _skill_score(blob, skills)
-    # FIX #4: missing skills = skills that are NOT in matched (correct now)
+
+    # missing skills = skills NOT matched (correct — no false positives)
     missing = [s for s in skills if s not in matched]
-    
+
     ro_raw = _role_score(blob, roles)
     ex_raw = _exp_score(blob, seniority)
     lc_raw = _loc_score(job, location_pref.lower())
-    
+
     score = (sk_raw * 50) + (ro_raw * 20) + (ex_raw * 15) + (lc_raw * 15)
     return round(score, 2), matched, missing
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Ranking (unchanged)
+# Ranking
 # ─────────────────────────────────────────────────────────────────────────────
 
 def score_and_rank(
@@ -290,23 +282,24 @@ def score_and_rank(
 ) -> List[dict]:
     if not jobs:
         return []
-    
+
     scored = []
     for job in jobs:
         s, matched, missing = score_job(job, user_profile, location_pref)
         scored.append((s, matched, missing, job))
-    
+
     scored.sort(key=lambda x: x[0], reverse=True)
-    
+
     buckets = {}
     for s, matched, missing, job in scored:
         src = job.get("source", "Unknown")
         buckets.setdefault(src, [])
         if len(buckets[src]) < source_cap:
             buckets[src].append((s, matched, missing, job))
-    
+
     diverse = []
     seen = set()
+
     for rnd in range(source_cap):
         for src_list in buckets.values():
             if rnd < len(src_list):
@@ -321,4 +314,5 @@ def score_and_rank(
                     diverse.append(out)
             if len(diverse) >= top_n:
                 break
+
     return diverse[:top_n]
