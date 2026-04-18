@@ -1,38 +1,93 @@
-# Environment
+# ══════════════════════════════════════════════════════════════════════════════
+# Daleel AI - Security-First .gitignore
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── SECRETS & API KEYS (CRITICAL - NEVER COMMIT) ──────────────────────────────
 .env
+.env.local
+.env.*.local
 .streamlit/secrets.toml
+*.key
+*.pem
+secrets/
+credentials/
 
-# Database (auto-generated)
-db/
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
-
-# Temp files
-temp_*.pdf
-tmp_*.pdf
-
-# Data (large files)
-data/jobs.csv
-
-# Python
-.venv/
-venv/
-*.egg-info/
-dist/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# OS
-.DS_Store
-Thumbs.db
+# ── Virtual Environments ──────────────────────────────────────────────────────
+venv/
+ENV/
+env/
+.venv/
 
-# IDE
+# ── IDEs ──────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.DS_Store
 
-# Chat logs (optional to exclude)
-# chat_history.csv
-# feedback.csvchat_history.csv
+# ── Databases & Caches ────────────────────────────────────────────────────────
+db/*.sqlite3
+db/chroma.sqlite3
+*.db
+*.sqlite
+.chroma/
+chroma_data/
+
+# ── Logs & Temporary Files ────────────────────────────────────────────────────
+*.log
+logs/
+temp/
+tmp/
+*.tmp
+
+# ── User Data (should be in persistent storage, not git) ──────────────────────
+chat_history.csv
 feedback.csv
-db/
-temp_*.pdf
+data/jobs_combined.csv
+data/jobs_*.csv
+uploads/
+
+# ── Model Artifacts (large files) ─────────────────────────────────────────────
+*.bin
+*.pkl
+*.h5
+*.onnx
+models/
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ── Jupyter Notebooks ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS Generated ──────────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
